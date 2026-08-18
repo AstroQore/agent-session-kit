@@ -21,7 +21,7 @@ No third-party dependencies. Foundation, Darwin, and the system SQLite.
 | Target | What it is |
 | ------ | ---------- |
 | `AgentSessionKit` | Discovery, parsing, deletion planning, the FTS5 session index, and the MCP Unix-socket / stdio transport. |
-| `AgentSessionLive` | Live views over the same stores — file watching and incremental tailing. Placeholder today. |
+| `AgentSessionLive` | Live views over the same stores — the unified event model, the state reducer, and the tailing protocols. |
 
 Requires macOS 26 and Swift 6.2.
 
@@ -130,6 +130,55 @@ if MCPStdioBridge.isRequested(config) { exit(MCPStdioBridge.run(config)) }
 `MCPJSON`, `MCPRequest`, `MCPResponse`, `MCPTool`, `MCPResource`, and
 `MCPArguments` are here too, so a host writes its tool catalog and its
 dispatch and nothing else.
+
+## AgentSessionLive
+
+`AgentSessionKit` answers "what is on disk right now". `AgentSessionLive`
+answers "tell me when it changes" — the layer a live board of running agents
+is built on. Eight harnesses write eight unrelated formats, so it funnels all
+of them into one vocabulary and lets everything downstream speak only that.
+
+```swift
+import AgentSessionLive
+
+// A session is a harness plus that harness's own id.
+let key = SessionKey(harness: .claudeCode, sessionID: "3f2b…")   // "claudeCode:3f2b…"
+
+// Adapters turn source records into one harness-agnostic event type.
+let event = AgentEvent(
+    session: key,
+    timestamp: lineDate,
+    kind: .toolCallStarted(id: "toolu_1", name: "Bash", kind: .shell, target: "swift test")
+)
+
+// A pure reducer folds events into the row a board renders.
+let reducer = SessionStateReducer(staleAfter: 90)
+snapshot = reducer.reduce(snapshot, event: event)
+
+snapshot.state.label      // "Tool: Bash"
+snapshot.state.sortRank   // blocked sessions sort above busy ones
+snapshot.isStale          // working, alive, and silent for too long
+```
+
+`AgentEventKind` is the whole vocabulary: `sessionStarted`, `identityUpdated`,
+`userPrompt`, `turnStarted`, `thinking`, `assistantText`, `toolCallStarted` /
+`toolCallFinished`, `permissionRequested` / `permissionResolved`,
+`subagentStarted` / `subagentFinished`, `turnEnded`, `usage`, `compaction`,
+`sessionEnded`, `liveness`, and `note`. A case exists only where a real store
+records the fact.
+
+`SessionSnapshot` carries the derived `SessionState`, the `PendingSet` of what
+is still open, turn and tool counters, token totals, and the child sessions a
+turn spawned. The reducer is pure and takes its clock as a parameter, so every
+transition — including staleness, and a process that dies and comes back — is
+testable without waiting.
+
+Adapters implement `SourceAdapter` (discovery, watch roots, liveness probing)
+and `SessionTailer` (`poll()` for the steady state, `seedFromTail(maxBytes:)`
+for a bounded cold start), resuming from a persisted `SourceCursor`. Those
+adapters, and the watcher that drives them, are the next change; the protocols
+they implement are here now. Text entering an event goes through `EventText`,
+and anything read from the process table goes through `ArgvSanitizer`.
 
 ## Privacy
 
