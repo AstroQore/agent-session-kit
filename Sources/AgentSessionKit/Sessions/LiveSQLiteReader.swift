@@ -14,23 +14,31 @@ import SQLite3
 /// file (plus its journal siblings) into a private temp directory and read the
 /// copy. The copy is deleted before returning. Nothing here ever opens the
 /// original for writing.
-enum LiveSQLiteReader {
-    enum ReadError: Error {
+/// Public because `AgentSessionLive` tails the same two stores. A live tailer
+/// that reimplemented the open flags, the busy timeout, and the snapshot
+/// fallback would be a second copy of the one piece of this package where
+/// getting it wrong corrupts somebody else's database.
+public enum LiveSQLiteReader {
+    /// Why a read gave up. Never produced for a missing row — only for a
+    /// statement the database refused to prepare or step.
+    public enum ReadError: Error {
+        /// A statement could not be prepared, or stepping it failed with
+        /// something other than "no more rows".
         case statement
     }
 
     /// Maximum rows any single query here will materialize. A conversation
     /// with more rows than this is pathological; truncating keeps a session
     /// list from allocating without bound.
-    static let maxRows = 5_000
+    public static let maxRows = 5_000
     /// Individual payload blobs are a few KB; anything past this is not a
     /// transcript and is skipped rather than copied into memory.
-    static let maxBlobBytes = 4 * 1024 * 1024
+    public static let maxBlobBytes = 4 * 1024 * 1024
 
     /// Run `body` against a read-only handle on `url`, falling back to a
     /// snapshot copy. Returns `nil` when neither route produced a result;
     /// `body` must build its output from scratch so a retry is clean.
-    static func read<T>(at url: URL, _ body: (OpaquePointer) throws -> T) -> T? {
+    public static func read<T>(at url: URL, _ body: (OpaquePointer) throws -> T) -> T? {
         if let handle = open(path: url.path) {
             defer { sqlite3_close_v2(handle) }
             if let value = try? body(handle) { return value }
@@ -93,7 +101,9 @@ enum LiveSQLiteReader {
 
     // MARK: - Statements
 
-    static func prepare(_ database: OpaquePointer, _ sql: String) throws -> OpaquePointer {
+    /// Compiles `sql` against `database`, throwing rather than returning a
+    /// half-built statement. The caller owns the result and must finalize it.
+    public static func prepare(_ database: OpaquePointer, _ sql: String) throws -> OpaquePointer {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
               let statement
@@ -104,14 +114,17 @@ enum LiveSQLiteReader {
         return statement
     }
 
-    static func blob(_ statement: OpaquePointer, _ column: Int32) -> Data? {
+    /// One BLOB column, or `nil` when it is empty, NULL, or larger than
+    /// ``maxBlobBytes``.
+    public static func blob(_ statement: OpaquePointer, _ column: Int32) -> Data? {
         guard let raw = sqlite3_column_blob(statement, column) else { return nil }
         let length = Int(sqlite3_column_bytes(statement, column))
         guard length > 0, length <= maxBlobBytes else { return nil }
         return Data(bytes: raw, count: length)
     }
 
-    static func text(_ statement: OpaquePointer, _ column: Int32) -> String? {
+    /// One TEXT column as a Swift string, or `nil` when it is NULL.
+    public static func text(_ statement: OpaquePointer, _ column: Int32) -> String? {
         guard let raw = sqlite3_column_text(statement, column) else { return nil }
         return String(cString: raw)
     }
