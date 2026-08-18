@@ -1,0 +1,14 @@
+{
+ "pid": 4242,
+ "sessionId": "11111111-2222-3333-4444-555555555555",
+ "cwd": "/Users/example/code/demo",
+ "startedAt": 1767603600000,
+ "procStart": "Mon Jan  5 08:59:59 2026",
+ "version": "2.1.229",
+ "peerProtocol": 1,
+ "kind": "interactive",
+ "entrypoint": "claude-desktop",
+ "messagingSocketPath": "/tmp/cc-socks/4242.sock",
+ "name": "demo-01",
+ "nameSource": "derived"
+}

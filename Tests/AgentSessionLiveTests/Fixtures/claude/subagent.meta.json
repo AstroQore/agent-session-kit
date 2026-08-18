@@ -1,0 +1,7 @@
+{
+ "agentType": "Explore",
+ "description": "Survey the fixture record types",
+ "toolUseId": "toolu_task01",
+ "spawnDepth": 1,
+ "model": "claude-opus-5"
+}
