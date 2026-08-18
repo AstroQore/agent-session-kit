@@ -184,10 +184,50 @@ testable without waiting.
 
 Adapters implement `SourceAdapter` (discovery, watch roots, liveness probing)
 and `SessionTailer` (`poll()` for the steady state, `seedFromTail(maxBytes:)`
-for a bounded cold start), resuming from a persisted `SourceCursor`. The
-per-harness adapters are the next change; everything they plug into is here
-now. Text entering an event goes through `EventText`, and anything read from
-the process table goes through `ArgvSanitizer`.
+for a bounded cold start), resuming from a persisted `SourceCursor`. Text
+entering an event goes through `EventText`, and anything read from the process
+table goes through `ArgvSanitizer`.
+
+### Live adapters
+
+| Harness | Adapter | Store |
+| --- | --- | --- |
+| Claude Code | ✅ `ClaudeLiveAdapter` | `~/.claude/projects/**/*.jsonl`, `~/.claude/sessions` |
+| Codex / ChatGPT Work | — | `~/.codex/sessions` |
+| Claude Cowork | — | `~/Library/Application Support/Claude/local-agent-mode-sessions` |
+| Gemini CLI | — | `~/.gemini/tmp/*/chats` |
+| AntiGravity | — | `~/.gemini/antigravity*/conversations` |
+| Grok Build | — | `~/.grok/sessions/**` |
+| Cursor | — | `~/.cursor/chats/**/store.db` |
+
+```swift
+let adapter = ClaudeLiveAdapter()
+for source in try await adapter.discover(home: home, activeSince: .now - 3600) {
+    let tailer = try adapter.makeTailer(source, cursor: cursors[source.key])
+    for event in try await tailer.poll() {
+        snapshot = reducer.reduce(snapshot, event: event)
+    }
+}
+```
+
+`ClaudeRecordMapper` is the whole translation, and it is pure: one transcript
+line in, zero or more events out, no clock of its own. `ClaudeLiveAdapter`
+owns everything around it — which files are worth tailing, what can be known
+about a session before reading it, and whether its process is still there.
+
+A session counts as active when it was written to since the cutoff *or* when
+`~/.claude/sessions` says a process is driving it; a session that has sat at a
+prompt for an hour is the most live thing on the machine, and a cutoff alone
+would drop exactly the rows a board exists to show. That directory is also
+what liveness rests on, since Claude Code holds no lock on its transcript: the
+entry appears when the process starts and is removed when it exits.
+
+Subagents come back as sessions of their own, keyed
+`claudeCode:<session id>/agent-<agent id>`. The two halves are recorded in two
+files that share nothing but a tool-use id — the parent logs the `Task` call
+and never the child's `agentId`, the child's meta file logs the tool-use id —
+so `ClaudeSubagentLinker` does the join at discovery and the parent's tailer
+reports `subagentStarted` / `subagentFinished` on the parent's stream.
 
 ### Ingest
 

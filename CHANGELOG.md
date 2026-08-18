@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 - `AgentEventKind.textBody(role:text:toolCallID:)` + `TextBodyRole` — full-text bodies for hosts that keep a searchable index; reducer treats it as a heartbeat; adapters cap at `AgentEventKind.textBodyLimit` (32 KiB).
+- **`ClaudeLiveAdapter`** — the first live `SourceAdapter`. Discovers transcripts under `~/.claude/projects` and `~/.config/claude/projects`, counting a session active when it was written to since the cutoff *or* when `~/.claude/sessions` names a process driving it; returns subagent transcripts as sessions of their own, keyed `<session id>/agent-<agent id>`.
+  - `ClaudeRecordMapper` — pure, stateless translation of one transcript line into events: prompts (`isMeta` context excluded), thinking, assistant prose, tool calls normalised to `ToolKind` by `ClaudeToolMapping`, tool results with their `toolUseResult` sidecar text, usage with cache reads and writes folded together, `end_turn` turn ends, compaction, pinned titles, worktree moves, and queued prompts.
+  - `ClaudeTranscriptRecord` — lenient parsing: unknown record types and fields cost nothing, `message.content` is tolerated as a string or a block array, and `tool_use` inputs are narrowed to a whitelist so an `Edit` does not pull a file body into memory.
+  - `ClaudeSessionsDirectory` / `ClaudeLiveSession` — the pid ↔ session ↔ cwd table liveness rests on, since Claude Code holds no lock on its transcript. Its `procStart` is parsed as **UTC**, which is how Claude Code writes it.
+  - `ClaudeSubagentLinker` — joins the parent's `Task` tool-use id to the child's `agent-<id>.meta.json` at discovery, and announces `subagentStarted` / `subagentFinished` on the parent's stream.
+  - `ClaudeProjectPath` — best-effort, file-system-checked decoding of the lossy project-directory encoding, for the last-resort case where neither the sessions entry nor the transcript head names a cwd.
 
 ### Added
 
