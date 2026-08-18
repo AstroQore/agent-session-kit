@@ -194,10 +194,10 @@ table goes through `ArgvSanitizer`.
 | --- | --- | --- |
 | Claude Code | ✅ `ClaudeLiveAdapter` | `~/.claude/projects/**/*.jsonl`, `~/.claude/sessions` |
 | Codex / ChatGPT Work | ✅ `CodexLiveAdapter` | `~/.codex/sessions/**/rollout-*.jsonl`, `~/.codex/archived_sessions`; liveness via `~/.codex/thread-writer-locks/<id>.lock` |
+| Grok Build | ✅ `GrokLiveAdapter` | `~/.grok/sessions/<percent-encoded cwd>/<id>/{events,updates}.jsonl`; liveness via `~/.grok/active_sessions.json` and the per-file writer locks |
 | Claude Cowork | — | `~/Library/Application Support/Claude/local-agent-mode-sessions` |
 | Gemini CLI | — | `~/.gemini/tmp/*/chats` |
 | AntiGravity | — | `~/.gemini/antigravity*/conversations` |
-| Grok Build | — | `~/.grok/sessions/**` |
 | Cursor | — | `~/.cursor/chats/**/store.db` |
 
 ```swift
@@ -236,6 +236,24 @@ no adapter, no clock, and no I/O involved. A held writer lock overrides the
 discovery window: a thread opened last month and still running is found
 whatever its rollout's mtime says, and the kernel drops that lock however the
 process ended.
+
+`GrokLiveAdapter` is the first one whose session is several files rather than
+one. `GrokSessionTailer` runs a `JSONLTailer` per file and merges them by the
+source's own timestamp into a single stream with a single sequence, and the
+`SourceCursor` a host persists is a `.composite` keyed by path, so one file
+rotating re-seeds that file alone. `events.jsonl` carries the turn boundaries
+and the permission prompts, `updates.jsonl` carries the prompts, the prose, and
+every tool call with the ids to pair them by, and `GrokRecordMapper` documents
+which of the two each fact is read from — `chat_history.jsonl` is named on the
+source so a watcher wakes on it, but nothing is read from it, because
+everything in it is in `updates.jsonl` too and stamped.
+
+Two Grok-specific things a host should know. The directory a session lives in
+*is* its working directory, percent-encoded, so `GrokSessionsPath` decodes it
+exactly rather than guessing — unlike Claude Code's lossy project directories.
+And a permission prompt is recorded with a tool name and no id at all, so the
+mapper mints `perm:<tool name>`, which pairs a request with its answer at the
+cost of collapsing two simultaneous prompts for the same tool into one.
 
 ### Ingest
 

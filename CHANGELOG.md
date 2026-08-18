@@ -36,6 +36,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CodexSubagentLinker` — remembers `sub_agent_activity` spawn edges so a child
   thread discovered on its own is seeded with the parent that spawned it and
   the call id that did it.
+- **`GrokLiveAdapter`** — the third live `SourceAdapter`, and the first whose
+  session is several files rather than one. Discovers
+  `~/.grok/sessions/<percent-encoded cwd>/<session id>/`, seeding the working
+  directory from the directory's own name and the title, model, and agent name
+  from `summary.json`. A session listed in `~/.grok/active_sessions.json` or
+  holding one of its per-file writer locks is discovered whatever its mtime
+  says.
+  - `GrokSessionTailer` — a `JSONLTailer` per file, merged into one stream
+    ordered by the source's own timestamp and re-stamped with one monotonic
+    sequence. Its cursor is a `SourceCursor.composite` keyed by path, so one
+    file rotating re-seeds that file and leaves the others where they were.
+  - `GrokRecordMapper` — pure, static, `Sendable` mapping for
+    `events.jsonl`, `updates.jsonl`, and `chat_history.jsonl`, with a
+    documented table naming which file each fact is read from. Prompts, prose,
+    reasoning, and the whole tool-call lifecycle come from `updates.jsonl`;
+    turn boundaries, permissions, and the model come from `events.jsonl`;
+    nothing is read from `chat_history.jsonl`, whose every fact appears in
+    `updates.jsonl` stamped and in a shape that has not changed between
+    releases. `phase_changed` is dropped by default — two of its phases fire
+    per token — and `Options.includePhaseNotes` turns on a note for the rest.
+    `turn_started` deliberately does not open a turn: it is not written once
+    per prompt, and the prompt is.
+  - `GrokToolCall` — resolves a call's name, `ToolKind`, and target from the
+    three places Grok records them, preferring the `_meta["x.ai/tool"]`
+    descriptor over the ACP `kind` over the display title. A descriptor
+    `namespace` that is not the harness's own names an MCP server.
+  - `GrokRecords` — `GrokJSON` plus lenient decoders for the three line shapes,
+    for `summary.json` and `signals.json`, and for the `active_sessions.json`
+    registry, whose entries are matched by any string field so that a renamed
+    field degrades into "listed" rather than into "nothing is running".
+  - `GrokSessionsPath` — exact, lossless decoding of the percent-encoded
+    working directory a session directory is named for.
+  - Liveness: the registry first — a listed pid missing from the process table
+    is an entry that outlived a killed process, and is read as dead — then the
+    per-file `flock(2)` locks, which the kernel will not attribute because Grok
+    is Rust, then the session directory's age.
 
 ### Added
 
