@@ -233,7 +233,7 @@ struct EventCodableTests {
             pid: 4711,
             ppid: 1,
             startTime: epoch,
-            executable: "/usr/local/bin/cursor-agent",
+            executablePath: "/usr/local/bin/cursor-agent",
             argv: ArgvSanitizer.sanitize(["cursor-agent", "--api-key", "crsr_0123456789abcdef"]),
             cwd: "/Users/example/code/demo"
         )
