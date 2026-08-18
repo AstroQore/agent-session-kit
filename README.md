@@ -205,6 +205,11 @@ record of everything they asked an agent. It is built to be boring about it.
 - **No network.** Nothing here opens a socket to anywhere but a local path.
 - **No secrets in logs.** `KitLog.sanitize` redacts token-shaped runs, and the
   code logs file *names*, never paths or transcript bodies.
+- **Logging goes through `os.Logger`**, under subsystem
+  `com.astroqore.AgentSessionKit` (one category per logging site). Hosts can
+  filter to just this subsystem in Console.app or `log stream
+  --predicate 'subsystem == "com.astroqore.AgentSessionKit"'`. It never logs
+  paths, transcript bodies, or secrets — see `KitLog` above.
 
 Test fixtures use `/Users/example` and synthetic ids. Never commit a real
 username, path, org id, or token.

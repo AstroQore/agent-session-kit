@@ -76,3 +76,18 @@ where this code lived inside the application target.
 - `CostUsageScanner.forEachJSONLLine` became `JSONLLineScanner.forEachLine`
   with identical semantics and return value.
 - `AntigravitySessionReader` became `AntigravityGenMetadataReader`.
+
+### Changed
+
+- `PrivacyPreservingHash` is now `public`, for hosts that want the same
+  content-addressed, unlinkable component the kit uses internally for
+  session paths.
+- `MCPStdioBridgeConfig.defaultSocketPath` is now `@Sendable () -> String`
+  rather than a stored `String`, so a default that depends on the real home
+  directory is resolved lazily, only when the socket path is actually
+  needed, instead of being baked in when the config is built. A
+  backward-compatible `String` initializer overload is still there for
+  existing callers.
+- `MCPStdioBridge` gained an instance API — `init(config:)` plus unlabeled
+  `isRequested(arguments:)`, `socketPath(environment:)`, and `run(...)` — as
+  a thin convenience over the unchanged static functions of the same names.
