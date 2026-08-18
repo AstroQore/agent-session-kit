@@ -52,6 +52,9 @@ struct EventCodableTests {
         .liveness(alive: true),
         .liveness(alive: false),
         .note("phase: planning"),
+        .textBody(role: .user, text: "please refactor the parser", toolCallID: nil),
+        .textBody(role: .assistant, text: "Done — see the diff.", toolCallID: nil),
+        .textBody(role: .toolResult, text: "exit 0", toolCallID: "toolu_01"),
     ]
 
     static func richIdentity() -> SessionIdentity {
@@ -104,9 +107,10 @@ struct EventCodableTests {
             case .sessionEnded: seen.insert("sessionEnded")
             case .liveness: seen.insert("liveness")
             case .note: seen.insert("note")
+            case .textBody: seen.insert("textBody")
             }
         }
-        #expect(seen.count == 18)
+        #expect(seen.count == 19)
     }
 
     @Test("a whole event round-trips, id included")

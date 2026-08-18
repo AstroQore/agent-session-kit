@@ -94,10 +94,12 @@ public enum SessionEndReason: String, Codable, Sendable, CaseIterable, Hashable 
 /// ``AgentEventKind/note(_:)`` rather than growing a case that six of the
 /// eight harnesses would never emit.
 ///
-/// Text-carrying cases are previews, not content: adapters run every string
-/// through ``EventText/preview(_:max:)`` before it reaches an event. The
-/// live layer is a board, not an archive — full bodies stay in the source
-/// and are reached through ``RawRef``.
+/// Text-carrying state cases are previews, not content: adapters run every
+/// string through ``EventText/preview(_:max:)`` before it reaches an event.
+/// The one exception is ``textBody(role:text:toolCallID:)``, which exists so
+/// a host that keeps a full-text index can receive bodies without the board
+/// ever reading them — the reducer treats it as a heartbeat, and adapters cap
+/// it at ``AgentEventKind/textBodyLimit`` bytes.
 public enum AgentEventKind: Hashable, Codable, Sendable {
     /// First sighting of a session, carrying whatever identity the adapter
     /// could seed from the head of the source.
@@ -145,6 +147,25 @@ public enum AgentEventKind: Hashable, Codable, Sendable {
     /// own — Grok phase names, Cursor mode switches. Display only: the
     /// reducer treats it as a heartbeat.
     case note(String)
+    /// The full text of a prompt, an assistant message, or a tool result,
+    /// for hosts that maintain a searchable index. Emitted *alongside* the
+    /// preview-carrying state event, never instead of it. The reducer
+    /// ignores it beyond the heartbeat; adapters truncate `text` to
+    /// ``textBodyLimit`` and set `toolCallID` only for tool results.
+    case textBody(role: TextBodyRole, text: String, toolCallID: String?)
+
+    /// Upper bound (in UTF-8 bytes) adapters apply to
+    /// ``textBody(role:text:toolCallID:)`` before emitting it. Big enough for
+    /// any prompt a person types and most tool output; a multi-megabyte log
+    /// dump is not something anyone searches for by content.
+    public static let textBodyLimit = 32 * 1024
+}
+
+/// Who produced a ``AgentEventKind/textBody(role:text:toolCallID:)``.
+public enum TextBodyRole: String, Codable, Sendable, CaseIterable {
+    case user
+    case assistant
+    case toolResult
 }
 
 /// One event about one session, at one point in time.

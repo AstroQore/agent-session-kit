@@ -25,7 +25,7 @@ import Foundation
 /// | `subagentFinished` | drop the child, re-derive the state |
 /// | `turnEnded` | close the turn, drop orphaned tool calls, keep children |
 /// | `usage` | add the token deltas |
-/// | `compaction`, `note` | heartbeat only |
+/// | `compaction`, `note`, `textBody` | heartbeat only |
 /// | `sessionEnded` | `state = .ended(reason)`, `isAlive = false`, `endedAt = ts`, pending cleared |
 /// | `liveness(false)` | `isAlive = false`; an un-ended session becomes `.ended(.processGone)` |
 /// | `liveness(true)` | `isAlive = true`; `.ended(.processGone)` becomes `.idle` again |
@@ -192,7 +192,7 @@ public struct SessionStateReducer: Sendable {
             next.tokensOut += outputTokens
             next.tokensCached += cachedTokens
 
-        case .compaction, .note:
+        case .compaction, .note, .textBody:
             break
 
         case .sessionEnded(let reason):
