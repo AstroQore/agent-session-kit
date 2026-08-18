@@ -1,0 +1,18 @@
+{
+  "turnCount": 1,
+  "userMessageCount": 1,
+  "assistantMessageCount": 2,
+  "errorCount": 1,
+  "toolFailureCount": 2,
+  "cancellationCount": 0,
+  "compactionCount": 1,
+  "contextWindowUsage": 3,
+  "contextTokensUsed": 12900,
+  "contextWindowTokens": 500000,
+  "toolCallCount": 6,
+  "toolsUsed": ["read_file", "run_terminal_command", "web_search", "web_fetch", "search_notes"],
+  "modelsUsed": ["grok-example-4"],
+  "primaryModelId": "grok-example-4",
+  "sessionDurationSeconds": 9,
+  "peakRssBytes": 111230976
+}

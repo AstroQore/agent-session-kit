@@ -1,0 +1,26 @@
+{"ts":"2026-01-01T00:00:01.000Z","type":"mcp_config_resolved","servers":[{"name":"example-docs","transport":"http","source":"local"},{"name":"example-notes","transport":"http","source":"local"}],"disabled":[]}
+{"ts":"2026-01-01T00:00:01.100Z","type":"mcp_server_starting","server_name":"example-docs","transport":"http","target":"https://docs.example.test/mcp","timeout_sec":30}
+{"ts":"2026-01-01T00:00:01.200Z","type":"mcp_server_failed","server_name":"example-docs","transport":"http","target":"https://docs.example.test/mcp","error_type":"auth_required","error_message":"MCP server 'example-docs': auth required (non-interactive session)"}
+{"ts":"2026-01-01T00:00:01.300Z","type":"mcp_oauth_discovery_timeout","server_name":"example-tools","url":"https://tools.example.test/sse"}
+{"ts":"2026-01-01T00:00:01.400Z","type":"mcp_server_connected","server_name":"example-notes","transport":"http","tool_count":2,"duration_ms":91,"tools":["search_notes","read_note"]}
+{"ts":"2026-01-01T00:00:01.500Z","type":"mcp_init_completed","total_servers":3,"succeeded":1,"failed":1,"auth_required":1,"total_tools":2,"duration_ms":400,"is_reinit":false}
+{"ts":"2026-01-01T00:00:02.000Z","type":"turn_started","session_id":"77777777-8888-9999-aaaa-bbbbbbbbbbbb","turn_number":0,"model_id":"grok-example-4","yolo_mode":false,"conversation_message_count":3,"session_relationship":"primary","schema_version":"1.0"}
+{"ts":"2026-01-01T00:00:02.100Z","type":"loop_started","loop_index":0}
+{"ts":"2026-01-01T00:00:02.200Z","type":"phase_changed","phase":"waiting_for_model"}
+{"ts":"2026-01-01T00:00:02.300Z","type":"first_token"}
+{"ts":"2026-01-01T00:00:02.400Z","type":"phase_changed","phase":"streaming_reasoning"}
+{"ts":"2026-01-01T00:00:02.500Z","type":"phase_changed","phase":"streaming_text"}
+{"ts":"2026-01-01T00:00:02.600Z","type":"phase_changed","phase":"streaming_text"}
+{"ts":"2026-01-01T00:00:03.000Z","type":"phase_changed","phase":"tool_execution"}
+{"ts":"2026-01-01T00:00:03.100Z","type":"tool_started","tool_name":"read_file"}
+{"ts":"2026-01-01T00:00:03.150Z","type":"phase_changed","phase":"permission_prompt"}
+{"ts":"2026-01-01T00:00:03.200Z","type":"permission_requested","tool_name":"read_file"}
+{"ts":"2026-01-01T00:00:03.250Z","type":"permission_resolved","tool_name":"read_file","decision":"allow","wait_ms":0}
+{"ts":"2026-01-01T00:00:03.900Z","type":"tool_completed","tool_name":"read_file","duration_ms":41,"outcome":"success","tool_call_id":"call-11111111-0"}
+{"ts":"2026-01-01T00:00:04.000Z","type":"tool_started","tool_name":"run_terminal_command"}
+{"ts":"2026-01-01T00:00:04.050Z","type":"permission_requested","tool_name":"run_terminal_command"}
+{"ts":"2026-01-01T00:00:04.900Z","type":"permission_resolved","tool_name":"run_terminal_command","decision":"deny","wait_ms":850}
+{"ts":"2026-01-01T00:00:05.000Z","type":"turn_started","session_id":"00000000-0000-0000-0000-000000000000","turn_number":1,"model_id":"another-sessions-model","session_relationship":"primary","schema_version":"1.0"}
+{"ts":"2026-01-01T00:00:09.000Z","type":"turn_ended","outcome":"completed"}
+this line is not json at all
+{"ts":"2026-01-01T00:00:09.500Z","no_type_field":true}
