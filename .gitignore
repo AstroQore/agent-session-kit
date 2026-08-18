@@ -1,0 +1,20 @@
+.build/
+.swiftpm/
+*.xcodeproj/
+DerivedData/
+.DS_Store
+Package.resolved
+*.app/
+dist/
+.codex/
+.claude/
+.grok/
+.agy/
+.gemini/
+.cursor/
+.research/
+.agents/worktrees/
+
+# Python bytecode from helper scripts
+__pycache__/
+*.pyc
