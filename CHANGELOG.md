@@ -120,6 +120,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   busy timeout, the snapshot fallback, and varint framing is how two modules
   end up disagreeing about somebody else's live database. Behaviour is
   unchanged.
+- **`AntigravityLiveAdapter`** — the third live `SourceAdapter`, and the first
+  over a store that rewrites rather than appends. Covers both data roots —
+  `~/.gemini/antigravity-cli` (`variant` `"cli"`) and `~/.gemini/antigravity`
+  (`"ide"`) — with discovery unioning the CLI's `conversation_summaries.db`
+  against a walk of both `conversations` directories, since that index names
+  only a fraction of the databases on disk. Freshness is the newer of a store's
+  own mtime and its `-wal` sibling's, because in WAL mode the `.db` can sit
+  untouched through a busy hour. Liveness takes, in order: a held
+  `presence/<id>.lock`, an `agy` process whose `ANTIGRAVITY_CONVERSATION_ID`
+  names the conversation (which also yields a pid), a presence file touched
+  within a minute, the index's `killed` / `not_fully_idle` flags, and last the
+  store's age.
+- `AntigravityConversationTailer` — diffs instead of walking. A tool call is one
+  `steps` row whose `status` column walks `PENDING → RUNNING → DONE` in place,
+  so each poll re-reads the rows still open behind its cursor and emits only
+  the transitions. Cursor is `.rowID(<highest idx>)`; a resume re-reads the last
+  32 rows and adopts them without replaying, which leaves one documented gap —
+  a step that opened *and* closed while the host was down produces neither half.
+- `AntigravityStepMapper` — pure mapping of one row plus its previous state to
+  events: `USER_INPUT` to a prompt and a turn, `PLANNER_RESPONSE` to thinking
+  and then prose, tool rows to a matched start/finish pair, `WAITING` (and an
+  unfinished `ASK_QUESTION`) to a permission request and its resolution, and
+  `ERROR_MESSAGE` to a note. Usage carries prompt tokens only, and only for a
+  step that names the model request it billed against — the payload records no
+  completion count this decoder is willing to claim.
+- `AntigravityStepType` / `AntigravityStepStatus` / `AntigravityStepSource` /
+  `AntigravityTrajectorySource` / `AntigravityTrajectoryType` — the complete
+  enum tables (118 step types among them), decoded from the `agy` binary's
+  embedded `FileDescriptorProto` on 2026-08-19 rather than inferred from a
+  corpus, each with a `label` and, for step types, a `ToolKind`.
+- `AntigravityStepPayload` — a shallow, tolerant decode of the undocumented
+  `steps.step_payload` protobuf: start and end timestamps, step source, the
+  `ToolCall` submessage, the repeated status-transition log, prompt tokens, the
+  request id, and a text preview that refuses anything reading as an identifier
+  rather than guessing.
+- `AntigravityConversationReader` / `AntigravitySummariesReader` — read-only
+  SQLite over a conversation database and over the CLI's side index, tolerating
+  a live `-wal` and an older build missing the newer summary columns.
+- `AntigravityConversationRegistry` — holds what only the summaries store knows
+  (parent conversation, `killed`, `not_fully_idle`) so a poll and a synchronous
+  liveness probe can have it without running SQL, and turns a
+  `parent_conversation_id` into `subagentStarted` on the parent's stream.
+
+### Changed
+
+- `ProtobufWireReader` and `LiveSQLiteReader` are `public`. Both were internal
+  to `AgentSessionKit`; the live adapters over SQLite-backed stores need them,
+  and a second copy of either would drift. Visibility only — no behaviour
+  changed.
 
 ### Added
 

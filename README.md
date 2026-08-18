@@ -197,7 +197,7 @@ table goes through `ArgvSanitizer`.
 | Grok Build | ✅ `GrokLiveAdapter` | `~/.grok/sessions/<percent-encoded cwd>/<id>/{events,updates}.jsonl`; liveness via `~/.grok/active_sessions.json` and the per-file writer locks |
 | Claude Cowork | — | `~/Library/Application Support/Claude/local-agent-mode-sessions` |
 | Gemini CLI | — | `~/.gemini/tmp/*/chats` |
-| AntiGravity | — | `~/.gemini/antigravity*/conversations` |
+| AntiGravity | ✅ `AntigravityLiveAdapter` | `~/.gemini/antigravity{-cli,}/conversations/*.db`; state from the SQL columns plus a shallow `step_payload` decode; liveness via `presence/<id>.lock` |
 | Cursor | ✅ `CursorLiveAdapter` | `~/.cursor/chats/**/store.db` + `~/.cursor/projects/<slug>/agent-transcripts`; liveness via `cursor-agent-worker-*.pid` and the store's WAL |
 
 ```swift
@@ -280,6 +280,21 @@ boundaries and nothing else. So the thin transcript owns `userPrompt` and
 `turnEnded`, the store owns everything with detail in it, and an agent started
 inside the IDE, which has no transcript, gets `userPrompt` from the store
 instead. Emitting it from both would count every turn twice.
+
+`AntigravityLiveAdapter` is the odd one out, because AntiGravity is the one
+store that does not append. A conversation is a SQLite database whose `steps`
+table is *rewritten*: a tool call is a single row whose `status` column walks
+`PENDING → RUNNING → DONE` in place. So the tailer diffs rather than walks —
+each poll re-reads the rows still open behind its cursor and emits only the
+transitions, which is the only way `toolCallStarted` and `toolCallFinished`
+come out exactly once each. Most of a row's state is in the columns; the rest
+comes from a shallow, tolerant decode of the undocumented `step_payload`
+protobuf, whose field numbers and 118-value step-type table were read out of
+the `agy` binary's own descriptors rather than guessed. Both roots are covered
+— `antigravity-cli` for the command line, `antigravity` for the IDE — and
+discovery unions the CLI's `conversation_summaries.db` with a walk of the
+conversation directories, because that index routinely names a fraction of the
+databases actually on disk.
 
 ### Ingest
 
