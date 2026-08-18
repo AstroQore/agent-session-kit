@@ -184,10 +184,57 @@ testable without waiting.
 
 Adapters implement `SourceAdapter` (discovery, watch roots, liveness probing)
 and `SessionTailer` (`poll()` for the steady state, `seedFromTail(maxBytes:)`
-for a bounded cold start), resuming from a persisted `SourceCursor`. Those
-adapters, and the watcher that drives them, are the next change; the protocols
-they implement are here now. Text entering an event goes through `EventText`,
-and anything read from the process table goes through `ArgvSanitizer`.
+for a bounded cold start), resuming from a persisted `SourceCursor`. The
+per-harness adapters are the next change; everything they plug into is here
+now. Text entering an event goes through `EventText`, and anything read from
+the process table goes through `ArgvSanitizer`.
+
+### Ingest
+
+`IngestCoordinator` is the only thing a host starts. It owns one
+`FSEventsWatcher` over the union of every adapter's roots, a tailer per
+discovered source, a debounce in front of each tailer, a safety-net poll
+behind it, and a rediscovery pass for sessions that did not exist at start.
+
+```swift
+let coordinator = IngestCoordinator(
+    adapters: [ /* one per harness */ ],
+    home: home,
+    cursorStore: JSONFileCursorStore(url: cursorsURL)
+)
+let (events, notices) = await coordinator.start()
+
+for await event in events {
+    snapshot = reducer.reduce(snapshot, event: event)
+}
+```
+
+`notices` is the diagnostic channel — `sourceDiscovered`, `sourceDropped`,
+`tailerError`, `watcherRestarted` — and a host may ignore it. Timings live in
+`IngestConfiguration`. Nothing inside the pipeline drops an event; the only
+place a drop can happen is the stream's buffering policy, which
+`TailerBackpressure` documents.
+
+`JSONLTailer` is the building block six of the eight harnesses share: supply a
+`(Data, JSONLLineRef) -> [AgentEvent]` decoder and inherit rotation and
+truncation detection, partial-line buffering, byte-offset cursors, and bounded
+cold-start seeding. `SQLiteChangeWatcher` covers the two harnesses that keep a
+database open instead, where the file that moves during a turn is the `-wal`
+and not the `.db`. A watch root that does not exist yet is still watched —
+`FSEventsWatcher` subscribes to the nearest existing ancestor and re-arms when
+the root appears, so a harness installed after launch is picked up without a
+restart.
+
+### Liveness
+
+The one fact no log records: a transcript ends identically whether the harness
+exited, was killed, or is still thinking. `ProcessTable` reads `libproc` and
+`sysctl KERN_PROCARGS2` — same-uid processes only, argv and environment
+sanitized, the snapshot cached so a tick costs one read — and `LockFileProbe`
+asks the kernel who holds an advisory lock on a file. `LivenessResolver`
+combines each adapter's own probe with a generic `(pid, startTime)` check,
+because pids are recycled and the pair is the identity, and emits `liveness`
+events only when the answer changes.
 
 ## Privacy
 

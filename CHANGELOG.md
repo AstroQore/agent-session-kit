@@ -66,6 +66,45 @@ where this code lived inside the application target.
   - `EventText` and `ArgvSanitizer` — preview truncation, and credential
     redaction for command lines and process environments by both flag
     position and value shape.
+  - `FSEventsWatcher` — one recursive watch over a set of roots, delivered as
+    `AsyncStream<FSEventBatch>` with per-path coalescing. Roots that do not
+    exist yet are watched through their nearest existing ancestor and the
+    stream re-arms when they appear, so a harness installed after launch does
+    not need a restart. Paths are filtered against the declared roots and
+    rewritten back into the caller's own vocabulary, because FSEvents reports
+    canonical paths (`/private/var/…` for a `/var/…` root) and a naive prefix
+    filter would drop every event.
+  - `JSONLTailer` — incremental tailing of one append-only JSONL file, given a
+    `(Data, JSONLLineRef) -> [AgentEvent]` decoder. Detects rotation by inode
+    and truncation by size, holds a half-written trailing line until its
+    newline arrives, keeps the cursor at a record boundary so a persisted one
+    always resumes cleanly, and seeds a cold start from a bounded window at
+    the end of the file. A source that vanished yields nothing and keeps its
+    cursor; a line the decoder rejects is skipped.
+  - `SQLiteChangeWatcher` — change ticks for a `.db` and its `-wal` / `-shm`
+    siblings, driven by an FSEvents batch, by a poll, or by both.
+  - `IngestCoordinator` — the one thing a host starts. Owns the watcher, a
+    tailer registry keyed by primary path, a per-path debounce (50 ms; 250 ms
+    for database files), a safety-net poll (2 s for SQLite-backed sources,
+    10 s for file-backed ones), and a rediscovery pass every 15 s. Emits
+    `AsyncStream<AgentEvent>` and a second `AsyncStream<IngestNotice>` for
+    diagnostics. Nothing inside the pipeline drops an event; see
+    `TailerBackpressure`.
+  - `SourceCursorStore`, with `InMemoryCursorStore` and `JSONFileCursorStore`
+    — resume points persisted every two seconds when dirty and once more on
+    `stop()`. A host with its own database implements the protocol instead.
+  - `ProcessTable` — the real `ProcessTableReading`, over `proc_listpids`,
+    `proc_pidinfo`, `proc_pidpath`, and `sysctl KERN_PROCARGS2`. Command
+    lines, environments, and working directories are read only for the
+    current user's own processes; the snapshot is cached so a liveness tick
+    costs one read rather than one per session.
+  - `LockFileProbe` — who holds an advisory lock on a file, via
+    `fcntl(F_GETLK)`, distinguishing a named POSIX record-lock holder from a
+    `flock(2)` lock the kernel will not name.
+  - `LivenessResolver` — combines each adapter's `probeLiveness` with a
+    generic `(pid, startTime)` check and emits `liveness` events only on a
+    transition, because pids are recycled and a board that re-states an
+    unchanged answer every three seconds is a board that re-renders forever.
 
 ### Changed from the Vibe Bar originals
 

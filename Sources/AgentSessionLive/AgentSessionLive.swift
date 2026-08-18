@@ -18,12 +18,25 @@ import Foundation
 /// into one vocabulary and lets everything downstream speak only that:
 ///
 /// ```text
-///   store on disk  ──▶  SourceAdapter  ──▶  SessionTailer  ──▶  [AgentEvent]
-///                                                                    │
-///                          SessionStateReducer  ◀────────────────────┘
+///                       ┌───────────────── IngestCoordinator ─────────────────┐
+///  SourceAdapter        │                                                     │
+///   .watchRoots ────────┼──▶ FSEventsWatcher ──▶ debounce 50 ms / 250 ms ──┐  │
+///   .discover ──────────┼──▶ SessionSource ──▶ SessionTailer.poll() ◀──────┤  │
+///     every 15 s        │         ▲                    ▲   safety-net poll │  │
+///   .makeTailer ────────┼─────────┘                    └── 2 s / 10 s ──────┘  │
+///                       │              SourceCursorStore (resume; save 2 s)   │
+///                       └────────────────────────┬────────────────────────────┘
+///                                                ▼
+///                              AsyncStream<AgentEvent>   AsyncStream<IngestNotice>
+///                                                │
+///                          SessionStateReducer ◀─┘
 ///                                    │
 ///                                    ▼
 ///                            SessionSnapshot          (one board row)
+///
+///  ProcessTable ──▶ SourceAdapter.probeLiveness ──▶ LivenessResolver
+///                                                        │  transitions only
+///                          AgentEventKind.liveness  ◀─────┘
 /// ```
 ///
 /// - ``SessionKey`` names a session globally: a harness plus that harness's
@@ -38,9 +51,30 @@ import Foundation
 ///   ``SessionIdentityPatch`` updates, because evidence about *what* a
 ///   session is arrives long after evidence about what it is doing.
 ///
-/// What is not here yet: the adapters themselves, the watcher, and the
-/// resolver that turns ``LivenessHint``s into `liveness` events. Those land
-/// per harness; the protocols they implement are already in place.
+/// ## Ingest
+///
+/// ``IngestCoordinator`` is the only thing a host starts. It owns one
+/// ``FSEventsWatcher`` over the union of every adapter's roots, a
+/// ``SessionTailer`` per discovered source, a debounce in front of each
+/// tailer, a safety-net poll behind it, and a rediscovery pass that notices
+/// sessions that did not exist when it started. ``JSONLTailer`` is the
+/// building block six of the eight harnesses share: an adapter supplies a
+/// line decoder and inherits rotation handling, partial-line buffering, and
+/// cold-start seeding. ``SQLiteChangeWatcher`` covers the two that keep a
+/// database open instead, where the file that moves during a turn is the
+/// `-wal` and not the `.db`.
+///
+/// ## Liveness
+///
+/// The one fact no log records. ``ProcessTable`` reads `libproc` and
+/// `sysctl`, ``LockFileProbe`` asks the kernel who holds a file lock, and
+/// ``LivenessResolver`` combines each adapter's own probe with a generic
+/// `(pid, startTime)` check — pids are recycled, so the pair is the identity —
+/// and emits ``AgentEventKind/liveness(alive:)`` only when the answer
+/// changed.
+///
+/// What is not here yet: the adapters themselves. Everything they plug into
+/// is in place.
 ///
 /// Built in the Swift 6 language mode. `AgentSessionKit` is still on Swift 5
 /// while its adapters are migrated.
