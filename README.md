@@ -193,7 +193,7 @@ table goes through `ArgvSanitizer`.
 | Harness | Adapter | Store |
 | --- | --- | --- |
 | Claude Code | ✅ `ClaudeLiveAdapter` | `~/.claude/projects/**/*.jsonl`, `~/.claude/sessions` |
-| Codex / ChatGPT Work | — | `~/.codex/sessions` |
+| Codex / ChatGPT Work | ✅ `CodexLiveAdapter` | `~/.codex/sessions/**/rollout-*.jsonl`, `~/.codex/archived_sessions`; liveness via `~/.codex/thread-writer-locks/<id>.lock` |
 | Claude Cowork | — | `~/Library/Application Support/Claude/local-agent-mode-sessions` |
 | Gemini CLI | — | `~/.gemini/tmp/*/chats` |
 | AntiGravity | — | `~/.gemini/antigravity*/conversations` |
@@ -228,6 +228,14 @@ files that share nothing but a tool-use id — the parent logs the `Task` call
 and never the child's `agentId`, the child's meta file logs the tool-use id —
 so `ClaudeSubagentLinker` does the join at discovery and the parent's tailer
 reports `subagentStarted` / `subagentFinished` on the parent's stream.
+
+`CodexLiveAdapter` covers every Codex surface that writes into that one tree —
+CLI, VS Code, desktop, `codex exec`, and the sub-agents any of them spawn.
+`CodexRecordMapper` is pure and static, so a rollout line maps to events with
+no adapter, no clock, and no I/O involved. A held writer lock overrides the
+discovery window: a thread opened last month and still running is found
+whatever its rollout's mtime says, and the kernel drops that lock however the
+process ended.
 
 ### Ingest
 

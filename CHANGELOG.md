@@ -14,6 +14,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `ClaudeSessionsDirectory` / `ClaudeLiveSession` — the pid ↔ session ↔ cwd table liveness rests on, since Claude Code holds no lock on its transcript. Its `procStart` is parsed as **UTC**, which is how Claude Code writes it.
   - `ClaudeSubagentLinker` — joins the parent's `Task` tool-use id to the child's `agent-<id>.meta.json` at discovery, and announces `subagentStarted` / `subagentFinished` on the parent's stream.
   - `ClaudeProjectPath` — best-effort, file-system-checked decoding of the lossy project-directory encoding, for the last-resort case where neither the sessions entry nor the transcript head names a cwd.
+- **`CodexLiveAdapter`** — the second live `SourceAdapter`. Discovers
+  `~/.codex/sessions/<yyyy>/<MM>/<dd>/rollout-*.jsonl` and
+  `~/.codex/archived_sessions` by directory name so a machine with years of
+  transcripts costs a `readdir` per day rather than a `stat` per file, and
+  always includes a thread whose `~/.codex/thread-writer-locks/<id>.lock` is
+  held, however old its rollout. Liveness comes from that lock — Codex is Rust,
+  so it is a `flock(2)` the kernel will not attribute, which
+  `LockFileProbe.LockState.heldByUnknownOwner` reports and this adapter reads
+  as held; with no lock file at all it falls back to the rollout's age.
+- `CodexRecordMapper` — pure, static, `Sendable` mapping from one rollout line
+  to `AgentEvent`s, with the duplicate halves of Codex's two-audience log
+  resolved by choosing a source: prompts from `event_msg.user_message`, prose
+  from `response_item.message`. A `patch_apply_end`, `web_search_end`, or
+  `mcp_tool_call_end` carrying a non-`call_`-prefixed id is expanded into a
+  tool-call pair, because work the desktop app's JavaScript sandbox did is
+  recorded nowhere else. Token usage is taken from `last_token_usage`, which is
+  the per-step delta the reducer sums, never the running total.
+- `CodexRolloutRecord` / `CodexJSON` — a lenient, `Sendable` value tree for
+  records whose shape changes between Codex vintages and between surfaces.
+- `CodexSubagentLinker` — remembers `sub_agent_activity` spawn edges so a child
+  thread discovered on its own is seeded with the parent that spawned it and
+  the call id that did it.
 
 ### Added
 
