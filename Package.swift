@@ -31,9 +31,14 @@ let package = Package(
             dependencies: ["AgentSessionKit"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        // `Fixtures/` holds sample source records, one directory per
+        // harness. Declared as a resource rather than excluded so the
+        // adapters landing later can read a sample through `Bundle.module`
+        // instead of reconstructing a path from `#filePath`.
         .testTarget(
             name: "AgentSessionLiveTests",
-            dependencies: ["AgentSessionLive"]
+            dependencies: ["AgentSessionLive"],
+            resources: [.copy("Fixtures")]
         )
     ]
 )
