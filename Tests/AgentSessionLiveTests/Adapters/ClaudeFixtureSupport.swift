@@ -219,13 +219,24 @@ struct ClaudeHome {
         let manager = FileManager.default
         try? manager.createDirectory(at: projectDirectory, withIntermediateDirectories: true)
         try? manager.copyItem(at: ClaudeFixture.sessionURL, to: URL(fileURLWithPath: transcriptPath))
+        Self.touch(transcriptPath)
         guard withSubagent else { return }
         try? manager.createDirectory(at: subagentsDirectory, withIntermediateDirectories: true)
         try? manager.copyItem(at: ClaudeFixture.subagentURL, to: URL(fileURLWithPath: subagentPath))
+        Self.touch(subagentPath)
         try? manager.copyItem(
             at: ClaudeFixture.subagentMetaURL,
             to: subagentsDirectory.appendingPathComponent("agent-\(ClaudeFixture.agentID).meta.json")
         )
+    }
+
+    /// `copyItem` preserves the source's modification date, and the fixture's
+    /// date is whenever the checkout happened — older than `deadAfter` on any
+    /// checkout more than ten minutes old, which turns "freshly written" into
+    /// "stale" and flips the liveness verdict. Stamp the copies with now so the
+    /// tests describe the file, not the clone.
+    private static func touch(_ path: String) {
+        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: path)
     }
 
     /// Writes a `~/.claude/sessions/<pid>.json` naming this session.
