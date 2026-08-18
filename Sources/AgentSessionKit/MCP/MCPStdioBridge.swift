@@ -13,17 +13,27 @@ public struct MCPStdioBridgeConfig: Sendable {
     public let flag: String
     /// Environment variable that overrides `defaultSocketPath`.
     public let envKey: String
-    /// Where the running app's listener is expected to be.
-    public let defaultSocketPath: String
+    /// Where the running app's listener is expected to be, resolved lazily.
+    ///
+    /// A closure rather than a stored `String` because some hosts derive
+    /// their default from the real home directory — `RealHomeDirectory`,
+    /// not `NSHomeDirectory()`, inside a sandboxed app — which can only be
+    /// looked up correctly at the point the socket path is actually needed,
+    /// not when the config happens to be built. Resolving lazily means a
+    /// host never has to rebuild its config just because that lookup would
+    /// have returned something different.
+    public let defaultSocketPath: @Sendable () -> String
     /// What to print on stderr when nothing is listening. Given the socket
     /// path; the host owns the wording because only it can name the app the
     /// user is supposed to launch.
     public let notRunningMessage: @Sendable (String) -> String
 
+    /// Primary initializer. `defaultSocketPath` is called each time
+    /// ``MCPStdioBridge/socketPath(_:environment:)`` needs it — not cached.
     public init(
         flag: String,
         envKey: String,
-        defaultSocketPath: String,
+        defaultSocketPath: @escaping @Sendable () -> String,
         notRunningMessage: @escaping @Sendable (String) -> String = { path in
             "No MCP server is listening on \(path). Start the app that serves it first."
         }
@@ -32,6 +42,25 @@ public struct MCPStdioBridgeConfig: Sendable {
         self.envKey = envKey
         self.defaultSocketPath = defaultSocketPath
         self.notRunningMessage = notRunningMessage
+    }
+
+    /// Backward-compatible convenience initializer for a default socket path
+    /// that is already a fixed `String` — wrapped in a closure that always
+    /// returns it.
+    public init(
+        flag: String,
+        envKey: String,
+        defaultSocketPath: String,
+        notRunningMessage: @escaping @Sendable (String) -> String = { path in
+            "No MCP server is listening on \(path). Start the app that serves it first."
+        }
+    ) {
+        self.init(
+            flag: flag,
+            envKey: envKey,
+            defaultSocketPath: { defaultSocketPath },
+            notRunningMessage: notRunningMessage
+        )
     }
 }
 
@@ -52,7 +81,15 @@ public struct MCPStdioBridgeConfig: Sendable {
 ///
 /// The process installs no status item, opens no window, and touches nothing
 /// on disk except the socket it connects to.
-public enum MCPStdioBridge {
+///
+/// The primary API is static — `MCPStdioBridge.isRequested`,
+/// `MCPStdioBridge.socketPath`, `MCPStdioBridge.run` — because a host's
+/// `main.swift` runs before any instance would exist to hang them off of.
+/// The instance API (`init(config:)` plus unlabeled `isRequested`,
+/// `socketPath`, and `run`) is a thin convenience over the same statics for
+/// hosts that would rather hold one configured value than thread `config`
+/// through every call.
+public struct MCPStdioBridge: Sendable {
     public enum ExitCode {
         public static let ok: Int32 = 0
         /// Nothing was listening — almost always "the app is not running".
@@ -74,7 +111,7 @@ public enum MCPStdioBridge {
         let override = environment[config.envKey]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if let override, !override.isEmpty { return override }
-        return config.defaultSocketPath
+        return config.defaultSocketPath()
     }
 
     /// Connect, pump both directions, return an exit code.
@@ -134,6 +171,56 @@ public enum MCPStdioBridge {
             output: output,
             standardError: standardError
         )
+    }
+
+    // MARK: - Instance API
+
+    /// This instance's configuration, as given to ``init(config:)``.
+    public let config: MCPStdioBridgeConfig
+
+    /// Wraps `config` for callers that would rather hold one configured
+    /// value than pass `config` to every static call below.
+    public init(config: MCPStdioBridgeConfig) {
+        self.config = config
+    }
+
+    /// Whether `arguments` selects bridge mode. Wraps
+    /// ``isRequested(_:arguments:)`` with ``config``.
+    public func isRequested(arguments: [String] = CommandLine.arguments) -> Bool {
+        Self.isRequested(config, arguments: arguments)
+    }
+
+    /// Wraps ``socketPath(_:environment:)`` with ``config``.
+    public func socketPath(environment: [String: String] = ProcessInfo.processInfo.environment) -> String {
+        Self.socketPath(config, environment: environment)
+    }
+
+    /// Connect to `path`, pump both directions, return an exit code. Wraps
+    /// ``run(_:socketPath:input:output:standardError:)`` with ``config``.
+    public func run(
+        socketPath path: String,
+        input: Int32 = STDIN_FILENO,
+        output: Int32 = STDOUT_FILENO,
+        standardError: FileHandle = .standardError
+    ) -> Int32 {
+        Self.run(config, socketPath: path, input: input, output: output, standardError: standardError)
+    }
+
+    /// Resolve the socket from the environment and run. Wraps
+    /// ``run(_:environment:input:output:standardError:)`` with ``config`` —
+    /// the shape a host's `main.swift` wants:
+    ///
+    /// ```swift
+    /// let bridge = MCPStdioBridge(config: config)
+    /// if bridge.isRequested() { exit(bridge.run()) }
+    /// ```
+    public func run(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        input: Int32 = STDIN_FILENO,
+        output: Int32 = STDOUT_FILENO,
+        standardError: FileHandle = .standardError
+    ) -> Int32 {
+        Self.run(config, environment: environment, input: input, output: output, standardError: standardError)
     }
 
     // MARK: - Plumbing

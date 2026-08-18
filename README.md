@@ -119,13 +119,22 @@ bytes to that socket, which is how MCP clients that spawn a command reach a
 running GUI app:
 
 ```swift
-let config = MCPStdioBridgeConfig(
-    flag: "--mcp-stdio",
-    envKey: "MYAPP_MCP_SOCKET",
-    defaultSocketPath: defaultSocket
+let bridge = MCPStdioBridge(
+    config: MCPStdioBridgeConfig(
+        flag: "--mcp-stdio",
+        envKey: "MYAPP_MCP_SOCKET",
+        // A closure, resolved lazily, so a default that depends on the real
+        // home directory is looked up when the socket is actually needed —
+        // not baked in at config-build time.
+        defaultSocketPath: { defaultSocket }
+    )
 )
-if MCPStdioBridge.isRequested(config) { exit(MCPStdioBridge.run(config)) }
+if bridge.isRequested() { exit(bridge.run()) }
 ```
+
+The static functions this wraps (`MCPStdioBridge.isRequested`,
+`.socketPath`, `.run`, each taking `config` explicitly) are still there
+unchanged, for callers that would rather not hold an instance.
 
 `MCPJSON`, `MCPRequest`, `MCPResponse`, `MCPTool`, `MCPResource`, and
 `MCPArguments` are here too, so a host writes its tool catalog and its

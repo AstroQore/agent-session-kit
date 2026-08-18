@@ -56,9 +56,47 @@ final class MCPStdioBridgeTests: XCTestCase {
         // A blank override is a misconfiguration, not a request for a blank path.
         XCTAssertEqual(
             MCPStdioBridge.socketPath(config, environment: ["AGENT_SESSION_KIT_MCP_SOCKET": "   "]),
-            config.defaultSocketPath
+            config.defaultSocketPath()
         )
-        XCTAssertEqual(MCPStdioBridge.socketPath(config, environment: [:]), config.defaultSocketPath)
+        XCTAssertEqual(MCPStdioBridge.socketPath(config, environment: [:]), config.defaultSocketPath())
+    }
+
+    func testDefaultSocketPathAcceptsAClosure() {
+        let config = MCPStdioBridgeConfig(
+            flag: "--mcp-stdio",
+            envKey: "AGENT_SESSION_KIT_MCP_SOCKET",
+            defaultSocketPath: { "/tmp/computed-default.sock" }
+        )
+        XCTAssertEqual(MCPStdioBridge.socketPath(config, environment: [:]), "/tmp/computed-default.sock")
+    }
+
+    func testDefaultSocketPathClosureIsResolvedOnlyWhenAsked() {
+        let counter = CallCounter()
+        let config = MCPStdioBridgeConfig(
+            flag: "--mcp-stdio",
+            envKey: "AGENT_SESSION_KIT_MCP_SOCKET",
+            defaultSocketPath: { "/tmp/lazy-\(counter.increment()).sock" }
+        )
+        XCTAssertEqual(counter.count, 0, "must not be resolved until something asks for it")
+        _ = MCPStdioBridge.socketPath(config, environment: [:])
+        XCTAssertEqual(counter.count, 1)
+    }
+
+    func testInstanceAPIWrapsTheStaticFunctions() {
+        let bridge = MCPStdioBridge(config: config())
+        XCTAssertTrue(bridge.isRequested(arguments: ["/bin/app", "--mcp-stdio"]))
+        XCTAssertFalse(bridge.isRequested(arguments: ["/bin/app"]))
+        XCTAssertEqual(
+            bridge.socketPath(environment: ["AGENT_SESSION_KIT_MCP_SOCKET": "/tmp/custom.sock"]),
+            "/tmp/custom.sock"
+        )
+        XCTAssertEqual(bridge.socketPath(environment: [:]), bridge.config.defaultSocketPath())
+    }
+
+    func testInstanceRunWrapsTheStaticRun() {
+        let bridge = MCPStdioBridge(config: config())
+        let code = bridge.run(socketPath: socketPath, input: STDIN_FILENO, output: STDOUT_FILENO)
+        XCTAssertEqual(code, MCPStdioBridge.ExitCode.notRunning)
     }
 
     func testConnectingToNothingExitsNonZeroWithTheHostsMessage() throws {
@@ -125,6 +163,26 @@ final class MCPStdioBridgeTests: XCTestCase {
         var framed = line
         framed.append(0x0A)
         try pipe.fileHandleForWriting.write(contentsOf: framed)
+    }
+}
+
+/// A thread-safe counter, used to prove a `defaultSocketPath` closure was
+/// invoked lazily rather than at config-build time.
+private final class CallCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func increment() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        value += 1
+        return value
     }
 }
 
