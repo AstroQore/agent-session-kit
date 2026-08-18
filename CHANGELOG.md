@@ -72,6 +72,54 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     is an entry that outlived a killed process, and is read as dead — then the
     per-file `flock(2)` locks, which the kernel will not attribute because Grok
     is Rust, then the session directory's age.
+- **`CursorLiveAdapter`** — the third live `SourceAdapter`, and the first over a
+  database rather than a log. Discovers `~/.cursor/chats/*/*/store.db` by
+  `meta.json`'s `updatedAtMs` and the store's own mtime, and includes a store
+  whatever its age when a `cursor-agent-worker-*.pid` names a live process and
+  the store's project has a `worker.sock`. A session's `primaryPath` is the
+  `.db`, so `IngestCoordinator` registers the `-wal` / `-shm` siblings that
+  actually move during a turn. Liveness: a worker pid whose environment carries
+  `CURSOR_AGENT_CHAT_ID` for this agent (or whose cwd is the session's) is
+  alive; failing that a WAL written in the last 30 s is alive, a `worker.sock`
+  that accepts a connection is unknown, and a store quiet for ten minutes is
+  dead. The command line is never read — `cursor-agent` carries its API key in
+  argv.
+  - `CursorStoreReader` — read-only access to the store through
+    `LiveSQLiteReader`, and the incremental walk of its content-addressed blob
+    graph. Split in two on purpose: `walk` finds where the messages are without
+    parsing any JSON, `decode` parses only the ones a caller needs. A second
+    walk carrying the first one's visit set fetches only the new turn, which
+    holds whether a new head re-lists the conversation or chains to its
+    predecessor.
+  - `CursorSessionTailer` — composes the store walk with a `JSONLTailer` over
+    the thin transcript, under one `.composite` cursor. The store's half is
+    `.blobHead("<head>|<anchor>")`: the head answers "did anything change" for
+    the price of one small query, and the anchor — the id of the last message
+    emitted, stable because the store is content-addressed — is what a
+    relaunched host resumes from without re-emitting or re-parsing a
+    conversation.
+  - `CursorMessageMapper` / `CursorToolMapping` — pure translation of one store
+    message: the `<user_query>` wrapper stripped off a prompt, reasoning
+    reported as a state and never as text, tool calls normalised to `ToolKind`
+    with arguments narrowed to a whitelist, tool results paired on Cursor's own
+    call id, and a `system` message dropped whole.
+  - `CursorThinTranscriptMapper` — the turn skeleton. It owns `userPrompt` and
+    `turnEnded` and the store owns everything else, because the reducer counts
+    a turn per prompt and two sources reporting one would double every turn. An
+    IDE-started agent has no transcript, and then the store owns `userPrompt`
+    too.
+  - `CursorPaths` / `CursorStoreMeta` / `CursorAgentMeta` / `CursorWorkerProbe`
+    — the cwd slug that joins a store to its transcript, the hex-JSON
+    conversation card, the `meta.json` sidecar, and the two probes that tell a
+    live `cursor-agent` from the pid file and socket one leaves behind when it
+    crashes.
+
+### Changed
+- `LiveSQLiteReader` and `ProtobufWireReader` are `public`. Both are read by
+  `AgentSessionLive`'s Cursor adapter, and a second copy of the open flags, the
+  busy timeout, the snapshot fallback, and varint framing is how two modules
+  end up disagreeing about somebody else's live database. Behaviour is
+  unchanged.
 
 ### Added
 

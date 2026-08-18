@@ -198,7 +198,7 @@ table goes through `ArgvSanitizer`.
 | Claude Cowork | — | `~/Library/Application Support/Claude/local-agent-mode-sessions` |
 | Gemini CLI | — | `~/.gemini/tmp/*/chats` |
 | AntiGravity | — | `~/.gemini/antigravity*/conversations` |
-| Cursor | — | `~/.cursor/chats/**/store.db` |
+| Cursor | ✅ `CursorLiveAdapter` | `~/.cursor/chats/**/store.db` + `~/.cursor/projects/<slug>/agent-transcripts`; liveness via `cursor-agent-worker-*.pid` and the store's WAL |
 
 ```swift
 let adapter = ClaudeLiveAdapter()
@@ -254,6 +254,32 @@ exactly rather than guessing — unlike Claude Code's lossy project directories.
 And a permission prompt is recorded with a tool name and no id at all, so the
 mapper mints `perm:<tool name>`, which pairs a request with its answer at the
 cost of collapsing two simultaneous prompts for the same tool into one.
+
+`CursorLiveAdapter` is the first adapter over a database rather than a log.
+A session's `primaryPath` is its `store.db`, which is what makes the
+coordinator register the `-wal` and `-shm` siblings — Cursor holds the store
+open in WAL mode, so a whole turn can land in `-wal` and only reach the `.db`
+at a checkpoint minutes later.
+
+Inside it, `latestRootBlobId` in the `meta` table is the head of a
+content-addressed graph, and it changes exactly once per turn: a poll that
+finds it unchanged returns without fetching a blob. When it does move,
+`CursorStoreReader` walks breadth-first from the new head with the previous
+walk's visit set in hand, so only genuinely new blobs are fetched — the
+conversation's other messages keep the ids they had, because the store is
+content-addressed. A cursor persists `"<head>|<anchor>"`, where the anchor is
+the id of the last message emitted; after a relaunch that is enough to find the
+place again in one traversal, and only the messages past it are parsed.
+
+Two files carry one Cursor session and each owns what it is the authority on.
+The store has the tool calls, the reasoning, the model, and the full text of
+everything, and no notion of a turn ending. The thin transcript at
+`~/.cursor/projects/<cwd slug>/agent-transcripts/<agent id>/<agent id>.jsonl`
+— written only when a `cursor-agent` CLI drove the session — has turn
+boundaries and nothing else. So the thin transcript owns `userPrompt` and
+`turnEnded`, the store owns everything with detail in it, and an agent started
+inside the IDE, which has no transcript, gets `userPrompt` from the store
+instead. Emitting it from both would count every turn twice.
 
 ### Ingest
 
