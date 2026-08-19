@@ -13,8 +13,11 @@ searchable index, and a local MCP transport.
 No third-party dependencies. Foundation, Darwin, and the system SQLite.
 
 ```swift
-.package(url: "https://github.com/AstroQore/agent-session-kit", from: "0.2.0")
+.package(url: "https://github.com/AstroQore/agent-session-kit", exact: "0.3.0")
 ```
+
+`exact:` while the package is `0.x` — see
+[Versioning and releases](#versioning-and-releases).
 
 ## Targets
 
@@ -24,6 +27,28 @@ No third-party dependencies. Foundation, Darwin, and the system SQLite.
 | `AgentSessionLive` | Live views over the same stores — the unified event model, the state reducer, and the tailing protocols. |
 
 Requires macOS 26 and Swift 6.2.
+
+## Architecture
+
+Two targets, one boundary. `AgentSessionKit` answers "what is on disk right
+now" — one pass, one snapshot, no observers: discovery, parsing, the FTS5
+index, deletion planning, and the MCP transport. `AgentSessionLive` is
+everything that *watches*: FSEvents, incremental tailing, the unified event
+model, and the state reducer. It depends on the Kit; the Kit knows nothing
+about it. If a type debounces, polls, or holds a cursor, it belongs in Live.
+
+The package knows about the **usage axis** — the harness that produced a
+session — and deliberately nothing about the **billing axis** (quotas,
+plans, prices, companies). A host that models both writes that mapping in
+its own module.
+
+There are **no third-party dependencies**: Foundation, Darwin, Dispatch,
+`os.log`, `CryptoKit`, and the system SQLite. That is a deliberate
+constraint rather than an accident — a host links this package statically
+into a signed application bundle, and every dependency here would become a
+dependency it has to audit, license, and ship. Nothing in here opens a
+network socket, spawns a helper, or invents a path under `~/`; every entry
+point takes the home directory it should read.
 
 ## Supported harnesses
 
@@ -452,10 +477,48 @@ record of everything they asked an agent. It is built to be boring about it.
 Test fixtures use `/Users/example` and synthetic ids. Never commit a real
 username, path, org id, or token.
 
+## Versioning and releases
+
+Bare semver tags, no `v` prefix — `0.1.0`, `0.2.0`, `0.3.0`. While the
+package is `0.x`, a **minor** bump carries anything a caller could trip over
+(a renamed API, a new provider case, a bumped `eventSchemaVersion`, a changed
+storage key) and a **patch** carries fixes and internals only. Pin `exact:`.
+
+```swift
+.package(url: "https://github.com/AstroQore/agent-session-kit", exact: "0.3.0")
+```
+
+Every build knows which version it is:
+
+```swift
+import AgentSessionKit
+
+AgentSessionKitInfo.version                   // "0.3.0"
+AgentSessionKitInfo.bundledReleaseNotesURL    // .../releases/tag/0.3.0
+AgentSessionKitInfo.repositoryURL
+```
+
+That constant exists because this package is linked statically — once it is
+compiled into a host binary there is no bundle, no `Info.plist`, and no
+dylib left to read a version off. It is pinned by a test to the newest
+section of [CHANGELOG.md](CHANGELOG.md), so the two cannot drift.
+
+Pushing a `X.Y.Z` tag runs `.github/workflows/release.yml`, which re-checks
+the tag against the version constant and the changelog before publishing a
+GitHub Release with that changelog section as its notes. The full procedure,
+the semver policy, and what to do when a release goes wrong are in
+[RELEASING.md](RELEASING.md).
+
+One thing worth being clear about, because it is easy to imply otherwise: a
+release here reaches *users* only when a host bumps its pin and ships a build
+of its own. Nothing updates in place.
+
 ## Used by
 
 - [Vibe Bar](https://github.com/AstroQore/vibe-bar) — macOS menu-bar app for
-  agent quota, usage, and cost. This package was extracted from it.
+  agent quota, usage, and cost. This package was extracted from it, and Vibe
+  Bar pins it `exact:` and compiles it into the app; its Settings › System
+  pane shows the bundled `AgentSessionKitInfo.version`.
 - Auspex.
 
 ## License

@@ -77,6 +77,11 @@ git config --local user.email "<id>+<login>@users.noreply.github.com"
 `Co-Authored-By:` trailers are welcome when more than one person or agent
 shaped a commit.
 
+Add what you changed to `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md), and
+leave `AgentSessionKitInfo.version` alone — the version constant and a dated
+changelog section move together, in the release commit. See
+[RELEASING.md](RELEASING.md) for how a version is cut.
+
 ## Security
 
 Please do not open a public issue for a vulnerability. See

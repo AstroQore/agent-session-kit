@@ -21,8 +21,10 @@ own mapping as an extension in its own module.
 ```text
 .
 ├── Package.swift                       # swift-tools-version 6.2, macOS 26
+├── RELEASING.md                        # semver policy + how a tag is cut
 ├── Sources/
 │   ├── AgentSessionKit/                # Swift 5 language mode (migration pending)
+│   │   ├── AgentSessionKitInfo.swift   # version, repository URL, release-notes URL
 │   │   ├── Harness/
 │   │   │   └── Harness.swift           # Harness enum + HarnessCatalog. Naming only.
 │   │   ├── Sessions/
@@ -162,3 +164,29 @@ than the user's main tree.
 
 End every commit message with a `Co-Authored-By:` trailer naming the actual
 participants.
+
+## 9. Releasing
+
+[RELEASING.md](RELEASING.md) is the procedure and the semver policy. Read it
+before touching a tag, a version number, or `.github/workflows/release.yml`.
+The parts that constrain ordinary changes:
+
+- **The version constant moves in the release commit, not before.**
+  `AgentSessionKitInfo.version` is the only version a statically linked host
+  can read — there is no bundle, no `Info.plist`, and no dylib once this code
+  is compiled in. `AgentSessionKitInfoTests` pins it to the newest
+  `## [X.Y.Z]` section of `CHANGELOG.md`, so a feature branch that bumps one
+  without the other fails `swift test`. Feature work adds to
+  `## [Unreleased]` and leaves the constant alone.
+- **Tags are bare `X.Y.Z`.** No `v` prefix; the tag string is the version
+  string. Pushing one runs `release.yml`, which re-verifies tag ↔ constant ↔
+  changelog, builds, tests, and publishes a GitHub Release whose notes are
+  that changelog section. It refuses rather than repairs.
+- **A published tag never moves.** If a release run fails, fix forward on
+  `main` and cut the next version. Re-pointing a tag makes two source trees
+  answer to one version, which is exactly what a pinned dependency exists to
+  prevent.
+- **A release is not a delivery.** Hosts link this package statically and pin
+  it `exact:`. A new tag reaches a user when the host bumps its pin and ships
+  a build — never on its own. Say it that way in any UI or note that mentions
+  a newer version.

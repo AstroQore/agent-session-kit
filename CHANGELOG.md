@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-19
+
+Sessions learn to say what they were asked for and how to get back into
+them, Grok Bot goes live, and the package learns how to cut its own
+releases.
+
 ### Added
 - **`SessionBrief` on every `SessionSnapshot`.** The state machine says what a
   session is *doing*; it could not say what anybody asked it for. The brief
@@ -78,6 +84,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   only file in `~/.grokbot` this package opens, and the directory is
   deliberately not watched: its neighbours hold a daemon token and a
   credential.
+- **`AgentSessionKitInfo`** — the version of the package, written down where
+  a statically linked host can read it. There is nothing else to ask: once
+  this code is compiled into somebody's binary there is no bundle, no
+  `Info.plist`, and no dylib left to interrogate. `version` is pinned to the
+  top released section of this file by `AgentSessionKitInfoTests`, so the
+  constant and the changelog cannot drift apart without failing the suite.
+  `repositoryURL` and `releaseNotesURL(for:)` are there so a host showing the
+  number has somewhere to send the reader; the tag normalizer tolerates the
+  `v` prefix this project does not use, because a caller reading a tag out of
+  the GitHub API should not have to know that.
+- **A release workflow.** Pushing a bare `X.Y.Z` tag runs
+  `.github/workflows/release.yml`: it refuses the tag unless
+  `AgentSessionKitInfo.version` and a `## [X.Y.Z]` changelog section both
+  agree with it, builds, tests, and then publishes a GitHub Release whose
+  notes are that changelog section. Every check fails loudly — a tag that
+  does not match its own source is not a release, and the workflow would
+  rather publish nothing than publish a lie.
+- **[RELEASING.md](RELEASING.md)** — the semver policy while this package is
+  0.x, the exact steps to cut a version, what a consumer has to do
+  afterwards, and the rule that a published tag never moves.
 
 ### Changed
 - **`AgentSessionLive.eventSchemaVersion` is 2.** A field was added to
@@ -154,9 +180,11 @@ rest altogether: no `discover` frame anywhere, and the liveness tick down from
 886 samples to 74, of which three are Claude Code's probe rather than 715.
 
 ### Note
-- 0.2.0 is tagged at `fd0c95a`. Nothing here is breaking, so the next tag is a
-  minor one; the host that pins this package needs it cut before it can build
-  against the adapter.
+- Nothing here is breaking, so 0.3.0 is a minor bump over 0.2.0 (`fd0c95a`).
+  It is the first tag to carry a published GitHub Release; 0.1.0 and 0.2.0
+  exist as tags only. A host pinning this package `exact:` sees none of it
+  until it bumps the pin and ships a build of its own — see
+  [RELEASING.md](RELEASING.md).
 
 ## [0.2.0] - 2026-08-19
 
