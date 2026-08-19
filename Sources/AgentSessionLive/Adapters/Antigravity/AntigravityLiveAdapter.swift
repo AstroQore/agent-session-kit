@@ -256,12 +256,18 @@ public struct AntigravityLiveAdapter: SourceAdapter {
         presence: String,
         activeSince: Date
     ) -> Bool {
+        // Five reasons to include a conversation, any one of which is enough,
+        // asked cheapest first. The order is free to choose precisely because
+        // they are a disjunction — and it matters, because four of these are
+        // `stat` calls already half in hand and the fifth is an `open`, an
+        // `F_GETLK`, and a `close` on somebody else's presence file. Asking
+        // that one first meant paying it for every conversation in the store
+        // on every pass, including the ones the mtimes had already settled.
         if summary?.notFullyIdle == true { return true }
-        if DiscoveryIO.isLocked(path: presence) { return true }
         if LockFileProbe.mtimeWithin(path: presence, seconds: Self.presenceFreshWindow) { return true }
         if let modified = summary?.lastModified, modified >= activeSince { return true }
-        guard let modified = Self.storeModified(path: file.path) else { return false }
-        return modified >= activeSince
+        if let modified = Self.storeModified(path: file.path), modified >= activeSince { return true }
+        return DiscoveryIO.isLocked(path: presence)
     }
 
     /// Builds a source, seeded with everything the index could say cheaply.
