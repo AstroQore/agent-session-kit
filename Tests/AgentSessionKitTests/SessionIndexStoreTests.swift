@@ -383,8 +383,80 @@ final class SessionIndexStoreTests: XCTestCase {
         XCTAssertEqual(hits.count, 1)
         XCTAssertNil(hits.first?.snippet)
         XCTAssertNil(hits.first?.matchedSeq)
-        let byProject = try await store.search(text: "example/proj")
-        XCTAssertEqual(byProject.count, 1)
+        let byProject = try await store.summaryPage(projectIncludes: ["example/proj"])
+        XCTAssertEqual(byProject.totalCount, 1)
+    }
+
+    func testSearchScopesSelectExactMessageRoles() async throws {
+        let store = try makeStore()
+        let row = try await store.upsertSession(summary(title: "Title needle", path: "/scopes"))
+        try await store.replaceMessages(sessionRow: row, excerpts: [
+            .init(seq: 0, role: .system, excerpt: "system needle"),
+            .init(seq: 1, role: .user, excerpt: "user needle"),
+            .init(seq: 2, role: .assistant, excerpt: "assistant needle"),
+            .init(seq: 3, role: .tool, excerpt: "tool needle file.swift")
+        ])
+
+        let system = try await store.search(text: "system needle", scopes: [.system])
+        let wrongRole = try await store.search(text: "system needle", scopes: [.user])
+        let assistant = try await store.search(text: "assistant needle", scopes: [.assistant])
+        let tool = try await store.search(text: "file.swift", scopes: [.tool])
+        let title = try await store.search(text: "Title needle", scopes: [.title])
+        let titleAsUser = try await store.search(text: "Title needle", scopes: [.user])
+        XCTAssertEqual(system.count, 1)
+        XCTAssertTrue(wrongRole.isEmpty)
+        XCTAssertEqual(assistant.count, 1)
+        XCTAssertEqual(tool.count, 1)
+        XCTAssertEqual(title.count, 1)
+        XCTAssertTrue(titleAsUser.isEmpty)
+    }
+
+    func testDirectoryFiltersApplyToPagesAndSearch() async throws {
+        let store = try makeStore()
+        try await seed(
+            store,
+            summary: summary(id: "keep", projectDir: "/Users/example/keep/app", path: "/keep"),
+            messages: ["shared needle"]
+        )
+        try await seed(
+            store,
+            summary: summary(id: "skip", projectDir: "/Users/example/skip/app", path: "/skip"),
+            messages: ["shared needle"]
+        )
+
+        let included = try await store.summaryPage(projectIncludes: ["/keep/"])
+        let excluded = try await store.summaryPage(projectExcludes: ["/skip/"])
+        let hits = try await store.search(text: "needle", projectExcludes: ["/skip/"])
+        XCTAssertEqual(included.summaries.map(\.sessionID), ["keep"])
+        XCTAssertEqual(excluded.summaries.map(\.sessionID), ["keep"])
+        XCTAssertEqual(hits.map(\.summary.sessionID), ["keep"])
+    }
+
+    func testRelatedRowsCanBeHiddenAndResolvedToTheirRoot() async throws {
+        let store = try makeStore()
+        let root = summary(provider: .codex, id: "root", harness: .codex, path: "/root")
+        let review = SessionSummary(
+            provider: .codex,
+            sessionID: "review",
+            providerVariant: CodexSessionAdapter.autoReviewVariantPrefix + "root",
+            harness: .codex,
+            title: "Review",
+            sourcePath: "/review"
+        )
+        try await store.upsertSession(root)
+        try await store.upsertSession(review)
+
+        let page = try await store.summaryPage(
+            excludingProviderVariantPrefix: CodexSessionAdapter.autoReviewVariantPrefix
+        )
+        let related = try await store.summaries(
+            provider: .codex,
+            providerVariantPrefix: CodexSessionAdapter.autoReviewVariantPrefix
+        )
+        let resolved = try await store.summary(provider: .codex, sessionID: "root")
+        XCTAssertEqual(page.summaries.map(\.sessionID), ["root"])
+        XCTAssertEqual(related.map(\.sessionID), ["review"])
+        XCTAssertEqual(resolved?.sessionID, "root")
     }
 
     // MARK: - Cascades and lifecycle
@@ -546,9 +618,9 @@ final class SessionIndexStoreTests: XCTestCase {
 
         let rebuilt = try makeStore()
         let remaining = try await rebuilt.sessionCount()
-        XCTAssertEqual(SessionIndexStore.schemaVersion, 3)
+        XCTAssertEqual(SessionIndexStore.schemaVersion, 4)
         XCTAssertEqual(remaining, 0)
-        XCTAssertEqual(try userVersion(), 3)
+        XCTAssertEqual(try userVersion(), 4)
 
         try await rebuilt.upsertSession(summary(harness: .claudeCode, model: "claude-fable-5"))
         let model = try await rebuilt.allSummaries().first?.model

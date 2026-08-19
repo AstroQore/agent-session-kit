@@ -372,6 +372,42 @@ final class AntigravitySessionAdapterTests: XCTestCase {
         XCTAssertGreaterThan(summary.sizeBytes, 0)
     }
 
+    func testMetadataSummaryReadsBoundedEdgesAndNewestModel() throws {
+        let turns = (0..<200).map { index in
+            AntigravityDBFixture.Turn(
+                idx: index,
+                blob: AntigravityProtoFixture.turnBlob(
+                    seconds: base + UInt64(index),
+                    input: 10,
+                    output: 5,
+                    model: index == 199 ? "gemini-newest" : "gemini-old"
+                )
+            )
+        }
+        let url = try writeConversation(turns: turns)
+
+        let metadata = try XCTUnwrap(AntigravityLiveSQLite.metadataSummary(at: url, edgeLimit: 4))
+        XCTAssertEqual(metadata.messageCount, 200)
+        XCTAssertEqual(metadata.firstDate?.timeIntervalSince1970, TimeInterval(base))
+        XCTAssertEqual(metadata.lastDate?.timeIntervalSince1970, TimeInterval(base + 199))
+        XCTAssertEqual(metadata.model, "gemini-newest")
+    }
+
+    func testFallbackTitleReadsOnlyItsBoundedStepPrefix() throws {
+        let steps = (0..<100).map { index in
+            AntigravityDBFixture.Step(
+                idx: index,
+                type: 15,
+                payload: AntigravityProtoFixture.stepPayload(texts: ["Readable step \(index)"])
+            )
+        }
+        let url = try writeConversation(steps: steps)
+        let prefix = try XCTUnwrap(AntigravityLiveSQLite.firstSteps(at: url, limit: 12))
+        XCTAssertEqual(prefix.count, 12)
+        XCTAssertEqual(prefix.first?.idx, 0)
+        XCTAssertEqual(prefix.last?.idx, 11)
+    }
+
     func testMetadataFallsBackToFileDatesWithoutGenMetadata() throws {
         let url = try writeConversation()
         let summary = try adapter.extractMetadata(fileURL: url)
@@ -399,8 +435,9 @@ final class AntigravitySessionAdapterTests: XCTestCase {
 
         let summary = try adapter.extractMetadata(fileURL: url)
         XCTAssertEqual(summary.sessionID, conversationID)
-        // Fell all the way through to the first readable step text.
-        XCTAssertEqual(summary.title, "You are a translation worker for this workspace.")
+        // Known system / assistant / tool steps are not titles. The first
+        // unknown step is the only human-prompt candidate without side data.
+        XCTAssertEqual(summary.title, "An unrecognized step still shows its text.")
         XCTAssertNil(summary.projectDir)
     }
 

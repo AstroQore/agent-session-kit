@@ -141,6 +141,37 @@ final class ClaudeCoworkSessionAdapterTests: XCTestCase {
         XCTAssertEqual(summary.messageCount, 2)
     }
 
+    func testStructuredToolPathsRecoverTheUsersRealProjectDirectory() throws {
+        let project = home.appendingPathComponent("real-project", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let target = project.appendingPathComponent("Sources/App.swift")
+        let readme = project.appendingPathComponent("README.md")
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "print(1)".write(to: target, atomically: true, encoding: .utf8)
+        try "App".write(to: readme, atomically: true, encoding: .utf8)
+        let isolated = ClaudeCoworkPaths.root(homeDirectory: home.path)
+            .appendingPathComponent("space/run/local_\(workspace)/outputs").path
+        let url = try writeSession(lines: [
+            """
+            {"type":"user","timestamp":"2026-05-02T09:00:00.000Z","sessionId":"\(sessionID)",\
+            "cwd":\(JSONFixture.string(isolated)),"message":{"role":"user","content":"Fix the app"}}
+            """,
+            """
+            {"type":"assistant","timestamp":"2026-05-02T09:00:01.000Z","sessionId":"\(sessionID)",\
+            "cwd":\(JSONFixture.string(isolated)),"message":{"role":"assistant","model":"claude-fable-5",\
+            "content":[{"type":"tool_use","name":"Read","input":{"file_path":\
+            \(JSONFixture.string(target.path))}},{"type":"tool_use","name":"Read","input":{"file_path":\
+            \(JSONFixture.string(readme.path))}}]}}
+            """
+        ])
+
+        let summary = try adapter.extractMetadata(fileURL: url)
+        XCTAssertEqual(summary.projectDir, project.path)
+    }
+
     /// Same bytes, same answers — only the provider, the harness, and the
     /// delete verdict differ between the two Claude adapters.
     func testTheTwoClaudeAdaptersAgreeOnEverythingButProvenance() throws {

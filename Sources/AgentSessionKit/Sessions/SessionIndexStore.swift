@@ -62,7 +62,10 @@ public actor SessionIndexStore {
     /// carried the inherited per-line `sessionId` of forked / continued
     /// sessions instead of the file's own UUID, and a fingerprint-driven
     /// incremental pass would never revisit those unchanged files.
-    static let schemaVersion = 3
+    ///
+    /// v4 also changes no columns; it backfills system and tool excerpts now
+    /// that callers can choose the message roles a search is allowed to hit.
+    static let schemaVersion = 4
 
     /// Open (or create) the index at `url`.
     ///
@@ -516,6 +519,9 @@ public actor SessionIndexStore {
         providers: [SessionProvider]? = nil,
         harnesses: [Harness]? = nil,
         since: Date? = nil,
+        projectIncludes: [String] = [],
+        projectExcludes: [String] = [],
+        excludingProviderVariantPrefix: String? = nil,
         order: SessionSummaryOrder = .recentFirst,
         offset: Int = 0,
         limit: Int = 250
@@ -541,6 +547,16 @@ public actor SessionIndexStore {
         if let since {
             clauses.append("COALESCE(s.last_active_at, s.created_at) >= ?")
             bindings.append(.integer(Int64(since.timeIntervalSince1970.rounded(.down))))
+        }
+        Self.appendProjectClauses(
+            includes: projectIncludes,
+            excludes: projectExcludes,
+            clauses: &clauses,
+            bindings: &bindings
+        )
+        if let prefix = SessionParsing.string(excludingProviderVariantPrefix) {
+            clauses.append("(s.provider_variant IS NULL OR s.provider_variant NOT LIKE ? ESCAPE '\\')")
+            bindings.append(.text(Self.likePattern(prefix) + "%"))
         }
         let whereSQL = clauses.isEmpty ? "" : " WHERE " + clauses.joined(separator: " AND ")
         let orderSQL: String
@@ -625,26 +641,40 @@ public actor SessionIndexStore {
         text: String,
         providers: [SessionProvider]? = nil,
         harnesses: [Harness]? = nil,
+        scopes: Set<SessionSearchScope> = SessionSearchScope.defaultScopes,
+        projectIncludes: [String] = [],
+        projectExcludes: [String] = [],
         limit: Int = 50
     ) throws -> [SessionSearchHit] {
         let needle = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else { return [] }
         if let providers, providers.isEmpty { return [] }
         if let harnesses, harnesses.isEmpty { return [] }
+        guard !scopes.isEmpty else { return [] }
         let cap = min(max(1, limit), 500)
-        let scope = Scope(providers: providers, harnesses: harnesses)
+        let scope = Scope(
+            providers: providers,
+            harnesses: harnesses,
+            searchScopes: scopes,
+            projectIncludes: projectIncludes,
+            projectExcludes: projectExcludes
+        )
 
         var hits: [SessionSearchHit] = []
         var seen: Set<Int64> = []
-        for row in try bodyMatches(needle, scope: scope, limit: cap) {
-            guard seen.insert(row.rowID).inserted else { continue }
-            hits.append(row.hit)
-            if hits.count >= cap { return hits }
+        if scopes.contains(where: { $0.messageRole != nil }) {
+            for row in try bodyMatches(needle, scope: scope, limit: cap) {
+                guard seen.insert(row.rowID).inserted else { continue }
+                hits.append(row.hit)
+                if hits.count >= cap { return hits }
+            }
         }
-        for row in try metadataMatches(needle, scope: scope, limit: cap) {
-            guard seen.insert(row.rowID).inserted else { continue }
-            hits.append(row.hit)
-            if hits.count >= cap { return hits }
+        if scopes.contains(.title) {
+            for row in try metadataMatches(needle, scope: scope, limit: cap) {
+                guard seen.insert(row.rowID).inserted else { continue }
+                hits.append(row.hit)
+                if hits.count >= cap { return hits }
+            }
         }
         return hits
     }
@@ -662,6 +692,9 @@ public actor SessionIndexStore {
     private struct Scope {
         let providers: [SessionProvider]?
         let harnesses: [Harness]?
+        let searchScopes: Set<SessionSearchScope>
+        let projectIncludes: [String]
+        let projectExcludes: [String]
     }
 
     private func bodyMatches(
@@ -669,7 +702,7 @@ public actor SessionIndexStore {
         scope: Scope,
         limit: Int
     ) throws -> [(rowID: Int64, hit: SessionSearchHit)] {
-        let filter = scopeFilter(scope)
+        let filter = scopeFilter(scope, includeMessageRoles: true)
         let sql: String
         var bindings: [Binding]
         if needle.count >= Self.minimumTrigramLength {
@@ -720,13 +753,12 @@ public actor SessionIndexStore {
         scope: Scope,
         limit: Int
     ) throws -> [(rowID: Int64, hit: SessionSearchHit)] {
-        let filter = scopeFilter(scope)
+        let filter = scopeFilter(scope, includeMessageRoles: false)
         let statement = try prepare(
             """
             SELECT \(Self.sessionColumns), s.id FROM sessions s
              WHERE (s.title LIKE ? ESCAPE '\\'
-                 OR s.summary LIKE ? ESCAPE '\\'
-                 OR s.project_dir LIKE ? ESCAPE '\\')\(filter.sql)
+                 OR s.session_id LIKE ? ESCAPE '\\')\(filter.sql)
              ORDER BY s.last_active_at IS NULL, s.last_active_at DESC, s.id DESC
              LIMIT ?
             """
@@ -734,7 +766,7 @@ public actor SessionIndexStore {
         defer { sqlite3_finalize(statement) }
         let pattern = "%" + Self.likePattern(needle) + "%"
         bindAll(
-            [.text(pattern), .text(pattern), .text(pattern)]
+            [.text(pattern), .text(pattern)]
                 + filter.bindings
                 + [.integer(Int64(limit))],
             to: statement
@@ -751,7 +783,10 @@ public actor SessionIndexStore {
         return out
     }
 
-    private func scopeFilter(_ scope: Scope) -> (sql: String, bindings: [Binding]) {
+    private func scopeFilter(
+        _ scope: Scope,
+        includeMessageRoles: Bool
+    ) -> (sql: String, bindings: [Binding]) {
         var sql = ""
         var bindings: [Binding] = []
         if let providers = scope.providers, !providers.isEmpty {
@@ -764,7 +799,81 @@ public actor SessionIndexStore {
             sql += " AND s.harness IN (\(marks))"
             bindings.append(contentsOf: harnesses.map { .text($0.rawValue) })
         }
+        let roles = scope.searchScopes.compactMap(\.messageRole)
+        if includeMessageRoles, !roles.isEmpty {
+            let marks = Array(repeating: "?", count: roles.count).joined(separator: ", ")
+            sql += " AND m.role IN (\(marks))"
+            bindings.append(contentsOf: roles.map { .text($0.rawValue) })
+        }
+        var projectClauses: [String] = []
+        Self.appendProjectClauses(
+            includes: scope.projectIncludes,
+            excludes: scope.projectExcludes,
+            clauses: &projectClauses,
+            bindings: &bindings
+        )
+        if !projectClauses.isEmpty {
+            sql += " AND " + projectClauses.joined(separator: " AND ")
+        }
         return (sql, bindings)
+    }
+
+    private static func appendProjectClauses(
+        includes: [String],
+        excludes: [String],
+        clauses: inout [String],
+        bindings: inout [Binding]
+    ) {
+        let included = includes.compactMap { SessionParsing.string($0) }
+        if !included.isEmpty {
+            clauses.append("(" + Array(repeating: "s.project_dir LIKE ? ESCAPE '\\'", count: included.count)
+                .joined(separator: " OR ") + ")")
+            bindings.append(contentsOf: included.map { .text("%" + likePattern($0) + "%") })
+        }
+        for excluded in excludes.compactMap({ SessionParsing.string($0) }) {
+            clauses.append("(s.project_dir IS NULL OR s.project_dir NOT LIKE ? ESCAPE '\\')")
+            bindings.append(.text("%" + likePattern(excluded) + "%"))
+        }
+    }
+
+    /// One exact session row, used by hosts to resolve a related child hit
+    /// (for example an Auto Review rollout) back to its root conversation.
+    public func summary(provider: SessionProvider, sessionID: String) throws -> SessionSummary? {
+        let statement = try prepare(
+            "SELECT \(Self.sessionColumns) FROM sessions s WHERE s.provider = ? AND s.session_id = ? "
+                + "ORDER BY COALESCE(s.last_active_at, s.created_at) DESC, s.id DESC LIMIT 1"
+        )
+        defer { sqlite3_finalize(statement) }
+        bindAll([.text(provider.rawValue), .text(sessionID)], to: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return summary(statement, offset: 0)
+    }
+
+    /// Provider-specific related rows. The prefix is escaped as data, never
+    /// interpolated as SQL, and the bounded result protects UI callers from
+    /// accidentally loading an unbounded archive.
+    public func summaries(
+        provider: SessionProvider,
+        providerVariantPrefix: String,
+        limit: Int = 2_000
+    ) throws -> [SessionSummary] {
+        let cap = min(max(1, limit), 10_000)
+        let statement = try prepare(
+            "SELECT \(Self.sessionColumns) FROM sessions s WHERE s.provider = ? "
+                + "AND s.provider_variant LIKE ? ESCAPE '\\' "
+                + "ORDER BY COALESCE(s.last_active_at, s.created_at) ASC, s.id ASC LIMIT ?"
+        )
+        defer { sqlite3_finalize(statement) }
+        bindAll([
+            .text(provider.rawValue),
+            .text(Self.likePattern(providerVariantPrefix) + "%"),
+            .integer(Int64(cap))
+        ], to: statement)
+        var out: [SessionSummary] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let value = summary(statement, offset: 0) { out.append(value) }
+        }
+        return out
     }
 
     /// FTS5 `MATCH` takes a query language, not a literal: bare `AND`,

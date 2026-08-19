@@ -154,7 +154,7 @@ final class SessionIndexServiceTests: XCTestCase {
         XCTAssertEqual(geminiHits.map(\.summary.provider), [.gemini])
     }
 
-    func testEnvelopeAndToolTextNeverReachTheIndex() async throws {
+    func testDefaultSearchSkipsEnvelopeAndToolTextButToolScopeCanFindIt() async throws {
         try writeClaudeSession()
         try writeCodexRollout()
         let (service, store) = try makeService()
@@ -176,18 +176,19 @@ final class SessionIndexServiceTests: XCTestCase {
                 "\(needle) should not be in the body index"
             )
         }
+        let toolHits = try await service.search("must not be indexed", scopes: [.tool])
+        XCTAssertTrue(toolHits.contains { $0.matchedSeq != nil })
 
         // The user's own sentence from inside the Codex IDE envelope
         // survives; only the editor preamble is stripped.
         let request = try await service.search("Refactor the rollout parser")
         XCTAssertEqual(request.map(\.summary.provider), [.codex])
 
-        // Three excerpts survive across both providers: Claude's slash
-        // command is dropped as an envelope, its prompt and its
-        // assistant prose are kept, and Codex contributes only the
-        // request that followed its IDE preamble.
+        // Seven role-tagged excerpts survive: normal prompts/replies plus
+        // tool calls and tool outputs. Tool rows are present for an explicit
+        // tool search but excluded from the default scopes above.
         let indexed = try await store.messageCount()
-        XCTAssertEqual(indexed, 3)
+        XCTAssertEqual(indexed, 7)
     }
 
     func testUnchangedFilesAreNotReindexed() async throws {
@@ -359,7 +360,7 @@ final class SessionIndexServiceTests: XCTestCase {
         XCTAssertLessThan(excerpts.count, 200)
     }
 
-    func testExcerptsKeepOnlyUserAndAssistantTurns() {
+    func testExcerptsPreserveEverySearchableRole() {
         let document = TranscriptDocument(
             messages: [
                 SessionMessage(seq: 0, role: .system, text: "system preamble", timestamp: nil),
@@ -374,8 +375,12 @@ final class SessionIndexServiceTests: XCTestCase {
         )
 
         let excerpts = SessionIndexService.excerpts(from: document, provider: .claude)
-        XCTAssertEqual(excerpts.map(\.seq), [1, 3])
-        XCTAssertEqual(excerpts.map(\.excerpt), ["a real question", "a real answer"])
+        XCTAssertEqual(excerpts.map(\.seq), [0, 1, 2, 3, 3, 4, 5])
+        XCTAssertEqual(excerpts.map(\.role), [.system, .user, .tool, .assistant, .tool, .tool, .system])
+        XCTAssertEqual(excerpts.map(\.excerpt), [
+            "system preamble", "a real question", "tool output",
+            "a real answer", "[Tool: Read]", "[Tool: Bash]", "Turn — model · in 1 · out 2"
+        ])
     }
 }
 

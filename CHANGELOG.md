@@ -7,6 +7,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Codex Auto Review relationships.** Guardian rollouts now encode their
+  original root session id in `providerVariant` as `auto-review:<session-id>`,
+  and `CodexSessionAdapter.autoReviewParentSessionID(providerVariant:)` exposes
+  the stable parse. Hosts can merge review runs into the originating session
+  without guessing from project names or timestamps; `parent_thread_id` is
+  intentionally not trusted when `session_id` names the root directly.
+- **Scoped session search and directory filters.** Hosts can independently
+  search titles, user prompts, assistant replies, system prompts, and
+  tool/file operations. Summary pages and searches accept safe project-path
+  include/exclude filters, and related `providerVariant` rows can be hidden,
+  listed, and resolved back to an exact root session.
 - **MCP client diagnostics and safe disconnects.**
   `MCPSocketServer.clientConnections` reports a private connection id, the
   kernel-reported peer pid when available, connection time, and last byte
@@ -25,6 +36,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   makes the claim below assertable rather than timed.
 
 ### Changed
+- **Static session titles now mean a person spoke.** Codex user-role records
+  are passed through the same machine-context stripping used by live session
+  briefs, including `recommended_plugins`, AGENTS/skills/permissions blocks,
+  and environment context. A metadata-side title that is only injected
+  context is rejected too. AntiGravity no longer picks known system,
+  assistant, or tool steps as its fallback title; without a preserved user
+  prompt it uses an honest conversation-id fallback.
+- **AntiGravity session-list metadata is bounded.** Listing a conversation no
+  longer decodes every `gen_metadata` protobuf or materializes the entire
+  `steps` table just to show its newest model and fallback title. SQLite counts
+  rows directly, only bounded first/recent turn windows are decoded, and only
+  the first twelve steps are read for title fallback. Full tables remain
+  available when the user explicitly opens the transcript.
+- **Claude Cowork reports the working folder the user actually touched.**
+  Cowork's isolated `outputs` cwd is replaced, when structured tool paths are
+  available in the bounded transcript head, by their common external project
+  directory. The isolated path remains the safe fallback when no evidence is
+  present.
 - **A desktop-sized MCP client budget, optional idle reclamation, and explicit
   refusal.** The default cap is 64 rather than 16 because desktop clients may
   keep one stdio bridge per open task; hosts can tune it. Idle expiry is now an

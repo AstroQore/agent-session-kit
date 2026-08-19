@@ -212,7 +212,7 @@ public struct ClaudeSessionAdapter: SessionProviderAdapter {
         case "user": return .user
         case "assistant": return .assistant
         case "tool": return .tool
-        case "system": return .system
+        case "system", "developer": return .system
         default: return .other
         }
     }
