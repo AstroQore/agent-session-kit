@@ -59,6 +59,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   this rather than by the primary harness; without it every ChatGPT Work
   session would get no probe at all and resolve `unknown` forever.
 
+### Fixed
+- The two `ClaudeProjectPath` round-trip tests no longer depend on the shape of
+  `NSTemporaryDirectory()`. A GitHub runner's temp path contains `_`
+  (`/var/folders/df/…wsm_g8s…gn/T/`), which `encode` maps to `-` like every
+  other lossy character and no decode can put back, so both expectations
+  failed on CI for a reason that was never the decoder's. Those two fixtures
+  are rooted at `/private/tmp`, every component of which survives the
+  encoding; the rest of the suite still builds its trees under
+  `NSTemporaryDirectory()`.
+
 ## [0.1.0] - 2026-08-19
 
 First tagged release: the extraction from Vibe Bar plus the whole live layer.

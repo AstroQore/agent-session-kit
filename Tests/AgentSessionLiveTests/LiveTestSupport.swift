@@ -14,9 +14,12 @@ final class TemporaryTree: @unchecked Sendable {
     // and each instance is owned by exactly one test.
     let url: URL
 
-    init(_ label: String = #function) {
+    /// `base` is `NSTemporaryDirectory()` for every test but the two that
+    /// decode a project directory name, which need a root whose own
+    /// components survive `ClaudeProjectPath.encode`.
+    init(_ label: String = #function, base: String = NSTemporaryDirectory()) {
         let sanitised = label.replacingOccurrences(of: "()", with: "")
-        url = URL(fileURLWithPath: NSTemporaryDirectory())
+        url = URL(fileURLWithPath: base)
             .appendingPathComponent("agent-session-live-\(sanitised)-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     }

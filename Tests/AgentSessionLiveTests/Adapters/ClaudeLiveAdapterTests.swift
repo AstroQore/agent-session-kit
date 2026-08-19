@@ -547,6 +547,17 @@ struct ClaudeSessionsDirectoryTests {
 
 @Suite("ClaudeProjectPath")
 struct ClaudeProjectPathTests {
+    /// The two round-trip fixtures cannot sit under `NSTemporaryDirectory()`.
+    /// A GitHub runner's temp path is
+    /// `/var/folders/df/…wsm_g8s…gn/T/`, and `encode` maps that `_` to `-`
+    /// like every other lossy character, so no decode can put it back — the
+    /// expectation would fail for a reason that is not the decoder's, while
+    /// the same path on a developer's Mac has no underscore and passes.
+    /// Every component of `/private/tmp` survives the encoding.
+    private func losslessTree(_ label: String = #function) -> TemporaryTree {
+        TemporaryTree(label, base: "/private/tmp")
+    }
+
     @Test("encoding replaces every character a path component cannot carry")
     func encoding() {
         #expect(ClaudeProjectPath.encode(cwd: "/Users/example/code/demo") == "-Users-example-code-demo")
@@ -563,7 +574,7 @@ struct ClaudeProjectPathTests {
 
     @Test("a dash inside a component is resolved against the file system")
     func decodeChecksTheDisk() throws {
-        let tree = TemporaryTree()
+        let tree = losslessTree()
         // The ambiguity the encoding creates: `vibe-bar` and `vibe/bar` encode
         // identically, and only the disk can say which one existed.
         let real = tree.url.appendingPathComponent("code/vibe-bar")
@@ -575,7 +586,7 @@ struct ClaudeProjectPathTests {
 
     @Test("a directory that is gone falls back to the naive split for the tail")
     func decodeFallsBack() throws {
-        let tree = TemporaryTree()
+        let tree = losslessTree()
         let existing = tree.url.appendingPathComponent("code")
         try FileManager.default.createDirectory(at: existing, withIntermediateDirectories: true)
 
