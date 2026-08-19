@@ -51,6 +51,29 @@ public protocol SourceAdapter: Sendable {
     /// has not been written to in a week is not it.
     func discover(home: String, activeSince: Date) async throws -> [SessionSource]
 
+    /// The same, narrowed to the part of the store that just changed.
+    ///
+    /// A file-system notification names a path. A host that answers it by
+    /// asking every adapter to sweep its whole store pays for the whole
+    /// machine's history every time a live transcript gains a line, which on
+    /// a machine with hundreds of sessions is most of the CPU a board burns
+    /// while nothing is happening. So the host asks the one adapter whose
+    /// roots contain the path, about the one directory the path is in.
+    ///
+    /// `directory` is a directory at or below one of ``watchRoots(home:)``,
+    /// or `nil` for "the whole store" — which is what the periodic safety
+    /// net asks for. An implementation must return every source
+    /// ``discover(home:activeSince:)`` would have returned whose primary
+    /// path lies at or below `directory`. Returning *more* than that is
+    /// always safe: the host registers only sources it does not already
+    /// have. An adapter that cannot narrow a particular directory should
+    /// sweep rather than return nothing.
+    ///
+    /// The default sweeps, so an adapter that has not thought about it stays
+    /// correct and merely as expensive as it always was. Narrowing is worth
+    /// implementing for a store big enough that a sweep is felt.
+    func discover(home: String, activeSince: Date, under directory: URL?) async throws -> [SessionSource]
+
     /// Builds a tailer for a source, resuming from `cursor` when one was
     /// persisted.
     ///
@@ -94,4 +117,8 @@ public extension SourceAdapter {
     var handledHarnesses: [Harness] { [harness] }
 
     func mightBeSessionFile(path: String) -> Bool { true }
+
+    func discover(home: String, activeSince: Date, under directory: URL?) async throws -> [SessionSource] {
+        try await discover(home: home, activeSince: activeSince)
+    }
 }

@@ -50,11 +50,25 @@ public struct IngestConfiguration: Hashable, Sendable {
     /// FSEvents is reliable for `write(2)` and this only exists to cover a
     /// missed notification.
     public var jsonlPollEvery: Duration
-    /// How often every adapter is asked to discover again.
+    /// How often every adapter is asked to sweep its whole store again.
+    ///
+    /// Long, because this is only the safety net. A session that appears
+    /// while the pipeline runs is found by routing the file-system
+    /// notification to the adapter whose roots contain the path and asking
+    /// it about that one directory, which happens in well under a second.
+    /// The sweep is for the notification that never came: a store on a
+    /// filesystem FSEvents does not report, a watch that was being rebuilt,
+    /// a creation that was coalesced away.
     public var rediscoverEvery: Duration
-    /// The floor between two discovery passes when one was triggered early
-    /// by an unrecognised path. Without it, activity in a directory full of
-    /// files nobody tails would run discovery continuously.
+    /// How long a routed, directory-scoped discovery waits for the rest of
+    /// its burst before running.
+    ///
+    /// A turn that writes a transcript, its sidecar, and its lock in the
+    /// same millisecond should cost one scoped walk rather than three.
+    public var discoveryDebounce: Duration
+    /// The floor between two discovery passes of the **same** adapter.
+    /// Without it, activity in a directory full of files nobody tails would
+    /// run that adapter's discovery continuously.
     public var rediscoverThrottle: Duration
     /// How long a source must go undiscovered before its tailer is dropped.
     public var dropAfter: Duration
@@ -86,7 +100,8 @@ public struct IngestConfiguration: Hashable, Sendable {
         databaseDebounce: Duration = .milliseconds(250),
         sqlitePollEvery: Duration = .seconds(2),
         jsonlPollEvery: Duration = .seconds(10),
-        rediscoverEvery: Duration = .seconds(15),
+        rediscoverEvery: Duration = .seconds(60),
+        discoveryDebounce: Duration = .milliseconds(250),
         rediscoverThrottle: Duration = .seconds(3),
         dropAfter: Duration = .seconds(600),
         activeWindow: TimeInterval = 24 * 60 * 60,
@@ -102,6 +117,7 @@ public struct IngestConfiguration: Hashable, Sendable {
         self.sqlitePollEvery = sqlitePollEvery
         self.jsonlPollEvery = jsonlPollEvery
         self.rediscoverEvery = rediscoverEvery
+        self.discoveryDebounce = discoveryDebounce
         self.rediscoverThrottle = rediscoverThrottle
         self.dropAfter = dropAfter
         self.activeWindow = activeWindow
@@ -129,7 +145,7 @@ public struct IngestConfiguration: Hashable, Sendable {
 ///                        AsyncStream<AgentEvent>  +  AsyncStream<IngestNotice>
 /// ```
 ///
-/// Four things happen on a schedule, and each covers a hole in the others:
+/// Five things happen on a schedule, and each covers a hole in the others:
 ///
 /// - **Watch.** One ``FSEventsWatcher`` over the union of every adapter's
 ///   roots. One watch, not one per harness: FSEvents streams are a per-process
@@ -141,9 +157,11 @@ public struct IngestConfiguration: Hashable, Sendable {
 /// - **Safety-net poll.** Every tailer is polled on an interval regardless of
 ///   notifications, because FSEvents drops events under load and does not
 ///   report WAL writes into a mapped `-shm` at all.
-/// - **Rediscovery.** Every adapter is asked again on an interval, because a
-///   new session is a new *file*, and a tailer for it can only exist after
-///   something looked.
+/// - **Routed discovery.** A notification for a path nothing tails goes to the
+///   adapters whose declared roots contain it, and asks them about that one
+///   directory. This is how a session that started a second ago is found.
+/// - **Rediscovery.** Every adapter sweeps its whole store on a long interval,
+///   as the safety net for a notification that never arrived.
 ///
 /// ## What it does not do
 ///
@@ -158,10 +176,35 @@ public actor IngestCoordinator {
         var lastPolled: ContinuousClock.Instant?
     }
 
+    /// What one adapter has been asked to look at, as a burst of file-system
+    /// notifications accumulates.
+    private struct PendingScope {
+        /// The directories a changed path was found in.
+        var directories: Set<String> = []
+        /// The scopes stopped being worth tracking separately — sweep the
+        /// adapter's whole store instead. A burst that touches dozens of
+        /// directories at once is a store being rewritten, and walking each
+        /// of them costs more than one sweep.
+        var wholeStore = false
+    }
+
+    /// How many distinct directories one adapter is asked about before a
+    /// scoped pass is replaced by a sweep.
+    private static let maximumScopes = 16
+
     private let adapters: [any SourceAdapter]
     private let home: String
     private let cursorStore: (any SourceCursorStore)?
     private let configuration: IngestConfiguration
+    /// Each adapter's declared watch roots, in the same order as `adapters`.
+    ///
+    /// The whole of the routing decision: a changed path belongs to the
+    /// adapters whose roots contain it, and to no others. Without the
+    /// containment test, a rule as innocent as "any `*.lock` could be a
+    /// session" — which is true inside `~/.codex` — claims every writer lock
+    /// Grok touches and every presence file AntiGravity heartbeats, and every
+    /// one of those becomes a sweep of the whole machine.
+    private let adapterRoots: [[String]]
 
     private var watcher: FSEventsWatcher?
     private var entries: [String: Entry] = [:]
@@ -178,6 +221,13 @@ public actor IngestCoordinator {
     private var rediscoveryTask: Task<Void, Never>?
     private var rediscoveryPending = false
     private var lastDiscoveryAt: ContinuousClock.Instant?
+    /// Directories a routed discovery still owes each adapter, by index.
+    private var pendingScopes: [Int: PendingScope] = [:]
+    private var scopedDiscoveryTask: Task<Void, Never>?
+    /// When each adapter last discovered anything, by index. The throttle is
+    /// per adapter because the stores are independent: Grok being rewritten
+    /// is no reason to make Claude Code wait.
+    private var lastAdapterDiscoveryAt: [Int: ContinuousClock.Instant] = [:]
 
     private var eventContinuation: AsyncStream<AgentEvent>.Continuation?
     private var noticeContinuation: AsyncStream<IngestNotice>.Continuation?
@@ -208,6 +258,11 @@ public actor IngestCoordinator {
         self.home = home
         self.cursorStore = cursorStore
         self.configuration = configuration
+        // Resolved once: `watchRoots` is a pure function of `home` for every
+        // adapter in this package, and routing asks the question per path.
+        self.adapterRoots = adapters.map { adapter in
+            adapter.watchRoots(home: home).map(\.path)
+        }
     }
 
     /// Starts watching, discovering, and tailing, and returns the two
@@ -238,7 +293,7 @@ public actor IngestCoordinator {
         self.activeStreams = (events, notices)
         isRunning = true
 
-        let roots = adapters.flatMap { $0.watchRoots(home: home) }.map(\.path)
+        let roots = adapterRoots.flatMap { $0 }
         let watcher = FSEventsWatcher(
             paths: roots,
             latency: configuration.watcherLatency,
@@ -277,6 +332,9 @@ public actor IngestCoordinator {
         debounceGeneration.removeAll()
         rediscoveryTask?.cancel()
         rediscoveryTask = nil
+        scopedDiscoveryTask?.cancel()
+        scopedDiscoveryTask = nil
+        pendingScopes.removeAll()
         for task in tasks { task.cancel() }
         tasks.removeAll()
         watcher?.stop()
@@ -339,12 +397,40 @@ public actor IngestCoordinator {
         }
     }
 
+    /// A full sweep: every adapter, its whole store, followed by the drop
+    /// pass.
+    ///
+    /// The drop pass belongs here and nowhere else. "This source stopped
+    /// being discovered" is only meaningful after somebody looked everywhere,
+    /// and a scoped pass looked at one directory.
     private func performDiscovery() async {
         guard isRunning else { return }
         lastDiscoveryAt = ContinuousClock.now
         let cutoff = Date().addingTimeInterval(-configuration.activeWindow)
 
-        for adapter in adapters {
+        for index in adapters.indices {
+            await discover(adapterAt: index, cutoff: cutoff, under: nil)
+        }
+
+        let now = ContinuousClock.now
+        for (path, seen) in lastSeen where now - seen > configuration.dropAfter {
+            drop(path)
+        }
+    }
+
+    /// Runs one adapter's discovery, over one directory or over everything,
+    /// and registers whatever came back that is not already tailed.
+    private func discover(adapterAt index: Int, cutoff: Date, under directories: Set<String>?) async {
+        guard isRunning, adapters.indices.contains(index) else { return }
+        let adapter = adapters[index]
+        lastAdapterDiscoveryAt[index] = ContinuousClock.now
+        // Cleared before the walk, not after: a file that appears while the
+        // walk is running has to survive as a pending scope, or the one
+        // notification announcing it is thrown away.
+        if directories == nil { pendingScopes[index] = nil }
+
+        let scopes: [URL?] = directories.map { $0.sorted().map { URL(fileURLWithPath: $0) } } ?? [nil]
+        for scope in scopes {
             let sources: [SessionSource]
             do {
                 // Off the actor: an adapter's discovery is a directory walk
@@ -353,7 +439,7 @@ public actor IngestCoordinator {
                 // behind it — for as long as the walk takes.
                 let home = self.home
                 sources = try await Task.detached(priority: .utility) {
-                    try await adapter.discover(home: home, activeSince: cutoff)
+                    try await adapter.discover(home: home, activeSince: cutoff, under: scope)
                 }.value
             } catch {
                 noticeContinuation?.yield(
@@ -365,11 +451,6 @@ public actor IngestCoordinator {
                 guard entries[source.primaryPath] == nil else { continue }
                 await register(source, adapter: adapter)
             }
-        }
-
-        let now = ContinuousClock.now
-        for (path, seen) in lastSeen where now - seen > configuration.dropAfter {
-            drop(path)
         }
     }
 
@@ -485,6 +566,89 @@ public actor IngestCoordinator {
         await performDiscovery()
     }
 
+    // MARK: - Routed discovery
+
+    /// Records that `path` changed, and that nothing tails it.
+    ///
+    /// Two questions decide what it costs. *Whose store is this?* — answered
+    /// by the adapter's own declared roots, so a lock file under `~/.grok`
+    /// never reaches the Codex adapter however much its name looks like a
+    /// Codex lock. *Could it be a session?* — the adapter's own
+    /// ``SourceAdapter/mightBeSessionFile(path:)``, which keeps the sidecars
+    /// every store rewrites continuously from counting as news.
+    ///
+    /// A path no adapter claims costs nothing at all: no discovery, no
+    /// timer, no wakeup.
+    private func route(changed path: String) {
+        for index in adapters.indices {
+            guard adapterRoots[index].contains(where: { DiscoveryIO.path(path, isUnder: $0) }),
+                  adapters[index].mightBeSessionFile(path: path)
+            else { continue }
+
+            var scope = pendingScopes[index] ?? PendingScope()
+            if !scope.wholeStore {
+                scope.directories.insert(URL(fileURLWithPath: path).deletingLastPathComponent().path)
+                if scope.directories.count > Self.maximumScopes {
+                    scope.wholeStore = true
+                    scope.directories.removeAll()
+                }
+            }
+            pendingScopes[index] = scope
+        }
+    }
+
+    /// Schedules the pending scoped passes, debounced and throttled.
+    ///
+    /// The wait is the *soonest* any pending adapter may run again, so one
+    /// adapter sitting out its throttle never delays another. Adapters still
+    /// inside their throttle when the pass runs keep their pending scopes and
+    /// are rescheduled.
+    private func scheduleScopedDiscovery() {
+        guard isBootstrapped, isRunning, scopedDiscoveryTask == nil, !pendingScopes.isEmpty else {
+            return
+        }
+        let now = ContinuousClock.now
+        var soonest: Duration?
+        for index in pendingScopes.keys {
+            var remaining = Duration.zero
+            if let last = lastAdapterDiscoveryAt[index] {
+                let elapsed = now - last
+                if elapsed < configuration.rediscoverThrottle {
+                    remaining = configuration.rediscoverThrottle - elapsed
+                }
+            }
+            soonest = soonest.map { Swift.min($0, remaining) } ?? remaining
+        }
+        let wait = Swift.max(configuration.discoveryDebounce, soonest ?? .zero)
+
+        scopedDiscoveryTask = Task { [weak self] in
+            do { try await Task.sleep(for: wait) } catch { return }
+            await self?.runScopedDiscovery()
+        }
+    }
+
+    private func runScopedDiscovery() async {
+        scopedDiscoveryTask = nil
+        guard isRunning else { return }
+        let cutoff = Date().addingTimeInterval(-configuration.activeWindow)
+        let now = ContinuousClock.now
+
+        for (index, scope) in pendingScopes.sorted(by: { $0.key < $1.key }) {
+            if let last = lastAdapterDiscoveryAt[index], now - last < configuration.rediscoverThrottle {
+                continue
+            }
+            pendingScopes[index] = nil
+            await discover(
+                adapterAt: index,
+                cutoff: cutoff,
+                under: scope.wholeStore ? nil : scope.directories
+            )
+        }
+        // Whatever was still inside its throttle, and whatever arrived while
+        // this pass was walking.
+        scheduleScopedDiscovery()
+    }
+
     // MARK: - Watching
 
     private func handle(batch: FSEventBatch) async {
@@ -500,20 +664,18 @@ public actor IngestCoordinator {
             return
         }
 
-        var sawUnknownPath = false
         for path in batch.paths {
             if let owner = pathOwner[path] {
                 schedule(owner, database: SQLiteChangeWatcher.isStoreFile(path))
-            } else if !sawUnknownPath, adapters.contains(where: { $0.mightBeSessionFile(path: path) }) {
-                // Only a path that could *be* a session earns a rediscovery.
-                // Stores write sidecars constantly — summaries, locks, tool
-                // output — and each of those used to restart discovery.
-                sawUnknownPath = true
+            } else {
+                // Something changed under a watched root that nothing tails:
+                // most likely a session that started a moment ago. Route it
+                // to whoever owns that part of the disk rather than asking
+                // everybody to look everywhere.
+                route(changed: path)
             }
         }
-        // Something changed under a watched root that nothing tails: most
-        // likely a session that started a moment ago.
-        if sawUnknownPath { requestRediscovery() }
+        scheduleScopedDiscovery()
     }
 
     private func handleWatcherRestart() async {
