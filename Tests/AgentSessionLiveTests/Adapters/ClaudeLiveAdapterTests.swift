@@ -203,6 +203,12 @@ struct ClaudeLiveAdapterTests {
         try? Data("s".utf8).write(to: URL(fileURLWithPath: socket))
         home.writeSessionEntry(pid: getpid(), procStart: nil, socketPath: socket)
 
+        // The entry is rewritten in place below, under a directory whose own
+        // mtime therefore does not move — the one change the machine-wide
+        // read's stamp cannot see. Claude Code writes that file when a
+        // session starts and removes it when it ends, so no reuse window is
+        // right for a test that rewrites it twice in a millisecond.
+        let adapter = ClaudeLiveAdapter(sessionsLifetime: 0)
         let present = adapter.probeLiveness(identity(home), table: ProcessTable(), home: home.home)
         #expect(present.evidence.contains("messaging socket present"))
 

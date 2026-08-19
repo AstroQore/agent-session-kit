@@ -106,6 +106,11 @@ public struct GrokLiveAdapter: SourceAdapter {
     /// worth asking. See ``GrokLockCache``.
     private let lockCache = GrokLockCache()
 
+    /// `active_sessions.json` as the last liveness pass read it. See
+    /// ``RegistrySnapshot``: the file answers for every session at once, and
+    /// this probe is asked once per session.
+    private let registry = RegistrySnapshot<[GrokActiveSession]>()
+
     /// Creates an adapter.
     ///
     /// - Parameters:
@@ -353,7 +358,10 @@ public struct GrokLiveAdapter: SourceAdapter {
         let sessionID = identity.key.sessionID
         let directory = Self.sessionDirectory(sourcePath: identity.sourcePath)
 
-        if let entry = GrokActiveSessions.read(home: home).first(where: { $0.names(sessionID) }) {
+        let running = registry.value(at: GrokActiveSessions.path(home: home)) {
+            GrokActiveSessions.read(home: home)
+        }
+        if let entry = running.first(where: { $0.names(sessionID) }) {
             guard let pid = entry.pid else {
                 return LivenessHint(
                     verdict: .alive,

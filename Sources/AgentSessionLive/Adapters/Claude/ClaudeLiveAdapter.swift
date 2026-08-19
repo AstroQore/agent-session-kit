@@ -98,6 +98,10 @@ public struct ClaudeLiveAdapter: SourceAdapter {
     private let clock: @Sendable () -> Date
     /// See ``ClaudeSourceCache``. This adapter's own, never Cowork's.
     private let cache = ClaudeSourceCache()
+    /// `~/.claude/sessions` as the last liveness pass read it. See
+    /// ``RegistrySnapshot``: the directory answers for every session at once,
+    /// and this probe is asked once per session.
+    private let sessions: RegistrySnapshot<[ClaudeLiveSession]>
 
     /// Creates an adapter.
     ///
@@ -114,10 +118,37 @@ public struct ClaudeLiveAdapter: SourceAdapter {
         linker: ClaudeSubagentLinker = ClaudeSubagentLinker(),
         clock: @escaping @Sendable () -> Date = { Date() }
     ) {
+        self.init(
+            deadAfter: deadAfter,
+            startTolerance: startTolerance,
+            linker: linker,
+            clock: clock,
+            sessionsLifetime: RegistrySnapshot<[ClaudeLiveSession]>.defaultLifetime
+        )
+    }
+
+    /// The same, with the window over which one read of `~/.claude/sessions`
+    /// answers for every session made explicit.
+    ///
+    /// Internal because zero is the only other useful value and only a test
+    /// wants it: the suite rewrites a `<pid>.json` in place to check what the
+    /// evidence string says about a messaging socket, and an entry rewritten
+    /// under an unchanged directory is the one change ``RegistrySnapshot``'s
+    /// stamp cannot see. Claude Code writes that file when a session starts
+    /// and removes it when the session ends; nothing it rewrites mid-session
+    /// moves a verdict.
+    init(
+        deadAfter: TimeInterval = 600,
+        startTolerance: TimeInterval = 2,
+        linker: ClaudeSubagentLinker = ClaudeSubagentLinker(),
+        clock: @escaping @Sendable () -> Date = { Date() },
+        sessionsLifetime: TimeInterval
+    ) {
         self.deadAfter = deadAfter
         self.startTolerance = startTolerance
         self.linker = linker
         self.clock = clock
+        self.sessions = RegistrySnapshot(lifetime: sessionsLifetime)
     }
 
     /// The parent/child join this adapter announces subagents through.
@@ -237,7 +268,10 @@ public struct ClaudeLiveAdapter: SourceAdapter {
         // A subagent has no process of its own; it runs inside its parent's,
         // so it is exactly as alive as the session it was spawned from.
         let rootSessionID = Self.rootSessionID(of: identity.key)
-        let entries = ClaudeSessionsDirectory.read(home: home)
+        let directory = ClaudeSessionsDirectory.directoryURL(home: home).path
+        let entries = sessions.value(at: directory) {
+            ClaudeSessionsDirectory.read(home: home)
+        }
 
         guard let entry = ClaudeSessionsDirectory.session(for: rootSessionID, in: entries) else {
             guard let age = LockFileProbe.ageOfLastWrite(path: identity.sourcePath) else {
