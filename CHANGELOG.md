@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-20
+
+Session indexing becomes a reusable, role-aware host capability with related
+Codex reviews, bounded AntiGravity metadata, accurate Cowork paths, and MCP
+connections that fail and clean up explicitly under desktop-scale load.
+
 ### Added
 - **Codex Auto Review relationships.** Guardian rollouts now encode their
   original root session id in `providerVariant` as `auto-review:<session-id>`,
