@@ -15,7 +15,8 @@ final class HarnessNamingTests: XCTestCase {
                 "Gemini CLI",
                 "AntiGravity",
                 "Grok Build",
-                "Cursor"
+                "Cursor",
+                "Grok Bot"
             ]
         )
     }
@@ -36,7 +37,7 @@ final class HarnessNamingTests: XCTestCase {
             Harness.allCases.map(\.rawValue),
             [
                 "codex", "chatgptWork", "claudeCode", "claudeCowork",
-                "geminiCLI", "antigravity", "grokBuild", "cursor"
+                "geminiCLI", "antigravity", "grokBuild", "cursor", "grokBot"
             ]
         )
     }
@@ -46,7 +47,8 @@ final class HarnessNamingTests: XCTestCase {
     func testEveryProviderHasADefaultHarness() {
         XCTAssertEqual(
             SessionProvider.allCases.map(\.defaultHarness),
-            [.claudeCode, .claudeCowork, .codex, .grokBuild, .cursor, .geminiCLI, .antigravity]
+            [.claudeCode, .claudeCowork, .codex, .grokBuild, .cursor, .geminiCLI,
+             .antigravity, .grokBot]
         )
         XCTAssertEqual(
             Set(Harness.allCases).subtracting(SessionProvider.allCases.map(\.defaultHarness)),
@@ -60,5 +62,16 @@ final class HarnessNamingTests: XCTestCase {
         XCTAssertEqual(SessionProvider.claude.displayName, HarnessCatalog.claudeCode)
         XCTAssertEqual(SessionProvider.claudeCowork.displayName, HarnessCatalog.claudeCowork)
         XCTAssertEqual(SessionProvider.antigravity.displayName, HarnessCatalog.antigravity)
+        XCTAssertEqual(SessionProvider.grokBot.displayName, HarnessCatalog.grokBot)
+    }
+
+    /// Grok Build and Grok Bot share a company and nothing else: one is a
+    /// local CLI with rollouts on disk, the other a cloud bot whose client
+    /// caches conversations here. Collapsing them would put a CLI's name on
+    /// a server's transcript.
+    func testGrokBuildAndGrokBotAreDistinctHarnesses() {
+        XCTAssertNotEqual(Harness.grokBuild, Harness.grokBot)
+        XCTAssertEqual(Harness.grokBuild.displayName, "Grok Build")
+        XCTAssertEqual(Harness.grokBot.displayName, "Grok Bot")
     }
 }

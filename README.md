@@ -37,17 +37,20 @@ Requires macOS 26 and Swift 6.2.
 | AntiGravity | `~/.gemini/antigravity{,-cli,-ide}/conversations/*.db` | ✅ | ✅ | ❌ live WAL handles |
 | Grok Build | `~/.grok/sessions/**`, `~/.grok/archived_sessions` | ✅ | ✅ | ✅ |
 | Cursor | `~/.cursor/chats/**/store.db` | ✅ | ⚠️ when a turn recorded one | ❌ store stays open |
+| Grok Bot | `~/Library/Application Support/Grok Bot/sand-client-persistence` | ✅ | ❌ the run happens server-side | ❌ a cloud cache |
 
 Where a ⚠️ appears the log genuinely does not carry the value — an aborted
 Cursor conversation records no model name at all, and old Gemini CLI chats
 predate the per-turn `model` field. Those stay `nil`. A model is never
 inferred from the vendor's "usual" one; a wrong model on a row is worse than
-an empty one.
+an empty one. Grok Bot's ❌ is the stronger statement: the conversation runs
+on xAI's servers and the client's cache records no model, no token counts,
+and no cost for anyone to read.
 
-Three providers are listed and readable but never deletable, because another
-running app owns the store. `SessionProvider.supportsDeletion` says so up
-front, and the adapters fail closed with
-`SessionDeleteError.providerIsReadOnly`.
+Four providers are listed and readable but never deletable, because another
+running app — or, for Grok Bot, a server — owns the store.
+`SessionProvider.supportsDeletion` says so up front, and the adapters fail
+closed with `SessionDeleteError.providerIsReadOnly`.
 
 ## Usage
 
@@ -200,6 +203,7 @@ table goes through `ArgvSanitizer`.
 | Gemini CLI | — | `~/.gemini/tmp/*/chats` |
 | AntiGravity | ✅ `AntigravityLiveAdapter` | `~/.gemini/antigravity{-cli,}/conversations/*.db`; state from the SQL columns plus a shallow `step_payload` decode; liveness via `presence/<id>.lock` |
 | Cursor | ✅ `CursorLiveAdapter` | `~/.cursor/chats/**/store.db` + `~/.cursor/projects/<slug>/agent-transcripts`; liveness via `cursor-agent-worker-*.pid` and the store's WAL |
+| Grok Bot | — | `~/Library/Application Support/Grok Bot/sand-client-persistence`; the client replicates a cloud conversation on its own schedule, so there is nothing local to tail |
 
 ```swift
 let adapter = ClaudeLiveAdapter()

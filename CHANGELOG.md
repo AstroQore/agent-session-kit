@@ -7,6 +7,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`GrokBotSessionAdapter`** — xAI's standalone `Grok Bot.app` is a listed
+  provider. Its client caches every conversation under
+  `~/Library/Application Support/Grok Bot/sand-client-persistence/`, where each
+  file is named after the lowercase, unpadded RFC 4648 base32 of the key it
+  holds, so discovery decodes stems through a new `Base32` and claims only
+  `sand.client.slice.account.<account>.transcript.replicas.<bot uuid>`. The
+  per-account `roster.last-roster` slice supplies the name a transcript does
+  not carry, cached against its own mtime and size so a scan parses it once
+  rather than once per bot. Entries are read from the transcript owner's point
+  of view: `send-message` is the bot's own turn, an inbound `fromAgent`
+  message is another bot prompting this one (name-prefixed, still `.user`), an
+  `assistant` turn with a `toAgent` is this bot answering that one
+  (`→ Name: …`), and renames and attachments count as turns without being
+  shown. File order is kept, because a couple of conversations have
+  `timestampMs` running backwards. `lastActiveAt` is the later of the newest
+  entry and the roster's `lastActivityAt` — the two clocks disagree in both
+  directions.
+- **Grok Bot is read-only, and says so.** `SessionProvider.grokBot` reports
+  `supportsDeletion == false`, the adapter fails closed with
+  `SessionDeleteError.providerIsReadOnly(.grokBot)`, and
+  `SessionResumeCommandBuilder` refuses on every variant: the conversation
+  runs on xAI's servers and there is no CLI to hand it back to. `model` is
+  always `nil` for the same reason — the run left no local trace of what
+  answered.
+- **`Harness.grokBot`** — Grok Bot is its own harness, not a second name for
+  Grok Build. They share a company and nothing else: one is a local CLI with
+  rollouts on disk, the other a cloud bot whose client caches conversations.
 - **`ClaudeCoworkLiveAdapter`** — Claude Cowork is now live, not just indexed.
   Discovery walks `~/Library/Application Support/Claude/local-agent-mode-sessions/**/.claude/projects`
   through `ClaudeCoworkPaths`, the same sweep the on-disk index uses, so a
