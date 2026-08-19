@@ -35,8 +35,9 @@ import Foundation
 ///                            SessionSnapshot          (one board row)
 ///
 ///  ProcessTable ──▶ SourceAdapter.probeLiveness ──▶ LivenessResolver
-///                                                        │  transitions only
-///                          AgentEventKind.liveness  ◀─────┘
+///       │                                                │  transitions only
+///       │                    AgentEventKind.liveness  ◀───┘
+///       └──▶ ProcessLinker ──▶ ProcessLink ──▶ AgentEventKind.identityUpdated
 /// ```
 ///
 /// - ``SessionKey`` names a session globally: a harness plus that harness's
@@ -72,6 +73,16 @@ import Foundation
 /// `(pid, startTime)` check — pids are recycled, so the pair is the identity —
 /// and emits ``AgentEventKind/liveness(alive:)`` only when the answer
 /// changed.
+///
+/// ## Linking
+///
+/// The same process table answers a second question no log records: which
+/// session started which. ``ProcessLinker`` reads the environment a harness
+/// hands its children — the variables are tabulated once in
+/// ``SessionEnvironmentVariables`` — and, failing that, the spawn tree, and
+/// proposes ``ProcessLink`` edges a host applies as identity patches. It only
+/// ever fills a blank: ``ParentLink/precedence`` ranks a person's own link and
+/// a logged spawn above anything inferred here.
 ///
 /// What is not here yet: the adapters themselves. Everything they plug into
 /// is in place.
