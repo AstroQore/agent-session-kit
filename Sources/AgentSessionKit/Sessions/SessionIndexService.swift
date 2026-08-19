@@ -83,6 +83,9 @@ public actor SessionIndexService {
         providers: [SessionProvider]? = nil,
         harnesses: [Harness]? = nil,
         since: Date? = nil,
+        projectIncludes: [String] = [],
+        projectExcludes: [String] = [],
+        excludingProviderVariantPrefix: String? = nil,
         order: SessionSummaryOrder = .recentFirst,
         offset: Int = 0,
         limit: Int = 250
@@ -91,6 +94,9 @@ public actor SessionIndexService {
             providers: providers,
             harnesses: harnesses,
             since: since,
+            projectIncludes: projectIncludes,
+            projectExcludes: projectExcludes,
+            excludingProviderVariantPrefix: excludingProviderVariantPrefix,
             order: order,
             offset: offset,
             limit: limit
@@ -109,12 +115,34 @@ public actor SessionIndexService {
         _ text: String,
         providers: [SessionProvider]? = nil,
         harnesses: [Harness]? = nil,
+        scopes: Set<SessionSearchScope> = SessionSearchScope.defaultScopes,
+        projectIncludes: [String] = [],
+        projectExcludes: [String] = [],
         limit: Int = 50
     ) async throws -> [SessionSearchHit] {
         try await store.search(
             text: text,
             providers: providers,
             harnesses: harnesses,
+            scopes: scopes,
+            projectIncludes: projectIncludes,
+            projectExcludes: projectExcludes,
+            limit: limit
+        )
+    }
+
+    public func summary(provider: SessionProvider, sessionID: String) async throws -> SessionSummary? {
+        try await store.summary(provider: provider, sessionID: sessionID)
+    }
+
+    public func summaries(
+        provider: SessionProvider,
+        providerVariantPrefix: String,
+        limit: Int = 2_000
+    ) async throws -> [SessionSummary] {
+        try await store.summaries(
+            provider: provider,
+            providerVariantPrefix: providerVariantPrefix,
             limit: limit
         )
     }
@@ -199,10 +227,10 @@ public actor SessionIndexService {
     /// indexed from the top and truncated.
     static let maxSessionExcerptBytes = 512 * 1024
 
-    /// What of a transcript is worth searching: the human's prompts and
-    /// the model's replies. Tool output, system preambles, and the
-    /// editor / slash-command envelopes are noise a user would never
-    /// search for and would flood every result list if indexed.
+    /// Every semantic message role is indexed so the caller can choose the
+    /// exact search surface. Machine envelopes are still removed before the
+    /// text reaches SQLite; a system/tool-only search should find intentional
+    /// content, not the identical harness bootstrap copied into every log.
     static func excerpts(
         from document: TranscriptDocument,
         provider: SessionProvider
@@ -210,38 +238,52 @@ public actor SessionIndexService {
         var out: [SessionIndexStore.MessageExcerpt] = []
         var budget = maxSessionExcerptBytes
         for message in document.messages {
-            guard message.role == .user || message.role == .assistant else { continue }
-            guard let text = normalize(message.text, provider: provider) else { continue }
-            let cost = text.utf8.count
-            guard cost <= budget else { break }
-            budget -= cost
-            out.append(SessionIndexStore.MessageExcerpt(
-                seq: message.seq, role: message.role, excerpt: text
-            ))
+            guard let text = normalize(message.text, role: message.role, provider: provider) else { continue }
+            var parts: [(role: SessionRole, text: String)] = []
+            if message.role == .assistant {
+                let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+                if let marker = lines.firstIndex(where: {
+                    $0.trimmingCharacters(in: .whitespaces).hasPrefix("[Tool: ")
+                }) {
+                    let prose = lines[..<marker].joined(separator: "\n")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let tool = lines[marker...].joined(separator: "\n")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !prose.isEmpty { parts.append((.assistant, prose)) }
+                    if !tool.isEmpty { parts.append((.tool, tool)) }
+                } else {
+                    parts.append((.assistant, text))
+                }
+            } else {
+                parts.append((message.role == .other ? .system : message.role, text))
+            }
+            for part in parts {
+                let cost = part.text.utf8.count
+                guard cost <= budget else { return out }
+                budget -= cost
+                out.append(SessionIndexStore.MessageExcerpt(
+                    seq: message.seq,
+                    role: part.role,
+                    excerpt: part.text
+                ))
+            }
         }
         return out
     }
 
-    static func normalize(_ raw: String, provider: SessionProvider) -> String? {
+    static func normalize(_ raw: String, role: SessionRole, provider: SessionProvider) -> String? {
         var text = raw
         if provider == .codex {
             text = CodexSessionAdapter.strippingIDEEnvelope(text)
+            if role == .user {
+                guard let instruction = HumanPromptText.instruction(text) else { return nil }
+                text = instruction
+            }
         }
         guard !ClaudeSessionAdapter.isEnvelopeText(text) else { return nil }
 
-        // `[Tool: name]` markers are how every adapter renders a tool
-        // call inside an assistant turn; they carry no searchable content.
-        let kept = text
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .filter { !isToolMarker($0) }
-            .joined(separator: "\n")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let kept = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !kept.isEmpty else { return nil }
         return SessionParsing.truncate(kept, limit: maxExcerptCharacters)
-    }
-
-    private static func isToolMarker(_ line: Substring) -> Bool {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        return trimmed.hasPrefix("[Tool: ") && trimmed.hasSuffix("]")
     }
 }

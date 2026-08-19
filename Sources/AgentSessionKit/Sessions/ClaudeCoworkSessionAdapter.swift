@@ -35,11 +35,15 @@ public struct ClaudeCoworkSessionAdapter: SessionProviderAdapter {
     // MARK: - Metadata
 
     public func extractMetadata(fileURL: URL) throws -> SessionSummary {
-        try ClaudeSessionAdapter.summary(
+        let summary = try ClaudeSessionAdapter.summary(
             fileURL: fileURL,
             provider: .claudeCowork,
             harness: .claudeCowork
         )
+        guard let project = ClaudeCoworkPaths.inferredProjectDirectory(fileURL: fileURL) else {
+            return summary
+        }
+        return summary.withTitle(summary.title, projectDir: project)
     }
 
     // MARK: - Transcript

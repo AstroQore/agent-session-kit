@@ -56,4 +56,73 @@ public enum ClaudeCoworkPaths {
         }
         return out
     }
+
+    /// Cowork deliberately runs Claude Code inside an isolated `outputs`
+    /// directory, so the JSONL `cwd` is not the folder the user asked it to
+    /// work on. Structured tool inputs retain the original absolute file
+    /// paths, however. A bounded head window is enough to recover their
+    /// common directory without scanning a large completed transcript.
+    public static func inferredProjectDirectory(fileURL: URL) -> String? {
+        let workspace = workspaceRoot(containing: fileURL)
+        let lines = JSONLHeadTail.headLines(url: fileURL, count: 40).compactMap(SessionParsing.json)
+        var paths: [URL] = []
+        for line in lines {
+            collectStructuredPaths(in: line, into: &paths)
+        }
+        let directories = paths.compactMap { candidate -> URL? in
+            guard candidate.path.hasPrefix("/") else { return nil }
+            if let workspace, isInside(candidate, root: workspace) { return nil }
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDirectory) {
+                return isDirectory.boolValue ? candidate : candidate.deletingLastPathComponent()
+            }
+            return candidate.pathExtension.isEmpty ? candidate : candidate.deletingLastPathComponent()
+        }
+        return commonDirectory(directories)?.path
+    }
+
+    private static let structuredPathKeys: Set<String> = [
+        "file_path", "filepath", "filename", "originalfile"
+    ]
+
+    private static func collectStructuredPaths(in value: Any, into paths: inout [URL]) {
+        if let dictionary = value as? [String: Any] {
+            for (key, child) in dictionary {
+                if structuredPathKeys.contains(key.lowercased()),
+                   let raw = SessionParsing.string(child), raw.hasPrefix("/") {
+                    paths.append(URL(fileURLWithPath: raw).standardizedFileURL)
+                }
+                collectStructuredPaths(in: child, into: &paths)
+            }
+        } else if let array = value as? [Any] {
+            for child in array { collectStructuredPaths(in: child, into: &paths) }
+        }
+    }
+
+    private static func workspaceRoot(containing fileURL: URL) -> URL? {
+        var cursor = fileURL.deletingLastPathComponent()
+        while cursor.path != "/" {
+            if cursor.lastPathComponent.hasPrefix("local_") { return cursor }
+            cursor.deleteLastPathComponent()
+        }
+        return nil
+    }
+
+    private static func isInside(_ candidate: URL, root: URL) -> Bool {
+        let path = candidate.standardizedFileURL.path
+        let prefix = root.standardizedFileURL.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return path == "/" + prefix || path.hasPrefix("/" + prefix + "/")
+    }
+
+    private static func commonDirectory(_ directories: [URL]) -> URL? {
+        guard var common = directories.first?.standardizedFileURL.pathComponents else { return nil }
+        for directory in directories.dropFirst() {
+            let components = directory.standardizedFileURL.pathComponents
+            let count = zip(common, components).prefix { $0 == $1 }.count
+            common = Array(common.prefix(count))
+            if common.count <= 3 { return nil } // Never label the user's home as a project.
+        }
+        guard common.count > 3 else { return nil }
+        return URL(fileURLWithPath: NSString.path(withComponents: common), isDirectory: true)
+    }
 }

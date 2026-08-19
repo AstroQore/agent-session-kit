@@ -114,34 +114,21 @@ public struct AntigravitySessionAdapter: SessionProviderAdapter {
             )
         }
 
-        let turns = AntigravityLiveSQLite.turns(at: fileURL)
-        let dates = (turns ?? []).map(\.turn.date)
-        let firstText = hydrated?.title == nil ? firstUserishText(fileURL: fileURL) : nil
+        let metadata = AntigravityLiveSQLite.metadataSummary(at: fileURL)
+        let firstText = hydrated?.title == nil ? firstHumanPrompt(fileURL: fileURL) : nil
 
         return summary(
             sessionID: sessionID,
             variant: variant,
-            model: Self.model(turns: turns),
+            model: metadata?.model,
             title: hydrated?.title ?? firstText,
             summaryText: firstText,
             projectDir: hydrated?.projectDir,
-            createdAt: dates.first ?? SessionParsing.creationDate(fileURL),
-            lastActiveAt: dates.last ?? hydrated?.lastModified ?? SessionParsing.modificationDate(fileURL),
+            createdAt: metadata?.firstDate ?? SessionParsing.creationDate(fileURL),
+            lastActiveAt: metadata?.lastDate ?? hydrated?.lastModified ?? SessionParsing.modificationDate(fileURL),
             fileURL: fileURL,
-            messageCount: turns.map(\.count) ?? SessionSummary.unknownMessageCount
+            messageCount: metadata?.messageCount ?? SessionSummary.unknownMessageCount
         )
-    }
-
-    /// The most recent turn's model. `gen_metadata` is already decoded for
-    /// the dates and the message count, so no extra read happens here; the
-    /// router alias is the documented fallback when the model enum itself
-    /// has no learned label (see `AntigravityGenMetadataReader.Turn`).
-    static func model(turns: [(idx: Int, turn: AntigravityGenMetadataReader.Turn)]?) -> String? {
-        guard let turns else { return nil }
-        for entry in turns.reversed() {
-            if let model = entry.turn.model ?? entry.turn.routedModel { return model }
-        }
-        return nil
     }
 
     private func summary(
@@ -184,12 +171,16 @@ public struct AntigravitySessionAdapter: SessionProviderAdapter {
     /// First readable prose in the opening steps, used only when no side
     /// store had a title. Tool-argument JSON is skipped: it is real text,
     /// but it is not what the conversation was about.
-    private func firstUserishText(fileURL: URL) -> String? {
-        guard let steps = AntigravityLiveSQLite.steps(at: fileURL) else { return nil }
-        for step in steps.prefix(Self.titleStepScanLimit) {
+    private func firstHumanPrompt(fileURL: URL) -> String? {
+        guard let steps = AntigravityLiveSQLite.firstSteps(
+            at: fileURL,
+            limit: Self.titleStepScanLimit
+        ) else { return nil }
+        for step in steps {
+            if Self.stepTypeRoleMap[step.type] != nil { continue }
             guard let payload = step.payload else { continue }
             for run in AntigravityStepText.runs(in: payload) where !run.hasPrefix("{") {
-                return run
+                if let instruction = HumanPromptText.instruction(run) { return instruction }
             }
         }
         return nil

@@ -1,4 +1,5 @@
 import Foundation
+import AgentSessionKit
 
 /// What a person asked a session to do, and the last thing it said back.
 ///
@@ -155,9 +156,7 @@ public struct SessionBrief: Hashable, Codable, Sendable {
     /// a bare slash command. Total: any input yields a string or `nil`, never
     /// a throw.
     public static func instruction(_ text: String) -> String? {
-        let preview = EventText.preview(stripMeta(text), max: previewLimit)
-        guard !preview.isEmpty, !isBareSlashCommand(preview) else { return nil }
-        return preview
+        HumanPromptText.instruction(text)
     }
 
     /// The tags a harness wraps machine-generated context in.
@@ -168,28 +167,16 @@ public struct SessionBrief: Hashable, Codable, Sendable {
     /// `<environment_context>` and `<user_instructions>` to the first turn of
     /// a rollout. None of it is a person asking for anything, and all of it
     /// arrives on records that no `isMeta` flag covers.
-    public static let metaTags: Set<String> = [
-        "command-name",
-        "command-message",
-        "command-args",
-        "command-contents",
-        "system-reminder",
-        "user-prompt-submit-hook",
-        "environment_context",
-        "user_instructions",
-        "app-context",
-    ]
+    public static let metaTags = HumanPromptText.metaTags
 
     /// Tag families matched by prefix: Claude Code writes
     /// `<local-command-stdout>`, `<local-command-stderr>`, and
     /// `<local-command-caveat>`, and adds to the list between releases.
-    public static let metaTagPrefixes = ["local-command-"]
+    public static let metaTagPrefixes = HumanPromptText.metaTagPrefixes
 
     /// Whether a tag name names machine-generated context.
     public static func isMetaTag(_ name: String) -> Bool {
-        let lowered = name.lowercased()
-        if metaTags.contains(lowered) { return true }
-        return metaTagPrefixes.contains { lowered.hasPrefix($0) }
+        HumanPromptText.isMetaTag(name)
     }
 
     /// Removes every meta block, including the ones a preview cut in half.
@@ -200,21 +187,7 @@ public struct SessionBrief: Hashable, Codable, Sendable {
     /// that begins *after* an opening it never saw drops everything through
     /// the orphaned close.
     static func stripMeta(_ text: String) -> String {
-        var body = text
-        while let resume = orphanedCloseEnd(in: body) {
-            body = String(body[resume...])
-        }
-        while let opening = firstMetaOpening(in: body) {
-            let tail = opening.range.upperBound..<body.endIndex
-            if let close = body.range(
-                of: "</\(opening.name)>", options: [.caseInsensitive], range: tail
-            ) {
-                body.removeSubrange(opening.range.lowerBound..<close.upperBound)
-            } else {
-                body.removeSubrange(opening.range.lowerBound..<body.endIndex)
-            }
-        }
-        return body
+        HumanPromptText.stripMeta(text)
     }
 
     /// The index just past a closing meta tag that has no opening before it,

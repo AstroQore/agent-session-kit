@@ -12,6 +12,12 @@ import Foundation
 public struct CodexSessionAdapter: SessionProviderAdapter {
     public let provider: SessionProvider = .codex
 
+    /// Encoded in `providerVariant` so hosts can fold a guardian rollout into
+    /// the original session without a second schema axis. The suffix is the
+    /// root session id from `session_meta.session_id`, which local rollouts
+    /// preserve even when `parent_thread_id` names an intermediate subagent.
+    public static let autoReviewVariantPrefix = "auto-review:"
+
     private let hydrator: CodexTitleHydrator
 
     public init(homeDirectory: String = RealHomeDirectory.path) {
@@ -71,18 +77,22 @@ public struct CodexSessionAdapter: SessionProviderAdapter {
 
         let prompt = firstUserText(head)
         let hydrated = hydrator.thread(for: sessionID)
+        let hydratedTitle = hydrated?.title.flatMap(HumanPromptText.instruction)
+        let model = Self.model(in: head) ?? Self.model(in: tail)
+        let autoReviewParent = Self.autoReviewParentSessionID(meta: meta, model: model)
 
         return SessionSummary(
             provider: .codex,
             sessionID: sessionID,
+            providerVariant: autoReviewParent.map { Self.autoReviewVariantPrefix + $0 },
             // Every Codex surface writes into the same tree; only the
             // `originator` separates ChatGPT Work from ordinary Codex, and
             // the cost scanner already owns that mapping.
             harness: CodexOriginator.harness(
                 originator: SessionParsing.string(meta?["originator"])
             ),
-            model: Self.model(in: head) ?? Self.model(in: tail),
-            title: SessionParsing.display(hydrated?.title ?? prompt, limit: SessionParsing.titleLimit),
+            model: model,
+            title: SessionParsing.display(hydratedTitle ?? prompt, limit: SessionParsing.titleLimit),
             summary: SessionParsing.display(prompt, limit: SessionParsing.summaryLimit),
             projectDir: SessionParsing.firstString(meta?["cwd"], hydrated?.cwd),
             createdAt: createdAt,
@@ -91,6 +101,28 @@ public struct CodexSessionAdapter: SessionProviderAdapter {
             sizeBytes: SessionParsing.fileSize(fileURL),
             messageCount: JSONLHeadTail.lineCountIfSmall(url: fileURL) ?? SessionSummary.unknownMessageCount
         )
+    }
+
+    /// Root session id for a guardian / Auto Review rollout, or nil for an
+    /// ordinary Codex session.
+    public static func autoReviewParentSessionID(providerVariant: String?) -> String? {
+        guard let providerVariant,
+              providerVariant.hasPrefix(autoReviewVariantPrefix)
+        else { return nil }
+        return SessionParsing.string(String(providerVariant.dropFirst(autoReviewVariantPrefix.count)))
+    }
+
+    private static func autoReviewParentSessionID(
+        meta: [String: Any]?,
+        model: String?
+    ) -> String? {
+        let source = meta?["source"] as? [String: Any]
+        let subagent = source?["subagent"] as? [String: Any]
+        let isGuardian = SessionParsing.string(subagent?["other"])?.lowercased() == "guardian"
+        let isReviewRuntime = SessionParsing.string(meta?["thread_source"])?.lowercased() == "subagent"
+            && model?.lowercased() == "codex-auto-review"
+        guard isGuardian || isReviewRuntime else { return nil }
+        return SessionParsing.firstString(meta?["session_id"], meta?["parent_thread_id"])
     }
 
     /// The model a rollout ran on, from whichever of the three places this
@@ -122,7 +154,7 @@ public struct CodexSessionAdapter: SessionProviderAdapter {
                   payload["role"] as? String == "user"
             else { continue }
             let text = Self.strippingIDEEnvelope(SessionParsing.extractText(payload["content"]))
-            if !text.isEmpty { return text }
+            if let instruction = HumanPromptText.instruction(text) { return instruction }
         }
         return nil
     }
@@ -178,9 +210,10 @@ public struct CodexSessionAdapter: SessionProviderAdapter {
                 role = ClaudeSessionAdapter.role(payload["role"] as? String)
                 text = SessionParsing.extractText(payload["content"])
             case "function_call":
-                role = .assistant
+                role = .tool
                 let name = (payload["name"] as? String) ?? "tool"
-                text = "[Tool: \(name)]"
+                let arguments = SessionParsing.string(payload["arguments"])
+                text = arguments.map { "[Tool: \(name)]\n\($0)" } ?? "[Tool: \(name)]"
             case "function_call_output":
                 role = .tool
                 text = SessionParsing.extractText(payload["output"])

@@ -169,6 +169,31 @@ public enum SessionSummaryOrder: String, Sendable, Hashable {
     case byProject
 }
 
+/// Which parts of an indexed session a text query may match.
+///
+/// Project paths are intentionally not a search scope: callers have separate
+/// include / exclude directory filters, so a path never appears as a
+/// surprising content hit.
+public enum SessionSearchScope: String, CaseIterable, Codable, Sendable, Hashable {
+    case title
+    case user
+    case assistant
+    case system
+    case tool
+
+    public static let defaultScopes: Set<Self> = [.title, .user, .assistant]
+
+    var messageRole: SessionRole? {
+        switch self {
+        case .title: nil
+        case .user: .user
+        case .assistant: .assistant
+        case .system: .system
+        case .tool: .tool
+        }
+    }
+}
+
 /// A bounded window from the session index. A UI renders one page at
 /// a time instead of publishing every historical session into SwiftUI.
 public struct SessionSummaryPage: Sendable, Equatable {

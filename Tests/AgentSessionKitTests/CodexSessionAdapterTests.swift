@@ -45,6 +45,17 @@ final class CodexSessionAdapterTests: XCTestCase {
         """
     }
 
+    private func autoReviewMetaLine(parentSessionID: String) -> String {
+        """
+        {"timestamp":"2026-02-03T05:58:51.452Z","type":"session_meta","payload":\
+        {"id":"\(sessionID)","session_id":"\(parentSessionID)",\
+        "parent_thread_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",\
+        "timestamp":"2026-02-03T05:58:51.452Z","cwd":"/Users/example/proj",\
+        "originator":"Codex Desktop","source":{"subagent":{"other":"guardian"}},\
+        "thread_source":"subagent","model_provider":"openai"}}
+        """
+    }
+
     private func turnContextLine(model: String) -> String {
         """
         {"timestamp":"2026-02-03T05:58:52.000Z","type":"turn_context","payload":\
@@ -143,6 +154,34 @@ final class CodexSessionAdapterTests: XCTestCase {
                 originator == CodexOriginator.chatgptWork ? .chatgptWork : .codex
             )
         }
+    }
+
+    func testGuardianRolloutCarriesItsOriginalSessionRelationship() throws {
+        let parent = "aaaaaaaa-1111-2222-3333-444444444444"
+        let url = try writeRollout(lines: [
+            autoReviewMetaLine(parentSessionID: parent),
+            turnContextLine(model: "codex-auto-review"),
+            userMessageLine("Review the proposed changes")
+        ])
+
+        let summary = try adapter.extractMetadata(fileURL: url)
+        XCTAssertEqual(summary.model, "codex-auto-review")
+        XCTAssertEqual(
+            CodexSessionAdapter.autoReviewParentSessionID(
+                providerVariant: summary.providerVariant
+            ),
+            parent
+        )
+    }
+
+    func testOrdinarySubagentDoesNotPretendToBeAutoReview() throws {
+        let url = try writeRollout(lines: [metaLine(), userMessageLine("Implement the task")])
+        let summary = try adapter.extractMetadata(fileURL: url)
+        XCTAssertNil(
+            CodexSessionAdapter.autoReviewParentSessionID(
+                providerVariant: summary.providerVariant
+            )
+        )
     }
 
     // MARK: - Model
@@ -250,11 +289,11 @@ final class CodexSessionAdapterTests: XCTestCase {
         let url = try writeRollout(lines: rolloutLines)
         let document = try adapter.parseTranscript(fileURL: url, range: nil)
 
-        XCTAssertEqual(document.messages.map(\.role), [.user, .assistant, .assistant, .tool])
+        XCTAssertEqual(document.messages.map(\.role), [.user, .assistant, .tool, .tool])
         XCTAssertEqual(document.messages.map(\.text), [
             "Add the session list",
             "Working on it.",
-            "[Tool: shell]",
+            "[Tool: shell]\n{}",
             "exit 0"
         ])
         XCTAssertEqual(document.totalMessageCount, 4)

@@ -14,15 +14,25 @@ enum AntigravityLiveSQLite {
     }
 
     static func steps(at url: URL) -> [Step]? {
+        steps(at: url, limit: LiveSQLiteReader.maxRows)
+    }
+
+    /// Opening-list metadata needs only the first few steps for a fallback
+    /// title. Do not materialize a whole trajectory just to read one sentence.
+    static func firstSteps(at url: URL, limit: Int) -> [Step]? {
+        steps(at: url, limit: max(1, min(limit, LiveSQLiteReader.maxRows)))
+    }
+
+    private static func steps(at url: URL, limit: Int) -> [Step]? {
         LiveSQLiteReader.read(at: url) { database in
             let statement = try LiveSQLiteReader.prepare(
                 database,
-                "SELECT idx, step_type, step_payload FROM steps ORDER BY idx"
+                "SELECT idx, step_type, step_payload FROM steps ORDER BY idx LIMIT \(limit)"
             )
             defer { sqlite3_finalize(statement) }
             var out: [Step] = []
             var result = sqlite3_step(statement)
-            while result == SQLITE_ROW, out.count < LiveSQLiteReader.maxRows {
+            while result == SQLITE_ROW, out.count < limit {
                 out.append(Step(
                     idx: Int(sqlite3_column_int64(statement, 0)),
                     type: Int(sqlite3_column_int64(statement, 1)),
@@ -30,11 +40,80 @@ enum AntigravityLiveSQLite {
                 ))
                 result = sqlite3_step(statement)
             }
-            guard result == SQLITE_DONE || out.count >= LiveSQLiteReader.maxRows else {
+            guard result == SQLITE_DONE || out.count >= limit else {
                 throw LiveSQLiteReader.ReadError.statement
             }
             return out
         }
+    }
+
+    struct MetadataSummary {
+        let firstDate: Date?
+        let lastDate: Date?
+        let model: String?
+        let messageCount: Int
+    }
+
+    /// The Sessions list needs four facts, not every decoded turn. Count rows
+    /// in SQLite, decode a bounded edge window for the first/last timestamps,
+    /// and search only recent turns for the model. Full turn decoding remains
+    /// in `turns(at:)` for the transcript opened by an explicit selection.
+    static func metadataSummary(at url: URL, edgeLimit: Int = 64) -> MetadataSummary? {
+        LiveSQLiteReader.read(at: url) { database in
+            let countStatement = try LiveSQLiteReader.prepare(
+                database,
+                "SELECT COUNT(*) FROM gen_metadata"
+            )
+            defer { sqlite3_finalize(countStatement) }
+            guard sqlite3_step(countStatement) == SQLITE_ROW else {
+                throw LiveSQLiteReader.ReadError.statement
+            }
+            let count = Int(sqlite3_column_int64(countStatement, 0))
+            guard count > 0 else {
+                return MetadataSummary(firstDate: nil, lastDate: nil, model: nil, messageCount: 0)
+            }
+
+            let limit = max(1, min(edgeLimit, LiveSQLiteReader.maxRows))
+            let first = try decodedTurns(
+                database: database,
+                order: "ASC",
+                limit: limit
+            )
+            let recent = try decodedTurns(
+                database: database,
+                order: "DESC",
+                limit: limit
+            )
+            return MetadataSummary(
+                firstDate: first.first?.date,
+                lastDate: recent.first?.date,
+                model: recent.lazy.compactMap { $0.model ?? $0.routedModel }.first,
+                messageCount: count
+            )
+        }
+    }
+
+    private static func decodedTurns(
+        database: OpaquePointer,
+        order: String,
+        limit: Int
+    ) throws -> [AntigravityGenMetadataReader.Turn] {
+        let statement = try LiveSQLiteReader.prepare(
+            database,
+            "SELECT data FROM gen_metadata ORDER BY idx \(order) LIMIT \(limit)"
+        )
+        defer { sqlite3_finalize(statement) }
+        var out: [AntigravityGenMetadataReader.Turn] = []
+        var result = sqlite3_step(statement)
+        while result == SQLITE_ROW {
+            if let data = LiveSQLiteReader.blob(statement, 0),
+               let turn = AntigravityGenMetadataReader.decodeTurn(blob: data) {
+                out.append(turn)
+            }
+            result = sqlite3_step(statement)
+        }
+        guard result == SQLITE_DONE else { throw LiveSQLiteReader.ReadError.statement }
+        return out
     }
 
     /// `gen_metadata` decoded into model turns, keyed by row index.

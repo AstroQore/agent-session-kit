@@ -150,7 +150,8 @@ public enum SessionParsing {
         switch dict["type"] as? String {
         case "tool_use":
             let name = (dict["name"] as? String) ?? "tool"
-            return "[Tool: \(name)]"
+            let input = compactJSON(dict["input"])
+            return input.map { "[Tool: \(name)]\n\($0)" } ?? "[Tool: \(name)]"
         case "tool_result":
             return extractText(dict["content"], depth: depth + 1)
         default:
@@ -160,6 +161,16 @@ public enum SessionParsing {
             if let nested = dict["content"] { return extractText(nested, depth: depth + 1) }
             return ""
         }
+    }
+
+    private static func compactJSON(_ value: Any?) -> String? {
+        guard let value,
+              JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8),
+              !text.isEmpty
+        else { return nil }
+        return truncate(text, limit: 4_000)
     }
 
     /// First of several candidate fields that flattens to real text.

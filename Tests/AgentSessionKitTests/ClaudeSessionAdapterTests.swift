@@ -199,7 +199,7 @@ final class ClaudeSessionAdapterTests: XCTestCase {
         XCTAssertEqual(document.messages.map(\.text), [
             "<command-name>/clear</command-name>\n<command-message>clear</command-message>",
             "Wire up the session list",
-            "On it.\n[Tool: Read]",
+            "On it.\n[Tool: Read]\n{}",
             "file contents",
             "Done."
         ])
