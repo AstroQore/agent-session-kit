@@ -633,7 +633,12 @@ public actor IngestCoordinator {
         let cutoff = Date().addingTimeInterval(-configuration.activeWindow)
         let now = ContinuousClock.now
 
-        for (index, scope) in pendingScopes.sorted(by: { $0.key < $1.key }) {
+        // The scope is read again inside the loop rather than taken from a
+        // snapshot: each pass suspends, and a notification that arrives while
+        // an earlier adapter is walking would otherwise be cleared without
+        // ever having been looked at.
+        for index in pendingScopes.keys.sorted() {
+            guard let scope = pendingScopes[index] else { continue }
             if let last = lastAdapterDiscoveryAt[index], now - last < configuration.rediscoverThrottle {
                 continue
             }
