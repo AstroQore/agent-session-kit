@@ -46,6 +46,10 @@ public actor LivenessResolver {
     /// How far a process's start time may differ from the recorded one
     /// before the pid is considered recycled.
     public let tolerance: TimeInterval
+    /// Repeat every session's verdict on every Nth tick, changed or not.
+    /// `0` disables re-assertion. Default 10 (30 s at the default cadence).
+    public var reassertEvery: Int = 10
+    private var ticks = 0
 
     private let adapters: [Harness: any SourceAdapter]
     private let table: any ProcessTableReading
@@ -156,13 +160,20 @@ public actor LivenessResolver {
     ) -> Int {
         let now = Date()
         var emitted = 0
+        ticks += 1
+        // Every `reassertEvery` ticks the current verdict is repeated even
+        // when it did not change. Transition-only emission assumes the host
+        // still holds the last answer, and it may not: a seed identity or a
+        // replayed transcript can move a session's state underneath the
+        // resolver, after which "still dead" would never be said again.
+        let reassert = reassertEvery > 0 && ticks % reassertEvery == 0
         for identity in identities {
             let verdict = hint(for: identity).verdict
             // `unknown` is not evidence of change. Leave the last known
             // answer alone rather than making a live session flicker.
             guard verdict != .unknown else { continue }
             let alive = verdict == .alive
-            guard lastKnown[identity.key] != alive else { continue }
+            guard reassert || lastKnown[identity.key] != alive else { continue }
             lastKnown[identity.key] = alive
             continuation.yield(
                 AgentEvent(

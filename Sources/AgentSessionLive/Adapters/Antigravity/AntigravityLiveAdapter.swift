@@ -249,6 +249,19 @@ public struct AntigravityLiveAdapter: SourceAdapter {
     /// timestamp, and a timestamp is wrong in both directions on its own — so
     /// a store written a minute ago answers ``LivenessHint/Verdict/unknown``
     /// rather than either verdict.
+    /// A conversation store (`conversations/<id>.db`) or the summaries index.
+    /// The `-wal`/`-shm` siblings belong to a store already tailed, and the
+    /// presence locks are touched continuously by every live conversation —
+    /// neither means a conversation appeared.
+    public func mightBeSessionFile(path: String) -> Bool {
+        let url = URL(fileURLWithPath: path)
+        let name = url.lastPathComponent
+        if name == Self.summariesFileName { return true }
+        guard name.hasSuffix(".db") else { return false }
+        return url.deletingLastPathComponent().lastPathComponent == Self.conversationsDirectory
+    }
+
+
     public func probeLiveness(
         _ identity: SessionIdentity,
         table: any ProcessTableReading,

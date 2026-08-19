@@ -7,6 +7,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- Discovery no longer runs hot: an unknown-path FSEvent triggers rediscovery only when some adapter's new `SourceAdapter.mightBeSessionFile(path:)` says the path could be a session (sidecars such as Grok's `summary.json`, Claude's `tool-results/`, and AntiGravity's presence locks no longer do); the rediscovery throttle is 3 s; each adapter's `discover` runs off the coordinator's actor; `CodexLiveAdapter` caches rollout seeds by inode; `GrokLiveAdapter` probes writer locks only for directories written within three days of the cutoff.
+- `SessionStateReducer`: a `liveness` verdict no longer counts as a heartbeat (a hung session can go stale again), and a `sessionStarted` stamped before a session's `endedAt` merges identity instead of reviving it. `LivenessResolver` re-asserts every verdict every 10 ticks (`reassertEvery`) so a host whose state moved underneath it hears "still dead" again.
 - `IngestCoordinator` now emits a `sessionStarted` carrying the adapter's seed identity when it registers a source, stamped with the process start or the file's birth time — pids, parents, and directory-decoded cwds finally reach the host. `SessionStateReducer` treats a `sessionStarted` for a live, already-tracked session as an identity merge rather than a restart.
 
 ### Added

@@ -203,7 +203,13 @@ struct SessionStateReducerTests {
         #expect(harness.snapshot.turnCount == scenario.expectedTurns, "\(scenario.name): turns")
         #expect(harness.snapshot.toolCallCount == scenario.expectedToolCalls, "\(scenario.name): tool calls")
         #expect(harness.snapshot.isAlive == scenario.expectedAlive, "\(scenario.name): alive")
-        #expect(harness.snapshot.lastEventAt == harness.clock, "\(scenario.name): heartbeat")
+        if case .liveness = scenario.script.last {
+            // A liveness verdict is a probe result, not activity, and does
+            // not move the heartbeat.
+            #expect(harness.snapshot.lastEventAt != nil && harness.snapshot.lastEventAt! < harness.clock, "\(scenario.name): probe is not a heartbeat")
+        } else {
+            #expect(harness.snapshot.lastEventAt == harness.clock, "\(scenario.name): heartbeat")
+        }
         #expect(harness.snapshot.isStale == false, "\(scenario.name): nothing goes stale in one second")
     }
 

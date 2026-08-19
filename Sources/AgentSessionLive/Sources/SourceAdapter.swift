@@ -56,4 +56,22 @@ public protocol SourceAdapter: Sendable {
         table: any ProcessTableReading,
         home: String
     ) -> LivenessHint
+
+    /// Whether a change at `path` — one nothing currently tails — could be
+    /// a session this adapter would discover, as opposed to a sidecar the
+    /// harness writes next to its sessions.
+    ///
+    /// The host asks before running a full rediscovery on an unknown path.
+    /// A store writes many things that are not sessions — Grok rewrites
+    /// `summary.json` every turn, Claude Code spills tool output into
+    /// `tool-results/`, AntiGravity touches a presence lock — and treating
+    /// each as "a session appeared" turns discovery into a hot loop. Cheap
+    /// and syntactic: look at the name, never at the contents. Default is
+    /// `true`, so an adapter that has not thought about it stays correct
+    /// and merely wakes the host more than it needs to.
+    func mightBeSessionFile(path: String) -> Bool
+}
+
+public extension SourceAdapter {
+    func mightBeSessionFile(path: String) -> Bool { true }
 }

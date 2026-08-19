@@ -286,6 +286,23 @@ public struct ClaudeLiveAdapter: SourceAdapter {
 
     // MARK: - Liveness
 
+    /// A transcript (`<project>/<session>.jsonl`), a child transcript
+    /// (`…/subagents/agent-<id>.jsonl`), or a `sessions/<pid>.json` entry —
+    /// the three files whose appearance means a session started. Everything
+    /// else Claude Code writes under its roots (`tool-results/`, `.meta.json`,
+    /// `.key` files) is a sidecar of a session already known.
+    public func mightBeSessionFile(path: String) -> Bool {
+        let url = URL(fileURLWithPath: path)
+        let name = url.lastPathComponent
+        let parent = url.deletingLastPathComponent().lastPathComponent
+        if name.hasSuffix(".jsonl") {
+            if parent == "subagents" { return name.hasPrefix(Self.subagentFilePrefix) }
+            return !name.hasPrefix(".")
+        }
+        return parent == "sessions" && name.hasSuffix(".json")
+    }
+
+
     public func probeLiveness(
         _ identity: SessionIdentity,
         table: any ProcessTableReading,

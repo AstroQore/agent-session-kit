@@ -1,5 +1,6 @@
 import AgentSessionKit
 import Foundation
+import Synchronization
 
 /// The live view of OpenAI Codex: `~/.codex/sessions`, tailed, with liveness
 /// taken from the writer lock rather than guessed from a timestamp.
@@ -67,6 +68,18 @@ public struct CodexLiveAdapter: SourceAdapter {
     static let seedLines = 12
 
     private let linker: CodexSubagentLinker
+
+    /// Seeds already built, keyed by rollout path and stamped with the inode
+    /// and size the head was read at.
+    ///
+    /// Discovery runs every few seconds and reads the head of every recent
+    /// rollout to seed an identity; the head — `session_meta` with its
+    /// multi-kilobyte instructions block — never changes once written, so
+    /// decoding it again on every pass is what turned discovery into a hot
+    /// loop on a machine with a hundred recent threads. A rollout that has
+    /// grown still yields the same seed; one whose inode changed is a
+    /// different file and is re-read.
+    private let seedCache = CodexSeedCache()
 
     /// Creates an adapter.
     ///
@@ -153,6 +166,31 @@ public struct CodexLiveAdapter: SourceAdapter {
     /// parent edge — is derived from the id, so guessing which half to trust
     /// would key a session on the wrong thread rather than skip a file.
     private func source(sessionID: String, file: URL) -> SessionSource? {
+        let inode = FileStamp.read(path: file.path)?.inode
+        if let inode, let cached = seedCache.lookup(path: file.path, inode: inode) {
+            // The parent edge is the one thing about a seed that can be
+            // learned after the head was read: a child discovered before its
+            // parent's spawn line was tailed. Re-ask the linker on every hit.
+            guard var source = cached, source.seedIdentity.parent == nil,
+                  let link = linker.link(forChild: sessionID)
+            else { return cached }
+            var identity = source.seedIdentity
+            identity.parent = link.parent
+            identity.parentLink = .subagent(toolUseID: link.toolUseID)
+            source = SessionSource(
+                key: source.key,
+                primaryPath: source.primaryPath,
+                auxiliaryPaths: source.auxiliaryPaths,
+                seedIdentity: identity
+            )
+            return source
+        }
+        let built = buildSource(sessionID: sessionID, file: file)
+        if let inode { seedCache.store(built, path: file.path, inode: inode) }
+        return built
+    }
+
+    private func buildSource(sessionID: String, file: URL) -> SessionSource? {
         let head = JSONLHeadTail.headLines(url: file, count: Self.seedLines)
             .compactMap(CodexRolloutRecord.decode)
         let meta = head.first { $0.type == "session_meta" }?.payload
@@ -225,6 +263,17 @@ public struct CodexLiveAdapter: SourceAdapter {
     /// With no lock file at all, there is nothing left but the rollout's
     /// mtime, and the verdict is honest about that: dead once it is older than
     /// ``deadAfter``, and ``LivenessHint/Verdict/unknown`` while it is fresh.
+    /// A rollout (`rollout-*.jsonl`) or a writer lock appearing — the two
+    /// files that mean a thread opened. `~/.codex/sessions` holds nothing
+    /// else, but the lock directory is shared with locks for threads already
+    /// tailed, so the name is checked rather than assumed.
+    public func mightBeSessionFile(path: String) -> Bool {
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        if name.hasPrefix("rollout-"), name.hasSuffix(".jsonl") { return true }
+        return name.hasSuffix(".lock")
+    }
+
+
     public func probeLiveness(
         _ identity: SessionIdentity,
         table: any ProcessTableReading,
@@ -377,5 +426,29 @@ public struct CodexLiveAdapter: SourceAdapter {
               candidate.allSatisfy({ $0.isHexDigit || $0 == "-" })
         else { return nil }
         return candidate
+    }
+}
+
+/// The seed cache behind ``CodexLiveAdapter``. A class so the value-typed
+/// adapter can share one across copies; a `Mutex` because discovery runs off
+/// the coordinator's actor.
+final class CodexSeedCache: Sendable {
+    private struct Entry { let inode: UInt64; let source: SessionSource? }
+    private let entries = Mutex<[String: Entry]>([:])
+
+    func lookup(path: String, inode: UInt64) -> SessionSource?? {
+        entries.withLock { map in
+            guard let entry = map[path], entry.inode == inode else { return nil }
+            return .some(entry.source)
+        }
+    }
+
+    func store(_ source: SessionSource?, path: String, inode: UInt64) {
+        entries.withLock { map in
+            map[path] = Entry(inode: inode, source: source)
+            // Bounded: a machine with a year of rollouts should not keep a
+            // year of seeds. Recent files are re-read at most once per eviction.
+            if map.count > 512 { map.removeAll() }
+        }
     }
 }

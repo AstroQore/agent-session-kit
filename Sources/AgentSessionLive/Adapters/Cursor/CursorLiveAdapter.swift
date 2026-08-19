@@ -222,6 +222,17 @@ public struct CursorLiveAdapter: SourceAdapter {
 
     // MARK: - Liveness
 
+    /// A store (`store.db`), its `meta.json`, a thin transcript, or a worker
+    /// pid file. `-wal`/`-shm` siblings belong to a store already tailed and
+    /// are routed to it by the coordinator, so they are not new sessions.
+    public func mightBeSessionFile(path: String) -> Bool {
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        if name == CursorPaths.storeFileName || name == CursorPaths.metaFileName { return true }
+        if name.hasSuffix(".jsonl") { return true }
+        return name.hasPrefix("cursor-agent-worker-") && name.hasSuffix(".pid")
+    }
+
+
     public func probeLiveness(
         _ identity: SessionIdentity,
         table: any ProcessTableReading,

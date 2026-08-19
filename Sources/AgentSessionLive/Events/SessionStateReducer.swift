@@ -96,22 +96,32 @@ public struct SessionStateReducer: Sendable {
         var next = snapshot
         let ts = event.timestamp
 
-        // Heartbeat first: every event, understood or not, is evidence the
-        // session was alive at `ts`.
-        next.lastEventAt = maxDate(next.lastEventAt, ts)
-        next.pending.lastEventAt = next.lastEventAt
-        if next.startedAt == nil { next.startedAt = ts }
+        // Heartbeat first: every event the *source* produced, understood or
+        // not, is evidence the session was alive at `ts`. A liveness verdict
+        // is not — it comes from a probe, not the session, and counting it
+        // would keep a hung session from ever reading as stale.
+        if case .liveness = event.kind {
+            // no heartbeat
+        } else {
+            next.lastEventAt = maxDate(next.lastEventAt, ts)
+            next.pending.lastEventAt = next.lastEventAt
+            if next.startedAt == nil { next.startedAt = ts }
+        }
 
         switch event.kind {
         case .sessionStarted(let identity):
-            if snapshot.startedAt != nil, !snapshot.state.isEnded {
+            let staleStart = snapshot.endedAt.map { ts <= $0 } ?? false
+            if snapshot.startedAt != nil, !snapshot.state.isEnded || staleStart {
                 // A `sessionStarted` for a live session already being tracked
                 // — a source re-registered after a drop, or a seed identity
                 // arriving after the tail already produced events. That is
                 // new evidence about *who* the session is, not a restart:
                 // merge the identity and leave state, pending, and clocks
                 // alone. An *ended* session that starts again is a real
-                // restart and falls through to the reset below.
+                // restart and falls through to the reset below — unless the
+                // start is stamped before the end (a seed identity for a
+                // source discovered after its process was seen to exit),
+                // which is history, not a resurrection.
                 if identity.key == next.identity.key {
                     next.identity = Self.merge(next.identity, with: identity)
                 }

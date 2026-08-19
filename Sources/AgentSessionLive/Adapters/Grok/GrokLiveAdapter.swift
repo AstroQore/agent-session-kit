@@ -72,6 +72,10 @@ public struct GrokLiveAdapter: SourceAdapter {
     /// Discovery stats these to decide whether a session is recent.
     static let sessionFiles = ["events.jsonl", "updates.jsonl", "chat_history.jsonl", "summary.json"]
 
+    /// How far behind the discovery cutoff a session directory may be and
+    /// still have its writer locks probed. See `discover`.
+    static let lockProbeWindow: TimeInterval = 3 * 86_400
+
     /// How long a session that is neither registered nor holding a lock must go
     /// untouched before it is called dead.
     ///
@@ -164,8 +168,17 @@ public struct GrokLiveAdapter: SourceAdapter {
                 guard !stamps.isEmpty else { continue }
 
                 let isRecent = stamps.contains { $0.modified >= activeSince }
+                // The registry is the cheap answer for a running session; the
+                // lock probe (a readdir plus an fcntl per lock file) is the
+                // fallback, and only worth asking of a directory written to
+                // within the last few days. A session that has been silent
+                // longer than that and still holds its locks is a process
+                // nobody has typed into for days — the registry names it, and
+                // if it does not, the next write brings it back into the window.
+                let newest = stamps.map(\.modified).max() ?? .distantPast
+                let mightHoldLock = newest >= activeSince.addingTimeInterval(-Self.lockProbeWindow)
                 let isRunning = running.contains(sessionID.lowercased())
-                    || Self.heldLock(in: directory) != nil
+                    || (mightHoldLock && Self.heldLock(in: directory) != nil)
                 guard isRecent || isRunning else { continue }
 
                 guard let source = source(directory: directory, sessionID: sessionID, cwd: cwd) else {
@@ -236,6 +249,18 @@ public struct GrokLiveAdapter: SourceAdapter {
     /// is not running means the entry outlived its process, which is what a
     /// `SIGKILL` leaves behind. It never overrules a *held lock*, because the
     /// kernel does not name a `flock(2)` owner and there is no pid to check.
+    /// One of the per-session logs, or the active-sessions registry. Grok
+    /// rewrites `summary.json`, `signals.json`, and its `.lock` files
+    /// throughout a session; none of those is how a session first appears,
+    /// and each of them changing many times a minute is exactly the storm a
+    /// host must not rediscover on.
+    public func mightBeSessionFile(path: String) -> Bool {
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        return name == "events.jsonl" || name == "updates.jsonl" || name == "chat_history.jsonl"
+            || name == "active_sessions.json"
+    }
+
+
     public func probeLiveness(
         _ identity: SessionIdentity,
         table: any ProcessTableReading,

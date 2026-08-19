@@ -87,7 +87,7 @@ public struct IngestConfiguration: Hashable, Sendable {
         sqlitePollEvery: Duration = .seconds(2),
         jsonlPollEvery: Duration = .seconds(10),
         rediscoverEvery: Duration = .seconds(15),
-        rediscoverThrottle: Duration = .seconds(1),
+        rediscoverThrottle: Duration = .seconds(3),
         dropAfter: Duration = .seconds(600),
         activeWindow: TimeInterval = 24 * 60 * 60,
         seedBytes: Int = JSONLTailer.defaultSeedBytes,
@@ -347,7 +347,14 @@ public actor IngestCoordinator {
         for adapter in adapters {
             let sources: [SessionSource]
             do {
-                sources = try await adapter.discover(home: home, activeSince: cutoff)
+                // Off the actor: an adapter's discovery is a directory walk
+                // with no suspension points of its own, and run inline it
+                // would hold the actor — and every poll and watch event
+                // behind it — for as long as the walk takes.
+                let home = self.home
+                sources = try await Task.detached(priority: .utility) {
+                    try await adapter.discover(home: home, activeSince: cutoff)
+                }.value
             } catch {
                 noticeContinuation?.yield(
                     .tailerError(path: adapter.harness.rawValue, error: describe(error)))
@@ -497,7 +504,10 @@ public actor IngestCoordinator {
         for path in batch.paths {
             if let owner = pathOwner[path] {
                 schedule(owner, database: SQLiteChangeWatcher.isStoreFile(path))
-            } else {
+            } else if !sawUnknownPath, adapters.contains(where: { $0.mightBeSessionFile(path: path) }) {
+                // Only a path that could *be* a session earns a rediscovery.
+                // Stores write sidecars constantly — summaries, locks, tool
+                // output — and each of those used to restart discovery.
                 sawUnknownPath = true
             }
         }
