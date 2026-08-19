@@ -29,7 +29,7 @@ own mapping as an extension in its own module.
 │   │   │   ├── SessionModels.swift     # SessionProvider, SessionSummary, transcripts, delete plans
 │   │   │   ├── SessionParsing.swift    # Provider-agnostic, total parsing primitives
 │   │   │   ├── SessionProviderAdapter.swift  # The protocol + the registry
-│   │   │   ├── {Claude,ClaudeCowork,Codex,Grok,Cursor,Gemini,Antigravity}SessionAdapter.swift
+│   │   │   ├── {Claude,ClaudeCowork,Codex,Grok,Cursor,Gemini,Antigravity,GrokBot}SessionAdapter.swift
 │   │   │   ├── CodexTitleHydrator.swift          # Titles from Codex's side index
 │   │   │   ├── AntigravityConversationIndex.swift
 │   │   │   ├── LiveSQLiteReader.swift            # Read a store another process holds open
@@ -44,6 +44,7 @@ own mapping as an extension in its own module.
 │   │   │   ├── JSONLLineScanner.swift  # O(n) whole-file line walk
 │   │   │   ├── JSONLHeadTail.swift     # Bounded head/tail for metadata
 │   │   │   ├── RealHomeDirectory.swift
+│   │   │   ├── Base32.swift            # RFC 4648 decode, for Grok Bot's filenames
 │   │   │   ├── ClaudeCoworkPaths.swift
 │   │   │   ├── CodexOriginator.swift
 │   │   │   ├── PrivacyPreservingHash.swift
@@ -136,9 +137,10 @@ resolves outside the provider's own roots, on an id mismatch, and on a
 validation file it cannot re-read.
 
 `SessionProvider.supportsDeletion` is `false` for AntiGravity, Cursor, and
-Claude Cowork because another running app owns those stores. Removing from
-underneath a live SQLite handle is how a store gets corrupted rather than
-emptied. Do not "fix" that.
+Claude Cowork because another running app owns those stores, and for Grok Bot
+because the conversation itself lives on xAI's servers and this directory is
+only what the client replicated. Removing from underneath a live SQLite
+handle is how a store gets corrupted rather than emptied. Do not "fix" that.
 
 ## 7. Adding a harness
 

@@ -17,6 +17,7 @@ import Foundation
 /// | AntiGravity    | Google AI  | `~/.gemini/antigravity{,-cli,-ide}/conversations`            |
 /// | Grok Build     | xAI        | `~/.grok/sessions/**/updates.jsonl`                          |
 /// | Cursor         | Anysphere  | `~/.cursor/chats/**/store.db`                                |
+/// | Grok Bot       | xAI        | `~/Library/Application Support/Grok Bot/sand-client-persistence` — a cloud cache: conversations only, no model |
 ///
 /// Renaming a harness is one edit here, not a hunt across a UI.
 public enum HarnessCatalog {
@@ -31,6 +32,10 @@ public enum HarnessCatalog {
     public static let antigravity = "AntiGravity"
     public static let grokBuild = "Grok Build"
     public static let cursor = "Cursor"
+    /// xAI's standalone cloud-bot app, not Grok Build. Its runs happen
+    /// server-side, so the local store holds conversations and nothing a
+    /// token counter could read.
+    public static let grokBot = "Grok Bot"
 }
 
 /// The local harness a session or usage event came from — the unit every
@@ -51,6 +56,7 @@ public enum Harness: String, CaseIterable, Codable, Sendable, Hashable {
     case antigravity
     case grokBuild
     case cursor
+    case grokBot
 
     public var displayName: String {
         switch self {
@@ -62,6 +68,7 @@ public enum Harness: String, CaseIterable, Codable, Sendable, Hashable {
         case .antigravity:  HarnessCatalog.antigravity
         case .grokBuild:    HarnessCatalog.grokBuild
         case .cursor:       HarnessCatalog.cursor
+        case .grokBot:      HarnessCatalog.grokBot
         }
     }
 }
