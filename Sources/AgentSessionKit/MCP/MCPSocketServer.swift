@@ -97,14 +97,14 @@ public final class MCPSocketServer: @unchecked Sendable {
     /// Framing cap. A single JSON-RPC line larger than this is a client bug,
     /// and buffering it would let one connection grow without bound.
     public static let maximumLineBytes = 4 * 1024 * 1024
-    /// Concurrent clients. Two agents plus a stray bridge is the realistic
-    /// peak; the cap exists so a runaway client cannot exhaust descriptors.
-    public static let maximumConnections = 16
-    /// A connection that has moved no bytes for this long is stale. MCP stdio
-    /// clients reconnect on demand; keeping a bridge that its owner forgot for
-    /// hours only consumes the finite descriptor budget. Hosts can override or
-    /// disable this (`nil`) for a transport with different lifecycle needs.
-    public static let defaultIdleTimeout: TimeInterval = 30 * 60
+    /// Concurrent clients. Desktop clients may keep one stdio bridge per open
+    /// task, so sixteen is not a realistic ceiling. Sixty-four stays well below
+    /// the process descriptor budget while leaving room for a real task board.
+    public static let maximumConnections = 64
+    /// Idle expiry is opt-in. A library cannot assume its client will respawn a
+    /// stdio child after an intentional EOF; hosts that own that lifecycle can
+    /// pass a timeout explicitly.
+    public static let defaultIdleTimeout: TimeInterval? = nil
     static let connectionLimitError = MCPRPCError(
         code: -32_098,
         message: "The MCP server has reached its client connection limit."
@@ -122,6 +122,7 @@ public final class MCPSocketServer: @unchecked Sendable {
     /// server never creates a directory itself: chmod-ing a path it was
     /// merely handed is not its business.
     private let ensureDirectory: @Sendable () throws -> Void
+    private let maximumConnectionCount: Int
     private let idleTimeout: TimeInterval?
     private let acceptQueue = DispatchQueue(label: "com.astroqore.AgentSessionKit.mcp.accept")
     private let stateLock = NSLock()
@@ -154,11 +155,13 @@ public final class MCPSocketServer: @unchecked Sendable {
     public init(
         handler: any MCPLineHandler,
         socketPath: String,
+        maximumConnections: Int = MCPSocketServer.maximumConnections,
         idleTimeout: TimeInterval? = MCPSocketServer.defaultIdleTimeout,
         ensureDirectory: @escaping @Sendable () throws -> Void = {}
     ) {
         self.handler = handler
         self.socketPath = socketPath
+        self.maximumConnectionCount = max(1, maximumConnections)
         self.idleTimeout = idleTimeout.flatMap { $0 > 0 ? $0 : nil }
         self.ensureDirectory = ensureDirectory
     }
@@ -330,7 +333,7 @@ public final class MCPSocketServer: @unchecked Sendable {
                 // EAGAIN/EWOULDBLOCK simply means the backlog drained.
                 return
             }
-            guard connectionCount < Self.maximumConnections else {
+            guard connectionCount < maximumConnectionCount else {
                 Self.writeConnectionLimitFrame(to: clientFD)
                 close(clientFD)
                 KitLog.warn("MCP server refused a connection: too many clients.")

@@ -142,13 +142,14 @@ a socket someone is *answering* on is not — the server reports
 `.socketOwnedByAnotherInstance` rather than cutting off the agents attached to
 the other copy.
 
-Connections idle for 30 minutes are reclaimed by default, which bounds stale
-stdio bridges without killing their parent client; pass `idleTimeout: nil` to
-disable expiry or another interval to tune it. `clientConnections` and
+The default client cap is 64; pass `maximumConnections:` to tune it. Hosts
+whose stdio clients reconnect after EOF may also opt into idle reclamation
+with `idleTimeout:`; it is disabled by default because the library cannot
+assume every client respawns a deliberately closed child. `clientConnections` and
 `onConnectionsChange` expose only a connection id, peer pid, connected time,
 and last activity. A host can call `disconnectClient(id:)` to close one socket
-safely. The 17th concurrent client receives a framed JSON-RPC capacity error
-instead of a silent close.
+safely. A client beyond the configured cap receives a framed JSON-RPC
+capacity error instead of a silent close.
 
 `MCPStdioBridge` runs the same binary as a plain stdio MCP server that pumps
 bytes to that socket, which is how MCP clients that spawn a command reach a

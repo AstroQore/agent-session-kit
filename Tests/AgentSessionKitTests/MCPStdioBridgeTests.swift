@@ -160,12 +160,16 @@ final class MCPStdioBridgeTests: XCTestCase {
     }
 
     func testCapacityRejectionIsNonzeroAndActionable() throws {
-        let socket = MCPSocketServer(handler: EchoBridgeHandler(), socketPath: socketPath)
+        let socket = MCPSocketServer(
+            handler: EchoBridgeHandler(),
+            socketPath: socketPath,
+            maximumConnections: 16
+        )
         try socket.start()
         socketServer = socket
         var clients: [MCPSocketTestClient] = []
         defer { clients.forEach { $0.close() } }
-        for id in 1...MCPSocketServer.maximumConnections {
+        for id in 1...16 {
             let client = try MCPSocketTestClient(path: socketPath)
             _ = try client.request(id: id)
             clients.append(client)

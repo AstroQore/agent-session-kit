@@ -31,11 +31,13 @@ final class MCPSocketServerTests: XCTestCase {
 
     private func makeServer(
         path: String? = nil,
+        maximumConnections: Int = MCPSocketServer.maximumConnections,
         idleTimeout: TimeInterval? = MCPSocketServer.defaultIdleTimeout
     ) -> MCPSocketServer {
         MCPSocketServer(
             handler: EchoLineHandler(),
             socketPath: path ?? socketPath,
+            maximumConnections: maximumConnections,
             idleTimeout: idleTimeout
         )
     }
@@ -264,15 +266,17 @@ final class MCPSocketServerTests: XCTestCase {
     }
 
     func testSeventeenthClientGetsAnExplicitCapacityError() throws {
-        let socket = try startServer()
+        let socket = makeServer(maximumConnections: 16)
+        socketServer = socket
+        try socket.start()
         var clients: [MCPSocketTestClient] = []
         defer { clients.forEach { $0.close() } }
-        for id in 1...MCPSocketServer.maximumConnections {
+        for id in 1...16 {
             let client = try MCPSocketTestClient(path: socketPath)
             _ = try client.request(id: id)
             clients.append(client)
         }
-        XCTAssertEqual(socket.connectionCount, MCPSocketServer.maximumConnections)
+        XCTAssertEqual(socket.connectionCount, 16)
 
         let refused = try MCPSocketTestClient(path: socketPath)
         defer { refused.close() }

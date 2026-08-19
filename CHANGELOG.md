@@ -25,12 +25,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   makes the claim below assertable rather than timed.
 
 ### Changed
-- **Forgotten stdio bridges no longer fill the MCP listener forever.** An
-  accepted client that moves no bytes for 30 minutes is closed by default;
-  hosts can choose another timeout or disable expiry. Closing the socket makes
-  `MCPStdioBridge` return immediately even when its stdin owner forgot to close
-  the pipe, so the bridge process and the server slot are reclaimed. Real EOF
-  and transport errors still clean up immediately. At the 16-client cap the
+- **A desktop-sized MCP client budget, optional idle reclamation, and explicit
+  refusal.** The default cap is 64 rather than 16 because desktop clients may
+  keep one stdio bridge per open task; hosts can tune it. Idle expiry is now an
+  opt-in timeout for hosts that know their clients reconnect after EOF. Closing
+  a socket makes `MCPStdioBridge` return immediately even when its stdin owner
+  forgot to close the pipe, while real EOF and transport errors still clean up
+  immediately. At the configured client cap the
   listener now sends an explicit JSON-RPC capacity error before closing, and a
   stdio bridge turns that private frame into an actionable stderr message and
   exit code 2 instead of exiting 0 with empty stdout.
