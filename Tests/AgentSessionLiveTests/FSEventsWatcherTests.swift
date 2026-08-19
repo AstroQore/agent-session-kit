@@ -115,6 +115,15 @@ struct FSEventsWatcherTests {
         #expect(earlyWatch.first?.hasSuffix(tree.url.lastPathComponent) == true)
 
         try FileManager.default.createDirectory(at: late, withIntermediateDirectories: true)
+
+        // Directory creation can itself trigger the rearm. Wait for that
+        // narrower stream before writing the file: writing in the teardown /
+        // startup gap makes the assertion depend on whether the runner's
+        // FSEvents callback or the test task wins the same scheduler turn.
+        #expect(await waitUntil(timeout: .seconds(3)) {
+            watcher.currentWatchPaths().first?.hasSuffix("not/there/yet") == true
+        })
+
         let target = late.appendingPathComponent("session.jsonl")
         try Data("late\n".utf8).write(to: target)
 
@@ -122,10 +131,7 @@ struct FSEventsWatcherTests {
             await batch(watcher, containing: target.path),
             "FSEvents delivered nothing for a late root within \(patience)")
 
-        // And once it exists, the watch narrows onto it.
-        #expect(await waitUntil(timeout: .seconds(3)) {
-            watcher.currentWatchPaths().first?.hasSuffix("not/there/yet") == true
-        })
+        #expect(watcher.currentWatchPaths().first?.hasSuffix("not/there/yet") == true)
     }
 
     @Test("the shipped default flags see another process's writes")
