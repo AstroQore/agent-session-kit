@@ -36,6 +36,19 @@ public struct FSEventBatch: Hashable, Sendable {
         self.eventIDs = eventIDs
     }
 
+    /// Whether FSEvents said the item at `path` is itself a directory.
+    ///
+    /// Only meaningful with ``FSEventsWatcher/CreateFlags/fileEvents``, which
+    /// is what makes FSEvents report per-item flags at all. Without it every
+    /// delivered path *is* a directory and none is flagged as one, so this
+    /// answers `false` throughout — and a consumer that skips directories
+    /// correctly stops skipping when directories are all it is being told
+    /// about.
+    public func isDirectory(_ path: String) -> Bool {
+        guard let flags = flagsByPath[path] else { return false }
+        return flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir) != 0
+    }
+
     /// `true` when FSEvents said it dropped events and the consumer should
     /// re-scan rather than trust the path list.
     ///

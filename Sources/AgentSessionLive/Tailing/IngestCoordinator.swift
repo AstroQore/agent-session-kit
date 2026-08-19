@@ -190,7 +190,7 @@ public actor IngestCoordinator {
 
     /// How many distinct directories one adapter is asked about before a
     /// scoped pass is replaced by a sweep.
-    private static let maximumScopes = 16
+    static let maximumScopes = 16
 
     private let adapters: [any SourceAdapter]
     private let home: String
@@ -651,7 +651,10 @@ public actor IngestCoordinator {
 
     // MARK: - Watching
 
-    private func handle(batch: FSEventBatch) async {
+    /// Internal rather than private so a test can hand the coordinator a
+    /// batch instead of provoking one and hoping FSEvents coalesces it the
+    /// way the test needs.
+    func handle(batch: FSEventBatch) async {
         guard isRunning else { return }
 
         if batch.demandsRescan {
@@ -667,11 +670,20 @@ public actor IngestCoordinator {
         for path in batch.paths {
             if let owner = pathOwner[path] {
                 schedule(owner, database: SQLiteChangeWatcher.isStoreFile(path))
-            } else {
+            } else if !batch.isDirectory(path) {
                 // Something changed under a watched root that nothing tails:
                 // most likely a session that started a moment ago. Route it
                 // to whoever owns that part of the disk rather than asking
                 // everybody to look everywhere.
+                //
+                // Directories are skipped because with `fileEvents` — the
+                // shipped default — every file inside one is reported on its
+                // own, so a directory event is either the same news twice or
+                // news about a directory's own metadata, and the watch roots
+                // themselves are announced that way the moment a stream
+                // arms. Without `fileEvents` nothing is flagged as a
+                // directory and every path is routed, which is right,
+                // because then the paths are all there is.
                 route(changed: path)
             }
         }

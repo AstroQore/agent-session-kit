@@ -44,20 +44,49 @@ struct DiscoveryCounters: Hashable, Sendable {
 /// reasons: the symlink rule is a security rule and wants a single site, and a
 /// counted call is the only honest way to assert that caching works.
 enum DiscoveryIO {
-    private static let counters = Mutex(DiscoveryCounters())
+    /// Somewhere to count into, installed for the duration of one measured
+    /// call. A class because a task-local value has to be copyable and a
+    /// `Mutex` is not.
+    final class Ledger: Sendable {
+        private let counters = Mutex(DiscoveryCounters())
 
-    /// The work counted so far, process-wide.
-    static var counted: DiscoveryCounters { counters.withLock { $0 } }
+        var counted: DiscoveryCounters { counters.withLock { $0 } }
 
-    /// Zeroes the counters. Tests only; nothing in the pipeline reads them.
-    static func resetCounters() {
-        counters.withLock { $0 = DiscoveryCounters() }
+        fileprivate func add(listings: Int = 0, lockProbes: Int = 0, fileReads: Int = 0) {
+            counters.withLock { counters in
+                counters.directoryListings += listings
+                counters.lockProbes += lockProbes
+                counters.fileReads += fileReads
+            }
+        }
+    }
+
+    /// Where to count, when anybody is counting.
+    ///
+    /// Task-local rather than global, for two reasons. Nothing is counted at
+    /// all outside a ``counting(_:)`` call, so the pipeline pays nothing for
+    /// a facility only the suite uses; and two tests measuring at once cannot
+    /// see each other's syscalls, which a process-wide counter would make
+    /// them do the moment the suite runs them in parallel.
+    @TaskLocal private static var ledger: Ledger?
+
+    /// Runs `body` and reports the file-system work it did.
+    ///
+    /// Only work on `body`'s own task is counted — a task-local does not
+    /// cross into a `Task.detached`, which is where the coordinator runs
+    /// discovery. Measure an adapter directly.
+    static func counting<T>(
+        _ body: () async throws -> T
+    ) async rethrows -> (value: T, cost: DiscoveryCounters) {
+        let ledger = Ledger()
+        let value = try await $ledger.withValue(ledger) { try await body() }
+        return (value, ledger.counted)
     }
 
     /// Records that something read a file's contents. Called by the adapters
     /// at the points where a cache is meant to be preventing the read.
     static func countFileRead() {
-        counters.withLock { $0.fileReads += 1 }
+        ledger?.add(fileReads: 1)
     }
 
     /// Directory entries, never following a symlink.
@@ -71,7 +100,7 @@ enum DiscoveryIO {
         options: FileManager.DirectoryEnumerationOptions = [],
         sorted: Bool = true
     ) -> [URL] {
-        counters.withLock { $0.directoryListings += 1 }
+        ledger?.add(listings: 1)
         let keys: Set<URLResourceKey> = [.isSymbolicLinkKey, .isDirectoryKey]
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: url,
@@ -88,7 +117,7 @@ enum DiscoveryIO {
     /// no resource values — and it is what the Claude builders want, since
     /// they decide everything from the file name.
     static func names(in url: URL) -> [String] {
-        counters.withLock { $0.directoryListings += 1 }
+        ledger?.add(listings: 1)
         return (try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []
     }
 
@@ -99,7 +128,7 @@ enum DiscoveryIO {
 
     /// ``LockFileProbe/lockState(path:)``, counted.
     static func lockState(path: String) -> LockFileProbe.LockState {
-        counters.withLock { $0.lockProbes += 1 }
+        ledger?.add(lockProbes: 1)
         return LockFileProbe.lockState(path: path)
     }
 
