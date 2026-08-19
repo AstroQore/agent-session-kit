@@ -1,0 +1,108 @@
+name: Release
+
+# A bare `X.Y.Z` tag is the release trigger — the same shape as the tags
+# already on this repository (0.1.0, 0.2.0), with no `v` prefix.
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+
+# Only to create the Release for the tag that triggered this run.
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Verify and publish
+    # Mirrors ci.yml: the package targets macOS 26, and building on an
+    # older SDK should fail loudly rather than quietly release something
+    # that was never compiled against the platform it claims.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      # Everything below refuses rather than repairs. A tag that disagrees
+      # with the source it points at is not a release; it is a mistake that
+      # would otherwise be published under a permanent name.
+      - name: Check the tag against the source
+        id: check
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Tag: ${TAG}"
+
+          INFO="Sources/AgentSessionKit/AgentSessionKitInfo.swift"
+          if [ ! -f "$INFO" ]; then
+            echo "::error::${INFO} is missing; the version constant is the release contract."
+            exit 1
+          fi
+          VERSION="$(sed -n 's/^[[:space:]]*public static let version = "\(.*\)"$/\1/p' "$INFO" | head -n 1)"
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not read AgentSessionKitInfo.version out of ${INFO}."
+            exit 1
+          fi
+          echo "AgentSessionKitInfo.version: ${VERSION}"
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "::error::Tag ${TAG} does not match AgentSessionKitInfo.version ${VERSION}. Bumping the constant is part of the release commit — see RELEASING.md."
+            exit 1
+          fi
+
+          if ! grep -qF "## [${TAG}]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [${TAG}]' section. A release without notes is not a release — see RELEASING.md."
+            exit 1
+          fi
+
+      - name: Build
+        run: swift build -v
+
+      - name: Test
+        run: swift test -v
+
+      - name: Extract the changelog section
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          # From this version's heading to the next `## ` heading, exclusive.
+          awk -v tag="## [${TAG}]" '
+            index($0, tag) == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          # Trim leading and trailing blank lines.
+          awk 'NF {p = 1} p' notes.md | awk '{ lines[NR] = $0 } END { last = NR; while (last > 0 && lines[last] ~ /^[[:space:]]*$/) last--; for (i = 1; i <= last; i++) print lines[i] }' > notes.trimmed.md
+          mv notes.trimmed.md notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::The '## [${TAG}]' section of CHANGELOG.md is empty."
+            exit 1
+          fi
+          echo "--- release notes ---"
+          cat notes.md
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::A release for ${TAG} already exists. Published tags never move — cut the next patch instead (RELEASING.md)."
+            exit 1
+          fi
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "agent-session-kit $TAG" \
+            --notes-file notes.md \
+            --verify-tag
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName,url \
+            --jq 'if .isDraft then error("release \(.tagName) was published as a draft") else "published \(.tagName) at \(.url)" end'
