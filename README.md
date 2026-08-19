@@ -180,10 +180,31 @@ snapshot.isStale          // working, alive, and silent for too long
 records the fact.
 
 `SessionSnapshot` carries the derived `SessionState`, the `PendingSet` of what
-is still open, turn and tool counters, token totals, and the child sessions a
-turn spawned. The reducer is pure and takes its clock as a parameter, so every
-transition — including staleness, and a process that dies and comes back — is
-testable without waiting.
+is still open, turn and tool counters, token totals, the child sessions a turn
+spawned, and a `SessionBrief`. The reducer is pure and takes its clock as a
+parameter, so every transition — including staleness, and a process that dies
+and comes back — is testable without waiting.
+
+`SessionBrief` is the other half of a board row: what the session was *asked*
+to do (`firstPrompt`), what was asked last, the last thing the model said in
+prose, and when a turn last closed. It is folded from `userPrompt`,
+`assistantText`, and `turnEnded`, and it drops the things a person did not
+type — Claude Code's `<command-name>` slash-command echoes and
+`<local-command-…>` hook output, `<system-reminder>` injections, Codex's
+`<environment_context>` and `<user_instructions>` — including the ones a
+preview truncated mid-block.
+
+```swift
+snapshot.brief.firstPrompt      // "Add a regression test for the JSONL tailer."
+snapshot.brief.followUpPrompt   // the latest one, when it says something new
+snapshot.brief.latestAssistant  // "The build needs the Testing module wired in first."
+
+// "How do I get back to this one?" — nil for the harnesses with no CLI.
+SessionResume.resumeCommand(for: snapshot.identity)
+// "cd '/Users/example/code/demo' && codex resume 1111…"
+SessionResume.availability(for: snapshot.identity).reason
+// the sentence for a disabled menu item
+```
 
 Adapters implement `SourceAdapter` (discovery, watch roots, liveness probing)
 and `SessionTailer` (`poll()` for the steady state, `seedFromTail(maxBytes:)`

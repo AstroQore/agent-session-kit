@@ -7,6 +7,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`SessionBrief` on every `SessionSnapshot`.** The state machine says what a
+  session is *doing*; it could not say what anybody asked it for. The brief
+  carries the assignment (`firstPrompt`, with the `firstPromptAt` it was given
+  at), the latest instruction, the last thing the model said in prose, and when
+  a turn last closed — folded by `SessionStateReducer` from `userPrompt`,
+  `assistantText`, and `turnEnded`, the three events all eight live adapters
+  already emit. No adapter changed.
+- **A filter for the things a person did not type.** Half of what a harness
+  records as a "user message" is machinery: Claude Code spells a slash command
+  as `<command-name>…</command-name>`, injects context as `<system-reminder>`,
+  and spills hook output into `<local-command-…>`; Codex prepends
+  `<environment_context>` and `<user_instructions>`.
+  `SessionBrief.instruction(_:)` strips those blocks — including the ones a
+  200-character preview cut in half, from either end — and refuses what is left
+  when it is empty or a bare slash command. A rejected prompt moves nothing:
+  not the assignment, not the latest prompt, not `lastPromptAt`. Every field
+  guards its own clock, so a turn flushed out of order cannot overwrite a newer
+  one, and the brief survives an explicit restart.
+- **`SessionResume`** — "how do I get back to this one?", answered from a
+  `SessionIdentity`. `resumeCommand(for:)` returns a cwd-aware
+  `cd '<dir>' && <command>` or `nil`; `availability(for:)` returns the same
+  answer plus the sentence to put in a disabled menu item, because Claude
+  Cowork, Cursor, and Grok Bot have no command-line entry point at all and a
+  menu item that quietly disappears explains nothing. `Harness.sessionProvider`
+  is the inverse of `SessionProvider.defaultHarness`, which is not injective —
+  Codex and ChatGPT Work share one rollout tree.
 - **`GrokBotLiveAdapter`** — Grok Bot is now live, not just indexed. A
   conversation is a JSON document the desktop client rewrites whole, so
   `GrokBotTranscriptTailer` diffs the file against itself rather than walking
@@ -37,6 +63,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   credential.
 
 ### Changed
+- **`AgentSessionLive.eventSchemaVersion` is 2.** A field was added to
+  `SessionSnapshot`, which is encoded structurally, so a host that persisted
+  snapshots re-seeds rather than decoding rows from a model it no longer
+  speaks. That is the contract the constant already documented.
 - **`GrokBotSessionAdapter`'s key vocabulary is public.** The store path, the
   blob extension, the variant, `decodedKey`, `transcriptKey`, `rosterKey`,
   `rosterURL`, and `rosterRows` are what the live adapter reads the same
