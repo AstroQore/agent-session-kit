@@ -44,7 +44,11 @@ public struct GrokBotSessionAdapter: SessionProviderAdapter {
     /// discovery entry point takes an explicit `homeDirectory` (AGENTS.md
     /// § 4), so tests point it at a temp tree and a host passes
     /// `RealHomeDirectory.path`.
-    static let storeRelativePath = "Library/Application Support/Grok Bot/sand-client-persistence"
+    ///
+    /// Public because the live layer reads the same directory and must not
+    /// spell it a second time: two copies of a path is how a store ends up
+    /// listed on one screen and missing from the other.
+    public static let storeRelativePath = "Library/Application Support/Grok Bot/sand-client-persistence"
 
     public func roots(homeDirectory: String) -> [URL] {
         [URL(fileURLWithPath: homeDirectory).appendingPathComponent(Self.storeRelativePath)]
@@ -59,16 +63,20 @@ public struct GrokBotSessionAdapter: SessionProviderAdapter {
     // MARK: - Keys
 
     /// The account and bot a transcript blob belongs to.
-    struct TranscriptKey: Equatable {
-        let accountID: String
-        let botID: String
+    public struct TranscriptKey: Equatable, Hashable, Sendable {
+        /// The account slice the blob lives under, verbatim and opaque.
+        public let accountID: String
+        /// The bot's uuid — the session id everything downstream keys on.
+        public let botID: String
     }
 
-    static let blobExtension = "blob"
+    public static let blobExtension = "blob"
     static let accountKeyPrefix = "sand.client.slice.account."
     static let transcriptInfix = ".transcript.replicas."
     static let rosterSuffix = ".roster.last-roster"
-    static let variant = "bot"
+    /// ``SessionSummary/providerVariant`` and ``SessionIdentity/variant`` for
+    /// every conversation in this store. There is only the one kind.
+    public static let variant = "bot"
 
     /// Longest filename stem we will even try to decode, and the largest
     /// blob we will read. Both are far above what the client writes (keys
@@ -79,7 +87,7 @@ public struct GrokBotSessionAdapter: SessionProviderAdapter {
 
     /// The key a `.blob` filename encodes, or `nil` for anything that is not
     /// one of this store's account slices.
-    static func decodedKey(at url: URL) -> String? {
+    public static func decodedKey(at url: URL) -> String? {
         guard url.pathExtension == blobExtension else { return nil }
         let stem = url.deletingPathExtension().lastPathComponent
         guard !stem.isEmpty, stem.count <= maxStemLength else { return nil }
@@ -87,12 +95,15 @@ public struct GrokBotSessionAdapter: SessionProviderAdapter {
         return key
     }
 
-    static func transcriptKey(at url: URL) -> TranscriptKey? {
+    /// The account and bot a `.blob` at `url` belongs to, or `nil` when the
+    /// filename is not a transcript replica's.
+    public static func transcriptKey(at url: URL) -> TranscriptKey? {
         guard let key = decodedKey(at: url) else { return nil }
         return transcriptKey(decoded: key)
     }
 
-    static func transcriptKey(decoded key: String) -> TranscriptKey? {
+    /// The same, for a key already decoded out of a filename.
+    public static func transcriptKey(decoded key: String) -> TranscriptKey? {
         guard key.hasPrefix(accountKeyPrefix) else { return nil }
         let tail = key.dropFirst(accountKeyPrefix.count)
         guard let infix = tail.range(of: transcriptInfix) else { return nil }
@@ -109,7 +120,8 @@ public struct GrokBotSessionAdapter: SessionProviderAdapter {
         return TranscriptKey(accountID: accountID, botID: botID)
     }
 
-    static func rosterKey(accountID: String) -> String {
+    /// The roster slice's key for one account.
+    public static func rosterKey(accountID: String) -> String {
         accountKeyPrefix + accountID + rosterSuffix
     }
 
@@ -301,12 +313,23 @@ public struct GrokBotSessionAdapter: SessionProviderAdapter {
 
     // MARK: - Roster
 
-    struct RosterRow: Equatable {
-        let id: String
-        let name: String?
-        let description: String?
-        let createdAt: Date?
-        let lastActivityAt: Date?
+    public struct RosterRow: Equatable, Hashable, Sendable {
+        /// The bot's uuid, matching a transcript replica's `botID`.
+        public let id: String
+        /// The name the client shows in its sidebar.
+        public let name: String?
+        /// The one-line description under the name, when there is one.
+        public let description: String?
+        /// When the bot was created.
+        public let createdAt: Date?
+        /// The client's own idea of when this conversation last moved. It
+        /// disagrees with the transcript in both directions — see
+        /// ``extractMetadata(fileURL:)``.
+        public let lastActivityAt: Date?
+        /// The bot is blocked on a person: it asked something and the client
+        /// is showing the conversation as needing an answer. Absent on most
+        /// rows, and absent reads as `false`.
+        public let awaitingUserResponse: Bool
     }
 
     func rosterRow(for key: TranscriptKey, in directory: URL) -> RosterRow? {
@@ -317,7 +340,9 @@ public struct GrokBotSessionAdapter: SessionProviderAdapter {
     ///
     /// A missing or unparseable roster is an empty map, not a failure: the
     /// transcripts are still readable, they just list without their names.
-    static func rosterRows(forAccount accountID: String, in directory: URL) -> (URL, [String: RosterRow])? {
+    public static func rosterRows(
+        forAccount accountID: String, in directory: URL
+    ) -> (URL, [String: RosterRow])? {
         guard let url = rosterURL(forAccount: accountID, in: directory) else { return nil }
         return (url, rosterRows(at: url))
     }
@@ -326,7 +351,7 @@ public struct GrokBotSessionAdapter: SessionProviderAdapter {
     /// roster means decoding the stems until one is the roster key for this
     /// account. The result is cached against the file's own stamp, so this
     /// runs once per scan rather than once per bot.
-    static func rosterURL(forAccount accountID: String, in directory: URL) -> URL? {
+    public static func rosterURL(forAccount accountID: String, in directory: URL) -> URL? {
         let wanted = rosterKey(accountID: accountID)
         let contents = (try? FileManager.default.contentsOfDirectory(
             at: directory,
@@ -336,7 +361,7 @@ public struct GrokBotSessionAdapter: SessionProviderAdapter {
         return contents.first { decodedKey(at: $0) == wanted }
     }
 
-    static func rosterRows(at url: URL) -> [String: RosterRow] {
+    public static func rosterRows(at url: URL) -> [String: RosterRow] {
         guard SessionParsing.fileSize(url) <= maxBlobBytes,
               let object = SessionParsing.jsonObject(at: url),
               let value = object["value"] as? [String: Any],
@@ -353,7 +378,11 @@ public struct GrokBotSessionAdapter: SessionProviderAdapter {
                 name: SessionParsing.firstString(row["name"], row["title"]),
                 description: SessionParsing.string(row["description"]),
                 createdAt: SessionParsing.date(row["createdAt"]),
-                lastActivityAt: SessionParsing.firstDate(row["lastActivityAt"], row["updatedAt"])
+                lastActivityAt: SessionParsing.firstDate(row["lastActivityAt"], row["updatedAt"]),
+                // Present on every row the client writes and `null` on almost
+                // all of them, so this is "absent means no" rather than a
+                // tri-state anybody has to reason about.
+                awaitingUserResponse: SessionParsing.bool(row["awaitingUserResponse"])
             )
         }
         return out

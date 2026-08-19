@@ -391,4 +391,48 @@ final class GrokBotSessionAdapterTests: XCTestCase {
         XCTAssertEqual(hits.map(\.summary.sessionID), [scout])
         XCTAssertEqual(hits.first?.summary.effectiveHarness, .grokBot)
     }
+
+    // MARK: - Roster
+
+    /// `awaitingUserResponse` is the client's own "this one is blocked on
+    /// you" flag, and it is the only field in the store that says so. It is
+    /// `null` on nearly every row, so absent has to read as `false` rather
+    /// than as unknown.
+    func testTheRosterReadsTheAwaitingUserResponseFlag() throws {
+        let url = try writeBlob(
+            key: "sand.client.slice.account.\(account).roster.last-roster",
+            json: """
+            {"schemaVersion":2,"value":{"rows":[
+            {"id":"\(scout)","name":"Scout","awaitingUserResponse":true},
+            {"id":"\(archivist)","name":"Archivist","awaitingUserResponse":null},
+            {"id":"\(orphan)","name":"Orphan"}
+            ]}}
+            """
+        )
+        let rows = GrokBotSessionAdapter.rosterRows(at: url)
+        XCTAssertEqual(rows[scout]?.awaitingUserResponse, true)
+        XCTAssertEqual(rows[archivist]?.awaitingUserResponse, false)
+        XCTAssertEqual(rows[orphan]?.awaitingUserResponse, false)
+    }
+
+    /// The roster is found by decoding stems, so a store with two accounts in
+    /// it resolves each one's roster and never the other's.
+    func testTheRosterIsResolvedPerAccount() throws {
+        let other = "acct%SYNTHETIC2"
+        try writeRoster()
+        let url = try writeBlob(
+            key: "sand.client.slice.account.\(other).roster.last-roster",
+            json: #"{"schemaVersion":2,"value":{"rows":[{"id":"z","name":"Elsewhere"}]}}"#
+        )
+        // Compared by name: `contentsOfDirectory` hands back a resolved
+        // path, so a temp tree under `/var` comes back as `/private/var`.
+        XCTAssertEqual(
+            GrokBotSessionAdapter.rosterURL(forAccount: other, in: storeDirectory)?
+                .lastPathComponent,
+            url.lastPathComponent
+        )
+        let mine = GrokBotSessionAdapter.rosterRows(forAccount: account, in: storeDirectory)
+        XCTAssertEqual(mine?.1[scout]?.name, "Scout")
+        XCTAssertNil(mine?.1["z"])
+    }
 }
