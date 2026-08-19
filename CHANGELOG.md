@@ -124,6 +124,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   threads whose rollouts are long gone. `CodexRolloutIndex` remembers where a
   rollout was found and which ids have none; a rollout that appears later is
   found by the first pass, on the notification that creates it.
+- **A liveness probe reads a machine-wide registry once per pass, not once per
+  session.** `ClaudeLiveAdapter.probeLiveness` answers by reading
+  `~/.claude/sessions` — a directory listing, a JSON parse per entry, a
+  `ctime(3)` parse per entry — and it is asked once per session, so two hundred
+  sessions read the same directory two hundred times every three seconds. Grok
+  did the same with `active_sessions.json`. `RegistrySnapshot` holds such an
+  answer while the file or directory it came from has not moved *and* it was
+  read within a second, which is well under the interval a resolver ticks at.
+  Discovery does not use it: it asks once per pass and wants the freshest
+  answer there is.
 - **AntiGravity asks the cheap questions first.** Whether a conversation is
   worth tailing is a disjunction of five facts, four of them `stat`s already
   half in hand and the fifth an `open`/`F_GETLK`/`close` on somebody else's
@@ -138,7 +148,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Measured over a synthetic home of 743 sources across five stores, a second
 sweep with nothing changed went from 494 directory listings, 301 lock probes
-and 677 file reads to 271, 1 and 0.
+and 677 file reads to 271, 1 and 0. On a real machine with 645 sessions
+across six harnesses, the ingest pipeline leaves a `sample` of a live host at
+rest altogether: no `discover` frame anywhere, and the liveness tick down from
+886 samples to 74, of which three are Claude Code's probe rather than 715.
 
 ### Note
 - 0.2.0 is tagged at `fd0c95a`. Nothing here is breaking, so the next tag is a
