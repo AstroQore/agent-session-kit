@@ -6,13 +6,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-08-19
-
-Sessions learn to say what they were asked for and how to get back into
-them, Grok Bot goes live, discovery and liveness stop paying per-session for
-answers that are per-machine, and the package learns how to cut its own
-releases.
-
 ### Added
 - **`SourceCursorStore.save(changed:all:)`** — the call the periodic cursor
   save makes. `changed` is what actually moved; `all` is the complete set, so
@@ -24,6 +17,40 @@ releases.
   — how many `KERN_PROCARGS2` reads the environment path has made, and how many
   pids the current snapshot window holds answers for. Diagnostics, and what
   makes the claim below assertable rather than timed.
+
+### Changed
+- **The periodic save writes the cursors that moved, not all of them.** The
+  save had one bit of state — "something moved" — and answered it by writing
+  every cursor the coordinator held. One harness appending a transcript line a
+  second moves exactly one, so a board with seven hundred sources rewrote seven
+  hundred every two seconds to record it, which on a live host showed up as
+  `ftruncate` and `guarded_pwrite_np` near the top of the profile. The flag is
+  a set of paths now. Shutdown still writes everything, which is what makes a
+  source that was registered and never produced an event resume rather than
+  re-seed. A refused save re-owes its paths, and the set is taken and cleared
+  before the store is awaited, so a source that moves during a write stays
+  owed. Two hundred sources with one gaining a line: one cursor written per
+  save, where it was two hundred.
+- **A pid's environment is read once per snapshot window.** Three adapters
+  follow a session id through the environment — AntiGravity's `agy`, Cursor's
+  worker, Claude Cowork's helper — and each asks about the same handful of pids
+  once per *session*. `ProcessTable` cached its snapshot but not this, so six
+  hundred sessions meant six hundred `KERN_PROCARGS2` calls per tick to read
+  the same few environments. The answers live on the snapshot now, so they and
+  the records they belong to are the same age and `refresh()` clears both.
+  Unreadable is remembered too — "another user's process" is the question asked
+  most. Our own pid is still answered from `ProcessInfo` and never cached,
+  because that dictionary is live. 600 sessions × 4 pids: 2400 questions, 4
+  reads.
+
+## [0.3.0] - 2026-08-19
+
+Sessions learn to say what they were asked for and how to get back into
+them, Grok Bot goes live, discovery and liveness stop paying per-session for
+answers that are per-machine, and the package learns how to cut its own
+releases.
+
+### Added
 - **`SessionBrief` on every `SessionSnapshot`.** The state machine says what a
   session is *doing*; it could not say what anybody asked it for. The brief
   carries the assignment (`firstPrompt`, with the `firstPromptAt` it was given
@@ -125,31 +152,7 @@ releases.
   `ftruncate` and `guarded_pwrite_np` near the top of the profile. The flag is
   a set of paths now. Shutdown still writes everything, which is what makes a
   source that was registered and never produced an event resume rather than
-  re-seed. A refused save re-owes its paths, and the set is taken and cleared
-  before the store is awaited, so a source that moves during a write stays
-  owed. Two hundred sources with one gaining a line: one cursor written per
-  save, where it was two hundred.
-- **A pid's environment is read once per snapshot window.** Three adapters
-  follow a session id through the environment — AntiGravity's `agy`, Cursor's
-  worker, Claude Cowork's helper — and each asks about the same handful of pids
-  once per *session*. `ProcessTable` cached its snapshot but not this, so six
-  hundred sessions meant six hundred `KERN_PROCARGS2` calls per tick to read
-  the same few environments. The answers live on the snapshot now, so they and
-  the records they belong to are the same age and `refresh()` clears both.
-  Unreadable is remembered too — "another user's process" is the question asked
-  most. Our own pid is still answered from `ProcessInfo` and never cached,
-  because that dictionary is live. 600 sessions × 4 pids: 2400 questions, 4
-  reads.
-- **`AgentSessionLive.eventSchemaVersion` is 2.** A field was added to
-  `SessionSnapshot`, which is encoded structurally, so a host that persisted
-  snapshots re-seeds rather than decoding rows from a model it no longer
-  speaks. That is the contract the constant already documented.
-- **A file-system change is routed, not broadcast.** An unrecognised path used
-  to restart discovery for every adapter over every store, throttled to once
-  per three seconds; with a transcript gaining a line a second, that is a sweep
-  of the whole machine every three seconds. A change now goes to the adapters
-  whose declared `watchRoots` contain it, about the one directory it happened
-  in. Nothing checked containment before, and `mightBeSessionFile` is a rule
+  re-seed. A refused save re-owes its paths, and the set is taken ang checked containment before, and `mightBeSessionFile` is a rule
   about names: Codex's "any `*.lock` could be a thread" claimed every writer
   lock Grok rewrites and every presence file AntiGravity heartbeats, and
   Cursor's "any `*.jsonl`" claimed every Claude Code transcript. Each of those
