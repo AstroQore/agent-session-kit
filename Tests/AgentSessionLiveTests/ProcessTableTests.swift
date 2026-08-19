@@ -86,6 +86,78 @@ struct ProcessTableTests {
         #expect(table.environment(pid: 999_999) == nil)
     }
 
+    @Test("a pid's environment is read once per window, and survives the process")
+    func environmentIsReadOncePerWindow() async throws {
+        let table = ProcessTable(maxAge: 60, includesArguments: false, includesWorkingDirectory: false)
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        child.arguments = ["30"]
+        try child.run()
+        let pid = child.processIdentifier
+        defer {
+            child.terminate()
+            child.waitUntilExit()
+        }
+
+        // What is asserted is that the question is *answered*, not what the
+        // answer says: `KERN_PROCARGS2` hands over argv for a system binary
+        // but strips its environment, so `/bin/sleep` reports an empty
+        // dictionary rather than a populated one. Empty and unreadable are
+        // still different answers, and only the first is non-`nil`.
+        #expect(await waitUntil(timeout: .seconds(3)) {
+            table.refresh()
+            return table.environment(pid: pid) != nil
+        })
+        #expect(table.rememberedEnvironmentCount() == 1)
+
+        // Six hundred sessions asking about the same pid is the case this
+        // exists for: it is one process, not six hundred.
+        for _ in 0..<600 {
+            #expect(table.environment(pid: pid) != nil)
+        }
+        #expect(table.rememberedEnvironmentCount() == 1)
+
+        // The answer outliving the process is what proves it was remembered:
+        // the kernel has nothing left to tell about a reaped pid.
+        child.terminate()
+        child.waitUntilExit()
+        #expect(table.environment(pid: pid) != nil)
+
+        // And a new window asks again, and gets the truth.
+        table.refresh()
+        #expect(table.rememberedEnvironmentCount() == 0)
+        #expect(table.environment(pid: pid) == nil)
+    }
+
+    @Test("an unreadable environment is remembered too")
+    func unreadableEnvironmentIsRemembered() {
+        let table = ProcessTable(maxAge: 60, includesArguments: false, includesWorkingDirectory: false)
+        table.refresh()
+        // Above the default `kern.maxproc`, so it cannot be a live pid — and
+        // "not readable" is the answer the probes ask for most often, so it is
+        // the one worth not asking twice.
+        for _ in 0..<50 {
+            #expect(table.environment(pid: 999_999) == nil)
+        }
+        #expect(table.rememberedEnvironmentCount() == 1)
+    }
+
+    @Test("this process's environment is never cached, because it is live")
+    func ownEnvironmentIsNotCached() {
+        let table = ProcessTable(maxAge: 60, includesArguments: false, includesWorkingDirectory: false)
+        table.refresh()
+        setenv("AUSPEX_TEST_LIVE", "first", 1)
+        defer { unsetenv("AUSPEX_TEST_LIVE") }
+        #expect(table.environment(pid: getpid())?["AUSPEX_TEST_LIVE"] == "first")
+
+        // `ProcessInfo` is the live dictionary, so a later `setenv` shows up —
+        // caching it would make our own environment the one thing in here that
+        // goes stale.
+        setenv("AUSPEX_TEST_LIVE", "second", 1)
+        #expect(table.environment(pid: getpid())?["AUSPEX_TEST_LIVE"] == "second")
+        #expect(table.rememberedEnvironmentCount() == 0)
+    }
+
     @Test("the snapshot is reused inside its window and replaced after it")
     func cachingWindow() async throws {
         let table = ProcessTable(maxAge: 60, includesArguments: false, includesWorkingDirectory: false)

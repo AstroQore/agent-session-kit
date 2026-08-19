@@ -44,10 +44,19 @@ public final class ProcessTable: ProcessTableReading {
         var records: [ProcessRecord] = []
         var byPID: [pid_t: ProcessRecord] = [:]
         var childrenByPPID: [pid_t: [ProcessRecord]] = [:]
+        /// Environments read during this snapshot's window, by pid. The outer
+        /// optional is "has it been asked yet", the inner one is the answer —
+        /// and `nil` is worth remembering, because "another user's process,
+        /// not readable" is exactly the question that gets asked repeatedly.
+        var environments: [pid_t: [String: String]?] = [:]
         var takenAt: ContinuousClock.Instant?
     }
 
     private let snapshot: Mutex<Snapshot>
+    /// How many `KERN_PROCARGS2` reads ``environment(pid:)`` has actually
+    /// made. The number the environment memo exists to hold down, and the one
+    /// a test can assert on instead of timing a syscall.
+    private let procArgsReads = Mutex(0)
 
     /// Creates a table.
     ///
@@ -100,12 +109,48 @@ public final class ProcessTable: ProcessTableReading {
     /// For anybody else's process this returns `nil` rather than an empty
     /// dictionary: "not readable" and "no environment" are different answers
     /// and only one of them means the probe learned something.
+    ///
+    /// Answered at most once per pid per snapshot window. Three adapters
+    /// follow session ids through the environment — AntiGravity's `agy`,
+    /// Cursor's worker, Claude Cowork's helper — and each of them asks about
+    /// the same handful of pids once per *session*, so a board with six
+    /// hundred sessions was making six hundred `KERN_PROCARGS2` calls per
+    /// tick to read the same few environments. The window is the snapshot's,
+    /// so the answers and the records they belong to are the same age, and
+    /// ``refresh()`` clears both together.
     public func environment(pid: pid_t) -> [String: String]? {
         if pid == getpid() {
             return ArgvSanitizer.sanitizeEnvironment(ProcessInfo.processInfo.environment)
         }
-        guard let parsed = Self.readProcArgs(pid: pid) else { return nil }
-        return ArgvSanitizer.sanitizeEnvironment(parsed.environment)
+        // Ensures the snapshot — and therefore the window this answer belongs
+        // to — is current before anything is remembered against it.
+        _ = current()
+        if let remembered = snapshot.withLock({ $0.environments[pid] }) { return remembered }
+
+        // Read outside the lock: `KERN_PROCARGS2` on a process with a large
+        // environment is not something to hold every other probe behind.
+        procArgsReads.withLock { $0 += 1 }
+        let value = Self.readProcArgs(pid: pid).map {
+            ArgvSanitizer.sanitizeEnvironment($0.environment)
+        }
+        snapshot.withLock { $0.environments[pid] = value }
+        return value
+    }
+
+    /// How many pids' environments the current window has answers for.
+    /// Diagnostics and tests.
+    public func rememberedEnvironmentCount() -> Int {
+        snapshot.withLock { $0.environments.count }
+    }
+
+    /// How many `KERN_PROCARGS2` reads ``environment(pid:)`` has made since
+    /// this table was created. Diagnostics and tests.
+    ///
+    /// Counts only the environment path. The argv a snapshot carries is read
+    /// during ``refresh()`` through one shared buffer, once per process, and
+    /// was never the repeated cost.
+    public func environmentReadCount() -> Int {
+        procArgsReads.withLock { $0 }
     }
 
     // MARK: - Snapshot control
