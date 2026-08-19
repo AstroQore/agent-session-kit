@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- `IngestCoordinator` now emits a `sessionStarted` carrying the adapter's seed identity when it registers a source, stamped with the process start or the file's birth time — pids, parents, and directory-decoded cwds finally reach the host. `SessionStateReducer` treats a `sessionStarted` for a live, already-tracked session as an identity merge rather than a restart.
+
 ### Added
 - `AgentEventKind.textBody(role:text:toolCallID:)` + `TextBodyRole` — full-text bodies for hosts that keep a searchable index; reducer treats it as a heartbeat; adapters cap at `AgentEventKind.textBodyLimit` (32 KiB).
 - **`ClaudeLiveAdapter`** — the first live `SourceAdapter`. Discovers transcripts under `~/.claude/projects` and `~/.config/claude/projects`, counting a session active when it was written to since the cutoff *or* when `~/.claude/sessions` names a process driving it; returns subagent transcripts as sessions of their own, keyed `<session id>/agent-<agent id>`.

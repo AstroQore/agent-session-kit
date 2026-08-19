@@ -38,4 +38,17 @@ struct FileStamp: Hashable, Sendable {
             modified: Date(timeIntervalSince1970: seconds + nanoseconds)
         )
     }
+
+    /// The file's creation date (`st_birthtimespec`), or `nil` when it cannot
+    /// be stat'd. Used to stamp a `sessionStarted` for a source discovered
+    /// mid-life, where the transcript's birth is the closest thing on disk to
+    /// when the session began.
+    static func creationDate(atPath path: String) -> Date? {
+        var buffer = stat()
+        guard stat(path, &buffer) == 0 else { return nil }
+        let seconds = TimeInterval(buffer.st_birthtimespec.tv_sec)
+        let nanoseconds = TimeInterval(buffer.st_birthtimespec.tv_nsec) / 1_000_000_000
+        guard seconds > 0 else { return nil }
+        return Date(timeIntervalSince1970: seconds + nanoseconds)
+    }
 }

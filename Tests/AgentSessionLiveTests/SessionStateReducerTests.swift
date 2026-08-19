@@ -239,6 +239,30 @@ struct SessionStateReducerTests {
         #expect(harness.snapshot.endedAt == nil)
     }
 
+    @Test("sessionStarted on a live session merges identity without resetting state")
+    func sessionStartedMergesIntoLiveSession() {
+        var harness = ReducerHarness()
+        harness.send(.userPrompt(preview: "go"))
+        harness.send(.identityUpdated(SessionIdentityPatch(title: "Pinned title")))
+        harness.send(.toolCallStarted(id: "t1", name: "Bash", kind: .shell, target: "ls"))
+        let startedAt = harness.snapshot.startedAt
+
+        // Discovery catches up: it knows the pid and cwd, and nothing else.
+        var seed = makeIdentity()
+        seed.pid = 4242
+        seed.cwd = "/Users/example/other-project"
+        seed.title = nil
+        harness.send(.sessionStarted(identity: seed))
+
+        #expect(harness.state == .toolCalling(name: "Bash"))
+        #expect(harness.snapshot.pending.openToolCalls.count == 1)
+        #expect(harness.snapshot.turnCount == 1)
+        #expect(harness.snapshot.startedAt == startedAt)
+        #expect(harness.snapshot.identity.pid == 4242)
+        #expect(harness.snapshot.identity.cwd == "/Users/example/other-project")
+        #expect(harness.snapshot.identity.title == "Pinned title")
+    }
+
     @Test("sessionStarted for a different key never rewrites the identity")
     func sessionStartedIgnoresForeignIdentity() {
         var harness = ReducerHarness()

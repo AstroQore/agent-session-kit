@@ -104,6 +104,19 @@ public struct SessionStateReducer: Sendable {
 
         switch event.kind {
         case .sessionStarted(let identity):
+            if snapshot.startedAt != nil, !snapshot.state.isEnded {
+                // A `sessionStarted` for a live session already being tracked
+                // — a source re-registered after a drop, or a seed identity
+                // arriving after the tail already produced events. That is
+                // new evidence about *who* the session is, not a restart:
+                // merge the identity and leave state, pending, and clocks
+                // alone. An *ended* session that starts again is a real
+                // restart and falls through to the reset below.
+                if identity.key == next.identity.key {
+                    next.identity = Self.merge(next.identity, with: identity)
+                }
+                break
+            }
             if identity.key == next.identity.key {
                 next.identity = identity
             }
@@ -285,6 +298,28 @@ public struct SessionStateReducer: Sendable {
         case .shell, .fileRead, .search, .web, .mcp, .plan, .other:
             return .toolCalling(name: call.name)
         }
+    }
+
+    /// `incoming`'s non-`nil` fields over `existing`'s. Discovery is fresher
+    /// than whatever the tail said earlier about pid, parent, or cwd, but it
+    /// knows nothing about a title a `custom-title` record set five minutes
+    /// ago — so blanks in the incoming identity keep the old value.
+    static func merge(_ existing: SessionIdentity, with incoming: SessionIdentity) -> SessionIdentity {
+        var merged = existing
+        merged.variant = incoming.variant ?? existing.variant
+        merged.parent = incoming.parent ?? existing.parent
+        merged.parentLink = incoming.parentLink ?? existing.parentLink
+        merged.cwd = incoming.cwd ?? existing.cwd
+        merged.gitRoot = incoming.gitRoot ?? existing.gitRoot
+        merged.worktreePath = incoming.worktreePath ?? existing.worktreePath
+        merged.gitBranch = incoming.gitBranch ?? existing.gitBranch
+        merged.pid = incoming.pid ?? existing.pid
+        merged.procStart = incoming.procStart ?? existing.procStart
+        if !incoming.sourcePath.isEmpty { merged.sourcePath = incoming.sourcePath }
+        merged.title = incoming.title ?? existing.title
+        merged.model = incoming.model ?? existing.model
+        merged.entrypoint = incoming.entrypoint ?? existing.entrypoint
+        return merged
     }
 
     private func maxDate(_ lhs: Date?, _ rhs: Date) -> Date {

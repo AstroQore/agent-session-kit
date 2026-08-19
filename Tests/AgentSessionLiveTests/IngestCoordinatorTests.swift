@@ -23,6 +23,35 @@ struct IngestCoordinatorTests {
         )
     }
 
+    @Test("registering a source hands the host its seed identity first")
+    func seedIdentityArrivesFirst() async throws {
+        let tree = TemporaryTree(#function)
+        tree.write(fixtureLine("history"), to: "alpha.jsonl")
+        let adapter = FakeSourceAdapter(root: tree.url)
+        let coordinator = IngestCoordinator(
+            adapters: [adapter],
+            home: tree.path,
+            cursorStore: nil,
+            configuration: configuration()
+        )
+
+        let (events, _) = await coordinator.start()
+        let arrived = await collect(events, upTo: 2, timeout: .seconds(3))
+        await coordinator.stop()
+
+        let first = try #require(arrived.first)
+        guard case .sessionStarted(let identity) = first.kind else {
+            Issue.record("expected sessionStarted first, got \(first.kind)")
+            return
+        }
+        #expect(identity.key.sessionID == "alpha.jsonl")
+        #expect(identity.cwd == "/Users/example/fake-project")
+        #expect(identity.title == "seed:alpha.jsonl")
+        // Stamped with the file's birth, not the moment Auspex looked.
+        #expect(first.timestamp <= first.observedAt)
+        #expect(arrived.dropFirst().map(noteText) == ["history"])
+    }
+
     @Test("lines appended after start arrive on the event stream")
     func appendedLinesArrive() async throws {
         let tree = TemporaryTree()
@@ -44,7 +73,7 @@ struct IngestCoordinatorTests {
 
         tree.append(fixtureLine("one") + fixtureLine("two") + fixtureLine("three"), to: "alpha.jsonl")
 
-        let arrived = await collect(events, upTo: 3, timeout: .seconds(3))
+        let arrived = await collectTailed(events, upTo: 3, timeout: .seconds(3))
         #expect(arrived.map(noteText) == ["one", "two", "three"])
         #expect(arrived.allSatisfy { $0.session.sessionID == "alpha.jsonl" })
         #expect(arrived.allSatisfy { $0.raw?.path == tree.file("alpha.jsonl").path })
@@ -89,7 +118,7 @@ struct IngestCoordinatorTests {
             configuration: configuration()
         )
         let (firstEvents, _) = await first.start()
-        let seeded = await collect(firstEvents, upTo: 2, timeout: .seconds(3))
+        let seeded = await collectTailed(firstEvents, upTo: 2, timeout: .seconds(3))
         #expect(seeded.map(noteText) == ["history-one", "history-two"])
         await first.stop()
 
@@ -117,7 +146,7 @@ struct IngestCoordinatorTests {
         try await Task.sleep(for: .milliseconds(300))
         tree.append(fixtureLine("brand-new"), to: "gamma.jsonl")
 
-        let resumed = await collect(secondEvents, upTo: 1, timeout: .seconds(3))
+        let resumed = await collectTailed(secondEvents, upTo: 1, timeout: .seconds(3))
         #expect(resumed.map(noteText) == ["brand-new"])
         await second.stop()
     }
@@ -137,7 +166,7 @@ struct IngestCoordinatorTests {
         #expect(await coordinator.trackedPaths().isEmpty)
 
         tree.write(fixtureLine("appeared"), to: "delta.jsonl")
-        let arrived = await collect(events, upTo: 1, timeout: .seconds(5))
+        let arrived = await collectTailed(events, upTo: 1, timeout: .seconds(5))
         #expect(arrived.map(noteText) == ["appeared"])
         #expect(await coordinator.trackedPaths() == [tree.file("delta.jsonl").path])
         await coordinator.stop()
@@ -195,7 +224,7 @@ struct IngestCoordinatorTests {
 
         // A second pipeline would mean a second tailer over the same file and
         // the line arriving twice.
-        let arrived = await collect(events, upTo: 2, timeout: .seconds(2))
+        let arrived = await collectTailed(events, upTo: 2, timeout: .seconds(2))
         #expect(arrived.map(noteText) == ["once"])
         await coordinator.stop()
     }

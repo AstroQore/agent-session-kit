@@ -395,6 +395,14 @@ public actor IngestCoordinator {
         }
         noticeContinuation?.yield(.sourceDiscovered(source.key, path: source.primaryPath))
 
+        // Hand the adapter's seed identity to the host before the first line
+        // is tailed. Discovery is the only place a pid, a parent, or a cwd
+        // decoded from a directory name is known, and a tail that begins
+        // mid-transcript would otherwise never learn them. The reducer treats
+        // a `sessionStarted` for a session it already tracks as an identity
+        // merge, so re-registering after a drop does not reset anything.
+        eventContinuation?.yield(Self.seedEvent(for: source))
+
         let seedBytes = configuration.seedBytes
         if cursor == nil {
             await execute(path: source.primaryPath) {
@@ -405,6 +413,26 @@ public actor IngestCoordinator {
                 try await tailer.poll()
             }
         }
+    }
+
+    /// The `sessionStarted` a freshly registered source contributes.
+    ///
+    /// Stamped with the best "when did this begin" available without reading
+    /// the source: the process start when the adapter knows it, else the
+    /// primary file's creation date, else now — so a session discovered on
+    /// cold start is not reported as having begun the moment Auspex launched.
+    static func seedEvent(for source: SessionSource) -> AgentEvent {
+        let identity = source.seedIdentity
+        let now = Date()
+        let began = identity.procStart ?? FileStamp.creationDate(atPath: source.primaryPath) ?? now
+        return AgentEvent(
+            session: source.key,
+            timestamp: began,
+            observedAt: now,
+            sequence: 0,
+            kind: .sessionStarted(identity: identity),
+            raw: RawRef(path: source.primaryPath, byteOffset: 0, rowID: nil, lineNumber: nil)
+        )
     }
 
     private func drop(_ path: String) {

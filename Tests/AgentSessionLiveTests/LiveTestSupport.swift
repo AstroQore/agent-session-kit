@@ -83,6 +83,31 @@ func collect<T: Sendable>(
     return await collector.values
 }
 
+/// Like ``collect(_:upTo:timeout:)`` but ignores the `sessionStarted` a
+/// coordinator emits when it registers a source, so tests about tailing can
+/// count only the events the tail produced.
+func collectTailed(
+    _ stream: AsyncStream<AgentEvent>,
+    upTo count: Int,
+    timeout: Duration = .seconds(5)
+) async -> [AgentEvent] {
+    let collector = ValueBox<AgentEvent>()
+    let task = Task {
+        for await value in stream {
+            if case .sessionStarted = value.kind { continue }
+            let total = await collector.append(value)
+            if total >= count { break }
+        }
+    }
+    let deadline = ContinuousClock.now + timeout
+    while ContinuousClock.now < deadline {
+        if await collector.count >= count { break }
+        try? await Task.sleep(for: .milliseconds(20))
+    }
+    task.cancel()
+    return await collector.values
+}
+
 /// Polls `condition` until it holds or `timeout` elapses.
 @discardableResult
 func waitUntil(
@@ -180,7 +205,12 @@ struct FakeSourceAdapter: SourceAdapter {
             return SessionSource(
                 key: key,
                 primaryPath: path,
-                seedIdentity: SessionIdentity(key: key, sourcePath: path)
+                seedIdentity: SessionIdentity(
+                    key: key,
+                    sourcePath: path,
+                    cwd: "/Users/example/fake-project",
+                    title: "seed:" + name
+                )
             )
         }
     }
