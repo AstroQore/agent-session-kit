@@ -19,7 +19,7 @@ public enum AgentSessionKitInfo {
     ///
     /// Semver, bare — no `v` prefix, matching the tags. Bumping it is part
     /// of the release commit; see `RELEASING.md`.
-    public static let version = "0.4.0"
+    public static let version = "0.4.1"
 
     /// Where the package lives. Public because a host that shows the
     /// version usually wants somewhere to send the reader.

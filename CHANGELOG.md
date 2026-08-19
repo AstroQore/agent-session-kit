@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-20
+
+Release validation no longer races an FSEvents stream rearm when a watched
+session-store root appears for the first time.
+
+### Fixed
+- **Late-root FSEvents integration coverage is deterministic.** The test now
+  waits until the watcher has narrowed from the nearest existing ancestor to
+  the newly created root before writing its probe file, matching the
+  production restart/rescan contract and removing the stream teardown/startup
+  gap from the assertion.
+
 ## [0.4.0] - 2026-08-20
 
 Session indexing becomes a reusable, role-aware host capability with related
