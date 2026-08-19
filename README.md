@@ -431,6 +431,15 @@ for await event in events {
 place a drop can happen is the stream's buffering policy, which
 `TailerBackpressure` documents.
 
+Cursors are saved on an interval, and only for the sources that moved: the
+coordinator calls `SourceCursorStore.save(changed:all:)` with what it read
+since the last save, and the save is skipped entirely when nothing did. The
+default implementation writes `all`, so a store that can only replace needs no
+changes and behaves as it always has; a store that can write a subset should
+implement the method and apply `changed` in one transaction. Shutdown writes
+everything, which is what makes a source that was registered and never
+produced an event resume rather than re-seed.
+
 `JSONLTailer` is the building block six of the nine harnesses share: supply a
 `(Data, JSONLLineRef) -> [AgentEvent]` decoder and inherit rotation and
 truncation detection, partial-line buffering, byte-offset cursors, and bounded
