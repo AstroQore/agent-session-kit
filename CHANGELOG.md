@@ -7,6 +7,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **MCP client diagnostics and safe disconnects.**
+  `MCPSocketServer.clientConnections` reports a private connection id, the
+  kernel-reported peer pid when available, connection time, and last byte
+  activity — never a command line or path. `onConnectionsChange` publishes the
+  same snapshots, and `disconnectClient(id:)` closes exactly that socket
+  without signalling or killing its process.
 - **`SourceCursorStore.save(changed:all:)`** — the call the periodic cursor
   save makes. `changed` is what actually moved; `all` is the complete set, so
   a store that can only replace still has what it needs. The default writes
@@ -19,6 +25,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   makes the claim below assertable rather than timed.
 
 ### Changed
+- **Forgotten stdio bridges no longer fill the MCP listener forever.** An
+  accepted client that moves no bytes for 30 minutes is closed by default;
+  hosts can choose another timeout or disable expiry. Closing the socket makes
+  `MCPStdioBridge` return immediately even when its stdin owner forgot to close
+  the pipe, so the bridge process and the server slot are reclaimed. Real EOF
+  and transport errors still clean up immediately. At the 16-client cap the
+  listener now sends an explicit JSON-RPC capacity error before closing, and a
+  stdio bridge turns that private frame into an actionable stderr message and
+  exit code 2 instead of exiting 0 with empty stdout.
 - **The periodic save writes the cursors that moved, not all of them.** The
   save had one bit of state — "something moved" — and answered it by writing
   every cursor the coordinator held. One harness appending a transcript line a

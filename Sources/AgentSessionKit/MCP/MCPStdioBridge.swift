@@ -27,6 +27,11 @@ public struct MCPStdioBridgeConfig: Sendable {
     /// path; the host owns the wording because only it can name the app the
     /// user is supposed to launch.
     public let notRunningMessage: @Sendable (String) -> String
+    /// What to print when the app is alive but has no client slot left. The
+    /// socket listener sends a private transport control frame before closing;
+    /// the bridge consumes that frame and turns it into an actionable process
+    /// failure instead of an empty successful stdout stream.
+    public let connectionLimitMessage: @Sendable () -> String
 
     /// Primary initializer. `defaultSocketPath` is called each time
     /// ``MCPStdioBridge/socketPath(_:environment:)`` needs it — not cached.
@@ -36,12 +41,16 @@ public struct MCPStdioBridgeConfig: Sendable {
         defaultSocketPath: @escaping @Sendable () -> String,
         notRunningMessage: @escaping @Sendable (String) -> String = { path in
             "No MCP server is listening on \(path). Start the app that serves it first."
+        },
+        connectionLimitMessage: @escaping @Sendable () -> String = {
+            "The MCP server has no free client slots. Close stale MCP clients and try again."
         }
     ) {
         self.flag = flag
         self.envKey = envKey
         self.defaultSocketPath = defaultSocketPath
         self.notRunningMessage = notRunningMessage
+        self.connectionLimitMessage = connectionLimitMessage
     }
 
     /// Backward-compatible convenience initializer for a default socket path
@@ -53,13 +62,17 @@ public struct MCPStdioBridgeConfig: Sendable {
         defaultSocketPath: String,
         notRunningMessage: @escaping @Sendable (String) -> String = { path in
             "No MCP server is listening on \(path). Start the app that serves it first."
+        },
+        connectionLimitMessage: @escaping @Sendable () -> String = {
+            "The MCP server has no free client slots. Close stale MCP clients and try again."
         }
     ) {
         self.init(
             flag: flag,
             envKey: envKey,
             defaultSocketPath: { defaultSocketPath },
-            notRunningMessage: notRunningMessage
+            notRunningMessage: notRunningMessage,
+            connectionLimitMessage: connectionLimitMessage
         )
     }
 }
@@ -94,6 +107,9 @@ public struct MCPStdioBridge: Sendable {
         public static let ok: Int32 = 0
         /// Nothing was listening — almost always "the app is not running".
         public static let notRunning: Int32 = 1
+        /// The app is running, but its listener deliberately refused this
+        /// bridge because every client slot is occupied.
+        public static let connectionLimit: Int32 = 2
     }
 
     /// Whether `arguments` selects bridge mode.
@@ -118,8 +134,8 @@ public struct MCPStdioBridge: Sendable {
     ///
     /// Returns when either side closes: stdin closing is the client shutting
     /// the server down, and the socket closing is the app quitting. Both are
-    /// ordinary ends of a session, so both exit zero — only a failure to
-    /// connect at all is an error worth a non-zero code.
+    /// ordinary ends of a session, so both exit zero. Failure to connect and
+    /// an explicit capacity rejection are non-zero and write to stderr.
     public static func run(
         _ config: MCPStdioBridgeConfig,
         socketPath path: String,
@@ -147,11 +163,15 @@ public struct MCPStdioBridge: Sendable {
         thread.name = "com.astroqore.AgentSessionKit.mcp.stdio"
         thread.start()
 
-        pump(from: socketFD, to: output)
+        let downstream = pumpSocketToOutput(from: socketFD, to: output)
         // The socket closed. Do not wait on the stdin thread: it is parked in
         // a blocking read the client may never end, and the process exiting is
         // what the client is waiting for.
         close(socketFD)
+        if downstream == .connectionLimit {
+            standardError.write(Data((config.connectionLimitMessage() + "\n").utf8))
+            return ExitCode.connectionLimit
+        }
         return ExitCode.ok
     }
 
@@ -265,6 +285,49 @@ public struct MCPStdioBridge: Sendable {
             if count == 0 { return }
             if errno == EINTR { continue }
             return
+        }
+    }
+
+    private enum DownstreamResult {
+        case ended
+        case connectionLimit
+    }
+
+    /// The listener's capacity rejection is the one transport event a stdio
+    /// client cannot otherwise distinguish from an orderly app shutdown: both
+    /// are an immediate socket EOF. Buffer only the first few bytes while they
+    /// still match the private rejection frame; every ordinary MCP response is
+    /// forwarded byte-for-byte as soon as its prefix differs.
+    private static func pumpSocketToOutput(from source: Int32, to destination: Int32) -> DownstreamResult {
+        let rejection = MCPSocketServer.connectionLimitFrame
+        var undecided = Data()
+        var isCheckingRejection = true
+        var chunk = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let count = chunk.withUnsafeMutableBytes { read(source, $0.baseAddress, $0.count) }
+            if count > 0 {
+                if isCheckingRejection {
+                    undecided.append(contentsOf: chunk[0..<count])
+                    if rejection.starts(with: undecided) {
+                        if undecided.count == rejection.count { return .connectionLimit }
+                        continue
+                    }
+                    guard writeAll([UInt8](undecided), count: undecided.count, to: destination) else {
+                        return .ended
+                    }
+                    undecided.removeAll(keepingCapacity: false)
+                    isCheckingRejection = false
+                    continue
+                }
+                guard writeAll(chunk, count: count, to: destination) else { return .ended }
+                continue
+            }
+            if !undecided.isEmpty {
+                _ = writeAll([UInt8](undecided), count: undecided.count, to: destination)
+            }
+            if count == 0 { return .ended }
+            if errno == EINTR { continue }
+            return .ended
         }
     }
 
