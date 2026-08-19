@@ -244,6 +244,11 @@ struct FakeProcessTable: ProcessTableReading {
 struct ScriptedLivenessAdapter: SourceAdapter {
     let harness: Harness
     let verdict: LivenessHint
+    /// Harnesses this adapter answers for besides its own, so the resolver's
+    /// indexing by `handledHarnesses` can be driven directly.
+    var alsoHandles: [Harness] = []
+
+    var handledHarnesses: [Harness] { [harness] + alsoHandles }
 
     func watchRoots(home: String) -> [URL] { [] }
     func discover(home: String, activeSince: Date) async throws -> [SessionSource] { [] }

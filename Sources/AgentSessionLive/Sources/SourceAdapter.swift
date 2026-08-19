@@ -14,7 +14,25 @@ import Foundation
 /// directory and never touches a real home.
 public protocol SourceAdapter: Sendable {
     /// The harness this adapter reads.
+    ///
+    /// One adapter has one primary harness, and it is what a notice or a log
+    /// line names when something goes wrong inside it. When a single store
+    /// carries more than one harness's sessions, list the rest in
+    /// ``handledHarnesses``.
     var harness: Harness { get }
+
+    /// Every harness whose sessions this adapter can key and probe.
+    ///
+    /// Almost always just ``harness``, and the default implementation says
+    /// so. The exception is a store shared by two harnesses:
+    /// `~/.codex/sessions` holds both Codex and ChatGPT Work rollouts, told
+    /// apart only by the header's `originator`, and one adapter reads both.
+    ///
+    /// A host that indexes adapters by harness — ``LivenessResolver`` does,
+    /// because a probe is per-harness by construction — must index by this
+    /// rather than by ``harness``, or the second harness's sessions get no
+    /// probe at all and every one of them shows up as liveness `unknown`.
+    var handledHarnesses: [Harness] { get }
 
     /// The directories a file-system watcher should subscribe to.
     ///
@@ -73,5 +91,7 @@ public protocol SourceAdapter: Sendable {
 }
 
 public extension SourceAdapter {
+    var handledHarnesses: [Harness] { [harness] }
+
     func mightBeSessionFile(path: String) -> Bool { true }
 }

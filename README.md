@@ -193,9 +193,10 @@ table goes through `ArgvSanitizer`.
 | Harness | Adapter | Store |
 | --- | --- | --- |
 | Claude Code | ✅ `ClaudeLiveAdapter` | `~/.claude/projects/**/*.jsonl`, `~/.claude/sessions` |
-| Codex / ChatGPT Work | ✅ `CodexLiveAdapter` | `~/.codex/sessions/**/rollout-*.jsonl`, `~/.codex/archived_sessions`; liveness via `~/.codex/thread-writer-locks/<id>.lock` |
+| Claude Cowork | ✅ `ClaudeCoworkLiveAdapter` | `~/Library/Application Support/Claude/local-agent-mode-sessions/**/.claude/projects/**/*.jsonl`; liveness via the Claude.app helper's `CLAUDE_CODE_SESSION_ID` |
+| Codex | ✅ `CodexLiveAdapter` | `~/.codex/sessions/**/rollout-*.jsonl`, `~/.codex/archived_sessions`; liveness via `~/.codex/thread-writer-locks/<id>.lock` |
+| ChatGPT Work | ✅ `CodexLiveAdapter` | the same tree, keyed apart by `session_meta.originator == "codex_work_desktop"` |
 | Grok Build | ✅ `GrokLiveAdapter` | `~/.grok/sessions/<percent-encoded cwd>/<id>/{events,updates}.jsonl`; liveness via `~/.grok/active_sessions.json` and the per-file writer locks |
-| Claude Cowork | — | `~/Library/Application Support/Claude/local-agent-mode-sessions` |
 | Gemini CLI | — | `~/.gemini/tmp/*/chats` |
 | AntiGravity | ✅ `AntigravityLiveAdapter` | `~/.gemini/antigravity{-cli,}/conversations/*.db`; state from the SQL columns plus a shallow `step_payload` decode; liveness via `presence/<id>.lock` |
 | Cursor | ✅ `CursorLiveAdapter` | `~/.cursor/chats/**/store.db` + `~/.cursor/projects/<slug>/agent-transcripts`; liveness via `cursor-agent-worker-*.pid` and the store's WAL |
@@ -229,6 +230,19 @@ and never the child's `agentId`, the child's meta file logs the tool-use id —
 so `ClaudeSubagentLinker` does the join at discovery and the parent's tailer
 reports `subagentStarted` / `subagentFinished` on the parent's stream.
 
+`ClaudeCoworkLiveAdapter` reads the same format from Claude.app's own
+container, where the local agent runs the app drives itself are written.
+Discovery and seeding are literally the same code — `ClaudeSourceBuilder`,
+parameterised by harness — because the transcripts are byte-identical; what
+differs is that the tree is nested several levels deeper behind a hidden
+`.claude` directory, and that no `~/.claude/sessions` entry exists for a Cowork
+run. Liveness therefore comes from the process that launched it: a binary under
+`/Applications/Claude.app` whose environment carries this session's
+`CLAUDE_CODE_SESSION_ID`, falling back to the transcript's own freshness when
+that environment cannot be read. The keys are `claudeCowork:<session id>`, not
+Claude Code's, because a board that folded the two together would attribute the
+app's background work to whatever a person was doing in a terminal.
+
 `CodexLiveAdapter` covers every Codex surface that writes into that one tree —
 CLI, VS Code, desktop, `codex exec`, and the sub-agents any of them spawn.
 `CodexRecordMapper` is pure and static, so a rollout line maps to events with
@@ -236,6 +250,17 @@ no adapter, no clock, and no I/O involved. A held writer lock overrides the
 discovery window: a thread opened last month and still running is found
 whatever its rollout's mtime says, and the kernel drops that lock however the
 process ended.
+
+One of those surfaces is a harness of its own. `originator ==
+"codex_work_desktop"` is ChatGPT Work mode in the desktop app, so discovery
+keys those rollouts `chatgptWork:<thread id>` through `CodexOriginator` — the
+same mapping the on-disk index uses — and everything downstream follows the
+source's key. Anything unrecognised, including a rollout with no header at all,
+stays on Codex rather than being invented as ChatGPT Work usage. Because one
+adapter now answers for two harnesses, `SourceAdapter` grew
+`handledHarnesses` (default `[harness]`), and `LivenessResolver` indexes by
+that rather than by the primary harness; without it every ChatGPT Work session
+would come back `unknown`.
 
 `GrokLiveAdapter` is the first one whose session is several files rather than
 one. `GrokSessionTailer` runs a `JSONLTailer` per file and merges them by the

@@ -59,8 +59,13 @@ public actor LivenessResolver {
     /// Creates a resolver.
     ///
     /// - Parameters:
-    ///   - adapters: One per harness. Where two adapters claim the same
-    ///     harness the first wins; a probe is per-harness by construction.
+    ///   - adapters: One per harness, indexed by each adapter's
+    ///     ``SourceAdapter/handledHarnesses`` rather than by its primary
+    ///     ``SourceAdapter/harness`` — one adapter can answer for two
+    ///     harnesses that share a store, and indexing by the primary alone
+    ///     would leave the second with no probe and every session on it
+    ///     `unknown`. Where two adapters claim the same harness the first
+    ///     wins; a probe is per-harness by construction.
     ///   - table: The process table. Injected so the suite can drive every
     ///     branch off a fixed list instead of whatever is running.
     ///   - home: Passed through to each adapter's probe.
@@ -74,8 +79,10 @@ public actor LivenessResolver {
         tolerance: TimeInterval = 2
     ) {
         var byHarness: [Harness: any SourceAdapter] = [:]
-        for adapter in adapters where byHarness[adapter.harness] == nil {
-            byHarness[adapter.harness] = adapter
+        for adapter in adapters {
+            for harness in adapter.handledHarnesses where byHarness[harness] == nil {
+                byHarness[harness] = adapter
+            }
         }
         self.adapters = byHarness
         self.table = table

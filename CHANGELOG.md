@@ -6,6 +6,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`ClaudeCoworkLiveAdapter`** — Claude Cowork is now live, not just indexed.
+  Discovery walks `~/Library/Application Support/Claude/local-agent-mode-sessions/**/.claude/projects`
+  through `ClaudeCoworkPaths`, the same sweep the on-disk index uses, so a
+  transcript can never be live here and missing there. Cowork writes
+  byte-identical JSONL to Claude Code, so the record mapper, the tailer, and
+  the seeding rules are shared through a new `ClaudeSourceBuilder` rather than
+  copied; only the roots and the liveness rule are the adapter's own.
+  Liveness has no pid file and no writer lock to read, so it is taken from the
+  process that launched the run: a binary under `/Applications/Claude.app`
+  whose environment carries this session's `CLAUDE_CODE_SESSION_ID` → alive
+  with that pid; otherwise a transcript written in the last two minutes →
+  alive, longer than ten → dead, and `unknown` in between.
+- **ChatGPT Work is its own harness in the live layer.** `CodexLiveAdapter`
+  keys a rollout by `session_meta.originator` through `CodexOriginator`, so a
+  thread written by ChatGPT Work mode in the desktop app
+  (`originator == "codex_work_desktop"`) becomes
+  `SessionKey(.chatgptWork, …)` and every event, child link, and cursor
+  follows that key. Anything unrecognised — including a rollout with no header
+  — stays on `.codex` rather than being invented as ChatGPT Work usage.
+- **`SourceAdapter.handledHarnesses`** — the harnesses an adapter can key and
+  probe, defaulting to `[harness]`. `CodexLiveAdapter` reports
+  `[.codex, .chatgptWork]`, and `LivenessResolver` now indexes adapters by
+  this rather than by the primary harness; without it every ChatGPT Work
+  session would get no probe at all and resolve `unknown` forever.
+
 ## [0.1.0] - 2026-08-19
 
 First tagged release: the extraction from Vibe Bar plus the whole live layer.

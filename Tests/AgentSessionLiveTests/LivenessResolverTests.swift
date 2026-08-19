@@ -97,6 +97,26 @@ struct LivenessResolverTests {
         #expect(await resolver.hint(for: identity(pid: 4711, procStart: epoch)).verdict == .alive)
     }
 
+    @Test("an adapter is indexed by every harness it handles, not just its own")
+    func handledHarnessRouting() async {
+        // What `CodexLiveAdapter` does for ChatGPT Work: one adapter, one
+        // store, two harnesses. Indexing by `harness` alone would leave the
+        // second one with no probe at all.
+        let adapter = ScriptedLivenessAdapter(
+            harness: .codex,
+            verdict: LivenessHint(verdict: .dead, pid: nil, evidence: "writer lock released"),
+            alsoHandles: [.chatgptWork])
+        let resolver = LivenessResolver(
+            adapters: [adapter], table: FakeProcessTable(records: []), home: "/Users/example")
+
+        let work = SessionIdentity(
+            key: SessionKey(harness: .chatgptWork, sessionID: "work-thread"),
+            sourcePath: "/Users/example/.codex/sessions/2026/08/19/rollout-x.jsonl")
+        let hint = await resolver.hint(for: work)
+        #expect(hint.verdict == .dead)
+        #expect(hint.evidence == "writer lock released")
+    }
+
     @Test("only transitions reach the stream")
     func transitionsOnly() async {
         let resolver = LivenessResolver(

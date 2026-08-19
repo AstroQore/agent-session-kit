@@ -149,133 +149,17 @@ public struct ClaudeLiveAdapter: SourceAdapter {
 
     public func discover(home: String, activeSince: Date) async throws -> [SessionSource] {
         let entries = ClaudeSessionsDirectory.read(home: home)
+        let builder = ClaudeSourceBuilder(harness: harness, linker: linker)
         var sources: [SessionSource] = []
 
         for root in Self.projectRoots(home: home) {
-            for projectDirectory in subdirectories(of: root) {
-                for transcript in transcripts(in: projectDirectory) {
-                    let sessionID = transcript.deletingPathExtension().lastPathComponent
-                    let entry = ClaudeSessionsDirectory.session(for: sessionID, in: entries)
-                    let stamp = FileStamp.read(path: transcript.path)
-                    let isRunning = entry != nil
-                    let isRecent = (stamp?.modified ?? .distantPast) >= activeSince
-                    guard isRunning || isRecent else { continue }
-
-                    let parent = parentSource(
-                        transcript: transcript,
-                        projectDirectory: projectDirectory,
-                        sessionID: sessionID,
-                        entry: entry
-                    )
-                    sources.append(parent)
-                    sources.append(contentsOf: subagentSources(
-                        parent: parent,
-                        projectDirectory: projectDirectory,
-                        sessionID: sessionID,
-                        activeSince: isRunning ? .distantPast : activeSince
-                    ))
-                }
+            for projectDirectory in ClaudeSourceBuilder.subdirectories(of: root) {
+                sources.append(contentsOf: builder.sources(
+                    in: projectDirectory, entries: entries, activeSince: activeSince
+                ))
             }
         }
         return sources
-    }
-
-    private func parentSource(
-        transcript: URL,
-        projectDirectory: URL,
-        sessionID: String,
-        entry: ClaudeLiveSession?
-    ) -> SessionSource {
-        let key = SessionKey(harness: .claudeCode, sessionID: sessionID)
-        let head = headRecord(of: transcript)
-        var identity = SessionIdentity(key: key, sourcePath: transcript.path)
-        identity.cwd = entry?.cwd
-            ?? head?.cwd
-            ?? ClaudeProjectPath.decode(directoryName: projectDirectory.lastPathComponent)
-        identity.gitBranch = head?.gitBranch
-        identity.entrypoint = entry?.entrypoint ?? head?.entrypoint
-        identity.model = head?.model
-        identity.pid = entry.map { $0.pid }
-        identity.procStart = entry?.procStart
-        identity.title = entry?.name
-        return SessionSource(key: key, primaryPath: transcript.path, seedIdentity: identity)
-    }
-
-    /// Subagent transcripts under `<project>/<session id>/subagents`.
-    ///
-    /// Registering the link here rather than in ``makeTailer(_:cursor:)`` is
-    /// deliberate: a host may discover a child and decide not to tail it, and
-    /// the parent should still be told a child exists.
-    private func subagentSources(
-        parent: SessionSource,
-        projectDirectory: URL,
-        sessionID: String,
-        activeSince: Date
-    ) -> [SessionSource] {
-        let directory = projectDirectory
-            .appendingPathComponent(sessionID)
-            .appendingPathComponent("subagents")
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
-
-        return names.sorted().compactMap { name -> SessionSource? in
-            guard name.hasPrefix(Self.subagentFilePrefix), name.hasSuffix(".jsonl") else { return nil }
-            let path = directory.appendingPathComponent(name).path
-            guard (FileStamp.read(path: path)?.modified ?? .distantPast) >= activeSince else { return nil }
-
-            let agentID = String(name.dropFirst(Self.subagentFilePrefix.count).dropLast(".jsonl".count))
-            guard !agentID.isEmpty else { return nil }
-            let meta = ClaudeSubagentMeta.read(
-                path: directory.appendingPathComponent(
-                    "\(Self.subagentFilePrefix)\(agentID).meta.json"
-                ).path
-            )
-            let key = SessionKey(
-                harness: .claudeCode,
-                sessionID: "\(sessionID)\(Self.subagentKeySeparator)\(Self.subagentFilePrefix)\(agentID)"
-            )
-            linker.register(
-                child: key,
-                parent: parent.key,
-                agentType: meta?.agentType,
-                toolUseID: meta?.toolUseID
-            )
-
-            var identity = SessionIdentity(key: key, sourcePath: path)
-            identity.variant = Self.subagentVariant
-            identity.parent = parent.key
-            identity.parentLink = .subagent(toolUseID: meta?.toolUseID)
-            identity.cwd = parent.seedIdentity.cwd
-            identity.gitBranch = parent.seedIdentity.gitBranch
-            identity.model = meta?.model
-            identity.title = meta?.description.map { EventText.preview($0, max: 200) }
-            return SessionSource(key: key, primaryPath: path, seedIdentity: identity)
-        }
-    }
-
-    /// The first fully-stamped record of a transcript, from a bounded read of
-    /// its head.
-    ///
-    /// Three lines rather than one because the head of a resumed session can
-    /// open with a `queue-operation` or a `custom-title`, neither of which
-    /// carries a `cwd`.
-    private func headRecord(of transcript: URL) -> ClaudeTranscriptRecord? {
-        for line in JSONLHeadTail.headLines(url: transcript, count: 3) {
-            guard let record = ClaudeTranscriptRecord.decode(line), record.isFullyStamped else { continue }
-            return record
-        }
-        return nil
-    }
-
-    private func subdirectories(of root: URL) -> [URL] {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
-        return names.sorted().map(root.appendingPathComponent)
-    }
-
-    private func transcripts(in projectDirectory: URL) -> [URL] {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: projectDirectory.path)) ?? []
-        return names.sorted()
-            .filter { $0.hasSuffix(".jsonl") && !$0.hasPrefix(Self.subagentFilePrefix) }
-            .map(projectDirectory.appendingPathComponent)
     }
 
     // MARK: - Tailing

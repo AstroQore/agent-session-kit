@@ -15,6 +15,19 @@ import Synchronization
 /// separates them, and this adapter keeps it in
 /// ``SessionIdentity/variant``.
 ///
+/// ## Two harnesses, one store
+///
+/// One of those surfaces is its own harness. `originator ==
+/// "codex_work_desktop"` is ChatGPT **Work** mode in the desktop app, which
+/// bills against a different plan and is what a person means by "ChatGPT" and
+/// not by "Codex". Discovery therefore keys those rollouts
+/// `SessionKey(.chatgptWork, …)` — via `CodexOriginator`, the same mapping
+/// the on-disk index uses — and everything downstream follows the source's
+/// key: the mapper stamps its events with it, a spawned child inherits it,
+/// and ``handledHarnesses`` is what makes a resolver hand this adapter the
+/// probe for both. Nothing else in the adapter is harness-aware; the rollout
+/// path, the writer lock, and the cursor are all keyed by thread id alone.
+///
 /// ## Liveness
 ///
 /// Codex takes an advisory lock on
@@ -42,6 +55,16 @@ import Synchronization
 /// `gitBranch` at discovery from the catalog once the reader is reachable.
 public struct CodexLiveAdapter: SourceAdapter {
     public let harness: Harness = .codex
+
+    /// Both harnesses that write into `~/.codex/sessions`.
+    ///
+    /// ChatGPT Work is not a second store, a second format, or a second
+    /// process — it is the same Codex writing the same rollouts from the
+    /// desktop app's Work mode, and the only thing separating the two is the
+    /// header's `originator`. So one adapter discovers, tails, and probes
+    /// both, and says so here rather than leaving every ChatGPT Work session
+    /// without a liveness probe.
+    public let handledHarnesses: [Harness] = [.codex, .chatgptWork]
 
     /// Rollouts, relative to a home directory.
     public static let sessionsPath = ".codex/sessions"
@@ -200,10 +223,20 @@ public struct CodexLiveAdapter: SourceAdapter {
             return nil
         }
 
+        // The header's `originator` is the *only* thing that separates a
+        // ChatGPT Work thread from an ordinary Codex one; they share the
+        // tree, the file name, and every record shape. `CodexOriginator`
+        // owns the mapping so the live layer and the on-disk index agree —
+        // and it deliberately keeps anything unrecognised, including a
+        // rollout with no header at all, on the Codex harness rather than
+        // inventing ChatGPT Work usage.
+        let originator = meta?["originator"]?.string
+        let harness = CodexOriginator.harness(originator: originator)
+
         let key = SessionKey(harness: harness, sessionID: sessionID)
         var identity = SessionIdentity(key: key, sourcePath: file.path)
         identity.cwd = meta?["cwd"]?.string
-        identity.variant = meta?["originator"]?.string
+        identity.variant = originator
         identity.entrypoint = entrypoint(meta)
         identity.model = head.first { $0.type == "turn_context" }?.payload["model"]?.string
 

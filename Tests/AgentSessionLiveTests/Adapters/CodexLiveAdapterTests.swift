@@ -537,6 +537,66 @@ struct CodexLiveAdapterDiscoveryTests {
         #expect(seed.procStart == nil)
     }
 
+    @Test("the ChatGPT Work originator keys a rollout to its own harness")
+    func chatgptWorkOriginator() async throws {
+        let home = CodexHome(tree: TemporaryTree())
+        let today = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        // The one byte of difference between a ChatGPT Work thread and an
+        // ordinary Codex one. Same tree, same file name, same record shapes.
+        home.rollout(
+            sessionID: Self.live,
+            day: (today.year ?? 2026, today.month ?? 1, today.day ?? 1),
+            contents: """
+                {"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta",\
+                "payload":{"id":"SID","session_id":"SID","cwd":"/Users/example/code/demo",\
+                "originator":"\(CodexOriginator.chatgptWork)","source":"desktop"}}
+
+                """)
+
+        let adapter = CodexLiveAdapter()
+        let sources = try await adapter.discover(
+            home: home.path, activeSince: Date().addingTimeInterval(-3600))
+        let source = try #require(sources.first)
+
+        #expect(source.key == SessionKey(harness: .chatgptWork, sessionID: Self.live))
+        #expect(source.seedIdentity.key.harness == .chatgptWork)
+        // The originator is still reported verbatim; the harness is derived
+        // from it rather than replacing it.
+        #expect(source.seedIdentity.variant == CodexOriginator.chatgptWork)
+
+        // The mapper stamps its events with the source's key, so the whole
+        // pipeline stays on one harness rather than splitting a session in two.
+        let events = try await adapter.makeTailer(source, cursor: nil)
+            .seedFromTail(maxBytes: 64 * 1024)
+        #expect(!events.isEmpty)
+        #expect(events.allSatisfy { $0.session.harness == .chatgptWork })
+    }
+
+    @Test("an unrecognised originator stays on the Codex harness")
+    func unknownOriginatorStaysCodex() async throws {
+        let home = CodexHome(tree: TemporaryTree())
+        let today = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        // No header at all: the file is a rollout, and nothing says it is
+        // ChatGPT Work, so it is not invented as ChatGPT Work usage.
+        home.rollout(
+            sessionID: Self.live,
+            day: (today.year ?? 2026, today.month ?? 1, today.day ?? 1),
+            contents: """
+                {"timestamp":"2026-01-01T00:00:02.000Z","type":"turn_context",\
+                "payload":{"model":"example-model-large"}}
+
+                """)
+
+        let sources = try await CodexLiveAdapter().discover(
+            home: home.path, activeSince: Date().addingTimeInterval(-3600))
+        #expect(sources.map(\.key.harness) == [.codex])
+    }
+
+    @Test("the adapter answers for both harnesses that share the store")
+    func handledHarnesses() {
+        #expect(CodexLiveAdapter().handledHarnesses == [.codex, .chatgptWork])
+    }
+
     @Test("a held writer lock overrides the window, however old the rollout is")
     func lockedSessionsAreAlwaysDiscovered() async throws {
         let home = CodexHome(tree: TemporaryTree())
