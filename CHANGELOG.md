@@ -9,7 +9,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.3.0] - 2026-08-19
 
 Sessions learn to say what they were asked for and how to get back into
-them, Grok Bot goes live, and the package learns how to cut its own
+them, Grok Bot goes live, discovery and liveness stop paying per-session for
+answers that are per-machine, and the package learns how to cut its own
 releases.
 
 ### Added
