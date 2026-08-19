@@ -6,6 +6,49 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`GrokBotLiveAdapter`** — Grok Bot is now live, not just indexed. A
+  conversation is a JSON document the desktop client rewrites whole, so
+  `GrokBotTranscriptTailer` diffs the file against itself rather than walking
+  it: a poll asks which entries are new and which of the ones already read have
+  stopped streaming, and the cursor is `.blobHead(<id of the last entry
+  consumed>)` because entry ids survive a rewrite and a byte offset does not.
+  Two `stat` calls short-circuit a poll with nothing to read — the client
+  rewrites the file on every step of a streaming reply. A streaming entry
+  produces `thinking` and nothing else; the words come out of the read that
+  finds the flag cleared. `send-message` is the bot answering the person and a
+  `message` with `role: "user"` is inbound, matching `GrokBotSessionAdapter`
+  exactly, and renames, automations, widgets, secret requests, and attachments
+  ride in `note` rather than pretending to be turns.
+- **A needs-you signal for Grok Bot.** The roster slice travels as an auxiliary
+  path and its `awaitingUserResponse` becomes
+  `permissionRequested(id: "grokbot:<bot>", tool: nil)`, resolving when the flag
+  clears, stamped with the roster file's own mtime. It is the only field
+  anywhere in this store that says a person is needed, and a conversation
+  carrying it is discovered however old its timestamps are.
+- **Liveness about the client, not the conversation.** The conversation runs on
+  xAI's servers, so no `Grok Bot` process and no fresh
+  `~/.grokbot/local-exec-supervisor.json` heartbeat ends every conversation at
+  once, a running client with a replica written in the last two minutes is
+  alive, and a running client with a quiet conversation answers `unknown`
+  however long the quiet has lasted — idle is not ended. That heartbeat is the
+  only file in `~/.grokbot` this package opens, and the directory is
+  deliberately not watched: its neighbours hold a daemon token and a
+  credential.
+
+### Changed
+- **`GrokBotSessionAdapter`'s key vocabulary is public.** The store path, the
+  blob extension, the variant, `decodedKey`, `transcriptKey`, `rosterKey`,
+  `rosterURL`, and `rosterRows` are what the live adapter reads the same
+  directory with; a second copy of any of it is how a store ends up listed on
+  one screen and missing from the other. No behaviour changed and nothing was
+  renamed. `RosterRow` gains `awaitingUserResponse`, absent reading as `false`.
+
+### Note
+- 0.2.0 is tagged at `fd0c95a`. Nothing here is breaking, so the next tag is a
+  minor one; the host that pins this package needs it cut before it can build
+  against the adapter.
+
 ## [0.2.0] - 2026-08-19
 
 Grok Bot joins the provider list, Claude Cowork and ChatGPT Work become

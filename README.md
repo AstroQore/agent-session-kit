@@ -147,7 +147,7 @@ dispatch and nothing else.
 
 `AgentSessionKit` answers "what is on disk right now". `AgentSessionLive`
 answers "tell me when it changes" — the layer a live board of running agents
-is built on. Eight harnesses write eight unrelated formats, so it funnels all
+is built on. Nine harnesses write nine unrelated formats, so it funnels all
 of them into one vocabulary and lets everything downstream speak only that.
 
 ```swift
@@ -203,7 +203,7 @@ table goes through `ArgvSanitizer`.
 | Gemini CLI | — | `~/.gemini/tmp/*/chats` |
 | AntiGravity | ✅ `AntigravityLiveAdapter` | `~/.gemini/antigravity{-cli,}/conversations/*.db`; state from the SQL columns plus a shallow `step_payload` decode; liveness via `presence/<id>.lock` |
 | Cursor | ✅ `CursorLiveAdapter` | `~/.cursor/chats/**/store.db` + `~/.cursor/projects/<slug>/agent-transcripts`; liveness via `cursor-agent-worker-*.pid` and the store's WAL |
-| Grok Bot | — | `~/Library/Application Support/Grok Bot/sand-client-persistence`; the client replicates a cloud conversation on its own schedule, so there is nothing local to tail |
+| Grok Bot | ✅ `GrokBotLiveAdapter` | `~/Library/Application Support/Grok Bot/sand-client-persistence/<base32(key)>.blob`; the roster slice supplies the name and the needs-you flag; liveness via the `Grok Bot` process and `~/.grokbot/local-exec-supervisor.json` |
 
 ```swift
 let adapter = ClaudeLiveAdapter()
@@ -325,6 +325,24 @@ discovery unions the CLI's `conversation_summaries.db` with a walk of the
 conversation directories, because that index routinely names a fraction of the
 databases actually on disk.
 
+`GrokBotLiveAdapter` is the other one that does not append, and the only one
+whose session is not on this machine at all. A conversation is a JSON document
+the desktop client rewrites whole, named after the base32 of its own key:
+entries land at the end of an array and an entry already in it is edited in
+place while its reply streams, so there is no offset to resume from and the
+tailer diffs the file against itself. The cursor is the id of the last entry
+consumed, which is what survives a rewrite. A streaming entry produces
+`thinking` and nothing else — its text is a prefix of what it will hold a
+second later — and the words come out of the read that finds `isStreaming`
+cleared. The roster slice beside it is an auxiliary path rather than a second
+source, because it carries the two facts the conversation does not: the bot's
+name, and `awaitingUserResponse`, the client's own "this one is blocked on
+you" flag, which becomes a `permissionRequested` with no tool. Liveness is
+about the *client*: no `Grok Bot` process and no fresh supervisor heartbeat
+ends every conversation at once, while a running client with a quiet
+conversation is `unknown` however long the quiet has lasted. Nothing in
+`~/.grokbot` is read but the heartbeat, and that directory is not watched.
+
 ### Ingest
 
 `IngestCoordinator` is the only thing a host starts. It owns one
@@ -351,7 +369,7 @@ for await event in events {
 place a drop can happen is the stream's buffering policy, which
 `TailerBackpressure` documents.
 
-`JSONLTailer` is the building block six of the eight harnesses share: supply a
+`JSONLTailer` is the building block six of the nine harnesses share: supply a
 `(Data, JSONLLineRef) -> [AgentEvent]` decoder and inherit rotation and
 truncation detection, partial-line buffering, byte-offset cursors, and bounded
 cold-start seeding. `SQLiteChangeWatcher` covers the two harnesses that keep a

@@ -13,8 +13,8 @@ import Foundation
 ///
 /// ## The shape of it
 ///
-/// Eight harnesses write eight unrelated formats, and every consumer that
-/// learns one of them has to learn all eight. So the target funnels them
+/// Nine harnesses write nine unrelated formats, and every consumer that
+/// learns one of them has to learn all nine. So the target funnels them
 /// into one vocabulary and lets everything downstream speak only that:
 ///
 /// ```text
@@ -59,7 +59,7 @@ import Foundation
 /// ``SessionTailer`` per discovered source, a debounce in front of each
 /// tailer, a safety-net poll behind it, and a rediscovery pass that notices
 /// sessions that did not exist when it started. ``JSONLTailer`` is the
-/// building block six of the eight harnesses share: an adapter supplies a
+/// building block six of the nine harnesses share: an adapter supplies a
 /// line decoder and inherits rotation handling, partial-line buffering, and
 /// cold-start seeding. ``SQLiteChangeWatcher`` covers the two that keep a
 /// database open instead, where the file that moves during a turn is the
@@ -84,8 +84,8 @@ import Foundation
 /// ever fills a blank: ``ParentLink/precedence`` ranks a person's own link and
 /// a logged spawn above anything inferred here.
 ///
-/// What is not here yet: the adapters themselves. Everything they plug into
-/// is in place.
+/// What is not here yet: Gemini CLI, whose `~/.gemini/tmp/*/chats` the
+/// on-disk index reads and nothing tails. Every other harness has an adapter.
 ///
 /// Built in the Swift 6 language mode. `AgentSessionKit` is still on Swift 5
 /// while its adapters are migrated.
