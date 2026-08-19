@@ -129,6 +129,18 @@ struct ProcessTableTests {
         #expect(table.environment(pid: pid) == nil)
     }
 
+    @Test("a table that caches nothing still answers, without taking a snapshot")
+    func zeroWindowDoesNotCacheOrRefresh() {
+        // `maxAge: 0` means every answer fresh. Nothing is remembered, and
+        // asking about an environment must not force a whole table read to
+        // discover that.
+        let table = ProcessTable(maxAge: 0, includesArguments: false, includesWorkingDirectory: false)
+        #expect(table.snapshotAge() == nil)
+        #expect(table.environment(pid: 999_999) == nil)
+        #expect(table.rememberedEnvironmentCount() == 0)
+        #expect(table.snapshotAge() == nil)
+    }
+
     @Test("an unreadable environment is remembered too")
     func unreadableEnvironmentIsRemembered() {
         let table = ProcessTable(maxAge: 60, includesArguments: false, includesWorkingDirectory: false)

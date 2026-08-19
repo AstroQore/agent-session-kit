@@ -122,10 +122,20 @@ public final class ProcessTable: ProcessTableReading {
         if pid == getpid() {
             return ArgvSanitizer.sanitizeEnvironment(ProcessInfo.processInfo.environment)
         }
-        // Ensures the snapshot — and therefore the window this answer belongs
-        // to — is current before anything is remembered against it.
-        _ = current()
-        if let remembered = snapshot.withLock({ $0.environments[pid] }) { return remembered }
+        // Read against the snapshot's window rather than forcing one: a table
+        // built with `maxAge: 0` wants every answer fresh, and making this
+        // call take a whole new snapshot to decide it may not cache would be
+        // the opposite of the point. A liveness pass asks `record(pid:)` or
+        // `find(where:)` before it asks about an environment, so by the time
+        // it gets here the window is the tick's own.
+        let now = ContinuousClock.now
+        let remembered = snapshot.withLock { snapshot -> [String: String]?? in
+            guard let takenAt = snapshot.takenAt, now - takenAt < .seconds(maxAge) else {
+                return .none
+            }
+            return snapshot.environments[pid]
+        }
+        if let remembered { return remembered }
 
         // Read outside the lock: `KERN_PROCARGS2` on a process with a large
         // environment is not something to hold every other probe behind.
@@ -133,7 +143,10 @@ public final class ProcessTable: ProcessTableReading {
         let value = Self.readProcArgs(pid: pid).map {
             ArgvSanitizer.sanitizeEnvironment($0.environment)
         }
-        snapshot.withLock { $0.environments[pid] = value }
+        snapshot.withLock { snapshot in
+            guard let takenAt = snapshot.takenAt, now - takenAt < .seconds(maxAge) else { return }
+            snapshot.environments[pid] = value
+        }
         return value
     }
 
