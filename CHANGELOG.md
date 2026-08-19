@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-19
+
+Grok Bot joins the provider list, Claude Cowork and ChatGPT Work become
+first-class in the live layer, and the suite is green on CI for the first
+time.
+
 ### Added
 - **`GrokBotSessionAdapter`** — xAI's standalone `Grok Bot.app` is a listed
   provider. Its client caches every conversation under

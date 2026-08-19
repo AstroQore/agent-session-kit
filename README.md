@@ -13,7 +13,7 @@ searchable index, and a local MCP transport.
 No third-party dependencies. Foundation, Darwin, and the system SQLite.
 
 ```swift
-.package(url: "https://github.com/AstroQore/agent-session-kit", from: "0.1.0")
+.package(url: "https://github.com/AstroQore/agent-session-kit", from: "0.2.0")
 ```
 
 ## Targets
