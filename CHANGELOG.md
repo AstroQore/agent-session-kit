@@ -12,6 +12,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `IngestCoordinator` now emits a `sessionStarted` carrying the adapter's seed identity when it registers a source, stamped with the process start or the file's birth time — pids, parents, and directory-decoded cwds finally reach the host. `SessionStateReducer` treats a `sessionStarted` for a live, already-tracked session as an identity merge rather than a restart.
 
 ### Added
+- **`ProcessLinker`** — infers the parent/child links between sessions that no
+  log records, which is the only way a Claude Code tool call that ran
+  `codex exec` is ever seen as one pair. Given the current identities and a
+  `ProcessTableReading` it proposes one `ProcessLink` per parentless session:
+  first from the environment (a well-known session-id variable in the child's
+  own environment naming a session on the board → `.envInherited`, high
+  confidence), then from the spawn tree (`ancestors(of:)`, or a pid-carrying
+  variable for a child that was re-parented → `.spawnedProcess`, medium).
+  Refuses self-links, cycles through recorded *or* proposed parents, and every
+  ambiguous match — two sessions on one pid, one id claimed by two harnesses.
+  Ordered by child key, so two runs over the same inputs agree.
+  - `linkFromToolCommand(parent:command:startedAt:candidates:)` is the pure
+    hook for the case with no pid at all: a shell command from the parent's log
+    matched against a candidate of the harness that command launches, whose
+    `procStart` is within ±10 s and whose cwd matches the parent's. Ambiguity
+    answers `nil` rather than guessing. A host wires it to its own event
+    stream; `infer` never calls it.
+  - `identityPatches(from:)` turns links into `SessionIdentityPatch`es a host
+    feeds back through `AgentEventKind.identityUpdated`.
+- **`SessionEnvironmentVariables`** — one table of the variables each harness
+  passes to the processes it launches (`CLAUDE_CODE_SESSION_ID`,
+  `CODEX_SESSION_ID` / `CODEX_THREAD_ID`, `GROK_SESSION_ID`,
+  `CURSOR_AGENT_CHAT_ID`, `ANTIGRAVITY_CONVERSATION_ID` /
+  `ANTIGRAVITY_TRAJECTORY_ID`, plus `CLAUDE_PID` for the pid-carrying kind).
+  `CursorLiveAdapter.chatIDVariable` and
+  `AntigravityLiveAdapter.conversationEnvironmentKey` now read from it rather
+  than spelling their own name, so the cross-harness linker and the
+  per-harness probes cannot disagree.
+- `ParentLink.precedence` — `manual` > `subagent` > `envInherited` >
+  `spawnedProcess`, written down once so everything that has to choose between
+  two answers chooses the same way.
+- `SessionIdentityPatch` gains `parent`, `parentLink`, `gitRoot`, and
+  `worktreePath`. Backward compatible: a patch encoded before they existed
+  still decodes, and `isEmpty` accounts for them. `applied(to:)` applies the
+  parent by `ParentLink.precedence` rather than last-writer-wins, which is
+  what makes `.manual`'s "never overwritten" true whoever emits the patch and
+  stops a three-second liveness tick from demoting a logged spawn.
 - `AgentEventKind.textBody(role:text:toolCallID:)` + `TextBodyRole` — full-text bodies for hosts that keep a searchable index; reducer treats it as a heartbeat; adapters cap at `AgentEventKind.textBodyLimit` (32 KiB).
 - **`ClaudeLiveAdapter`** — the first live `SourceAdapter`. Discovers transcripts under `~/.claude/projects` and `~/.config/claude/projects`, counting a session active when it was written to since the cutoff *or* when `~/.claude/sessions` names a process driving it; returns subagent transcripts as sessions of their own, keyed `<session id>/agent-<agent id>`.
   - `ClaudeRecordMapper` — pure, stateless translation of one transcript line into events: prompts (`isMeta` context excluded), thinking, assistant prose, tool calls normalised to `ToolKind` by `ClaudeToolMapping`, tool results with their `toolUseResult` sidecar text, usage with cache reads and writes folded together, `end_turn` turn ends, compaction, pinned titles, worktree moves, and queued prompts.
