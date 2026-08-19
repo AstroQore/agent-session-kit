@@ -249,6 +249,6 @@ struct EventCodableTests {
 
     @Test("the schema version is stamped")
     func schemaVersion() {
-        #expect(AgentSessionLive.eventSchemaVersion == 1)
+        #expect(AgentSessionLive.eventSchemaVersion == 2)
     }
 }

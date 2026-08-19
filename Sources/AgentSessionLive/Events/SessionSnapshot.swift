@@ -143,6 +143,12 @@ public struct SessionSnapshot: Hashable, Codable, Sendable {
     /// finished children stay, so a UI can show the whole tree of a turn.
     /// The children still *running* are ``PendingSet/openChildren``.
     public var children: [SessionKey]
+    /// What the session was asked to do and what it last said back.
+    ///
+    /// Separate from ``identity`` because it is conversation, not identity: a
+    /// title is a name a harness gives a session, a brief is the words that
+    /// passed through it.
+    public var brief: SessionBrief
 
     /// Creates a snapshot. Prefer ``SessionStateReducer/initialSnapshot(identity:)``;
     /// this initializer exists for tests and for rehydrating from a store.
@@ -160,7 +166,8 @@ public struct SessionSnapshot: Hashable, Codable, Sendable {
         tokensIn: Int = 0,
         tokensOut: Int = 0,
         tokensCached: Int = 0,
-        children: [SessionKey] = []
+        children: [SessionKey] = [],
+        brief: SessionBrief = SessionBrief()
     ) {
         self.identity = identity
         self.state = state
@@ -176,6 +183,7 @@ public struct SessionSnapshot: Hashable, Codable, Sendable {
         self.tokensOut = tokensOut
         self.tokensCached = tokensCached
         self.children = children
+        self.brief = brief
     }
 
     /// The session's key, for convenience.

@@ -14,16 +14,17 @@ import Foundation
 /// | --- | --- |
 /// | `sessionStarted` | `state = .idle`, `startedAt = ts`, `isAlive = true`, pending cleared, `endedAt = nil` |
 /// | `identityUpdated` | merge the patch's non-`nil` fields |
-/// | `userPrompt` | `turnCount += 1`, turn opens at `ts`, `state = .thinking` unless blocked on a permission |
-/// | `turnStarted` | same, but no `turnCount` bump if a prompt already opened this turn |
-/// | `thinking`, `assistantText` | `.idle` becomes `.thinking`; every other state is kept |
+/// | `userPrompt` | `turnCount += 1`, turn opens at `ts`, the brief records the instruction, `state = .thinking` unless blocked on a permission |
+/// | `turnStarted` | same, but no `turnCount` bump if a prompt already opened this turn, and no brief |
+/// | `thinking` | `.idle` becomes `.thinking`; every other state is kept |
+/// | `assistantText` | as `thinking`, and the brief records the reply |
 /// | `toolCallStarted` | record the call, `toolCallCount += 1`, state from the call's kind |
 /// | `toolCallFinished` | drop the call, re-derive the state from what is still open |
 /// | `permissionRequested` | record it, `state = .waitingPermission` |
 /// | `permissionResolved` | drop it if the id matches, re-derive the state |
 /// | `subagentStarted` | record the child, `state = .delegating` unless blocked |
 /// | `subagentFinished` | drop the child, re-derive the state |
-/// | `turnEnded` | close the turn, drop orphaned tool calls, keep children |
+/// | `turnEnded` | close the turn, stamp the brief's `lastTurnEndedAt`, drop orphaned tool calls, keep children |
 /// | `usage` | add the token deltas |
 /// | `compaction`, `note`, `textBody` | heartbeat only |
 /// | `sessionEnded` | `state = .ended(reason)`, `isAlive = false`, `endedAt = ts`, pending cleared |
@@ -71,6 +72,14 @@ import Foundation
 ///   time is less useful than an honest "first seen at".
 /// - **`children` is cumulative, `pending.openChildren` is live.** A child
 ///   that finishes stays in the roster so the shape of a turn survives it.
+/// - **The brief survives everything, including a restart.** A
+///   `sessionStarted` for an ended session resets the state machine, but not
+///   ``SessionSnapshot/brief``: the key is the same session, the transcript is
+///   the same transcript, and the task the person assigned did not stop being
+///   the task because the process came back. Only a prompt that ``SessionBrief``
+///   accepts as an instruction moves any of its prompt fields — a slash-command
+///   envelope still counts a turn, because the harness ran one, and still says
+///   nothing about what was asked for.
 public struct SessionStateReducer: Sendable {
     /// How long a session may claim to be working without saying anything
     /// before ``SessionSnapshot/isStale`` is set. Default 90 seconds — long
@@ -142,9 +151,10 @@ public struct SessionStateReducer: Sendable {
         case .identityUpdated(let patch):
             next.identity = patch.applied(to: next.identity)
 
-        case .userPrompt:
+        case .userPrompt(let preview):
             next.turnCount += 1
             next.pending.currentTurnStartedAt = ts
+            next.brief.record(prompt: preview, at: ts)
             if !next.state.isEnded, next.pending.openPermission == nil {
                 next.state = .thinking
             }
@@ -158,7 +168,13 @@ public struct SessionStateReducer: Sendable {
                 next.state = .thinking
             }
 
-        case .thinking, .assistantText:
+        case .thinking:
+            if case .idle = next.state {
+                next.state = .thinking
+            }
+
+        case .assistantText(let preview):
+            next.brief.record(reply: preview, at: ts)
             if case .idle = next.state {
                 next.state = .thinking
             }
@@ -201,6 +217,7 @@ public struct SessionStateReducer: Sendable {
             next.state = derivedState(next)
 
         case .turnEnded:
+            next.brief.recordTurnEnded(at: ts)
             next.pending.openToolCalls.removeAll()
             next.pending.openPermission = nil
             next.pending.currentTurnStartedAt = nil
