@@ -159,6 +159,73 @@ final class MCPStdioBridgeTests: XCTestCase {
         wait(for: [finished], timeout: 10)
     }
 
+    func testCapacityRejectionIsNonzeroAndActionable() throws {
+        let socket = MCPSocketServer(
+            handler: EchoBridgeHandler(),
+            socketPath: socketPath,
+            maximumConnections: 16
+        )
+        try socket.start()
+        socketServer = socket
+        var clients: [MCPSocketTestClient] = []
+        defer { clients.forEach { $0.close() } }
+        for id in 1...16 {
+            let client = try MCPSocketTestClient(path: socketPath)
+            _ = try client.request(id: id)
+            clients.append(client)
+        }
+
+        let input = Pipe()
+        let output = Pipe()
+        let errorFile = directory.appendingPathComponent("capacity-stderr.txt")
+        FileManager.default.createFile(atPath: errorFile.path, contents: Data())
+        let errorHandle = try FileHandle(forWritingTo: errorFile)
+        let code = MCPStdioBridge.run(
+            config(),
+            socketPath: socketPath,
+            input: input.fileHandleForReading.fileDescriptor,
+            output: output.fileHandleForWriting.fileDescriptor,
+            standardError: errorHandle
+        )
+        try input.fileHandleForWriting.close()
+        try output.fileHandleForWriting.close()
+        try errorHandle.close()
+
+        XCTAssertEqual(code, MCPStdioBridge.ExitCode.connectionLimit)
+        XCTAssertEqual(output.fileHandleForReading.readDataToEndOfFile(), Data())
+        let message = try String(contentsOf: errorFile, encoding: .utf8)
+        XCTAssertTrue(message.contains("no free client slots"), message)
+    }
+
+    func testIdleServerReclaimMakesTheBridgeExit() throws {
+        let socket = MCPSocketServer(
+            handler: EchoBridgeHandler(),
+            socketPath: socketPath,
+            idleTimeout: 0.05
+        )
+        try socket.start()
+        socketServer = socket
+        let input = Pipe()
+        let output = Pipe()
+        let finished = expectation(description: "idle bridge exits")
+        let path = socketPath!
+        let config = config()
+        Thread.detachNewThread {
+            let code = MCPStdioBridge.run(
+                config,
+                socketPath: path,
+                input: input.fileHandleForReading.fileDescriptor,
+                output: output.fileHandleForWriting.fileDescriptor
+            )
+            XCTAssertEqual(code, MCPStdioBridge.ExitCode.ok)
+            finished.fulfill()
+        }
+
+        wait(for: [finished], timeout: 5)
+        try input.fileHandleForWriting.close()
+        XCTAssertEqual(socket.connectionCount, 0)
+    }
+
     private func write(_ line: Data, to pipe: Pipe) throws {
         var framed = line
         framed.append(0x0A)

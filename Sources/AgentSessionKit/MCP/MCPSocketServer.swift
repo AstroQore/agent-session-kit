@@ -53,6 +53,34 @@ public enum MCPSocketServerStatus: String, Sendable, Equatable {
     case conflict
 }
 
+/// One live local client, suitable for a host diagnostics surface.
+///
+/// The peer pid comes from the Unix socket itself (`LOCAL_PEERPID`), never a
+/// process-list scrape. It may be nil when the kernel cannot provide it. No
+/// command line or path is exposed: those can contain user or credential data.
+public struct MCPClientConnectionInfo: Identifiable, Sendable, Equatable {
+    public let id: UUID
+    public let processID: Int32?
+    public let connectedAt: Date
+    public let lastActivityAt: Date
+
+    init(id: UUID, processID: Int32?, connectedAt: Date, lastActivityAt: Date) {
+        self.id = id
+        self.processID = processID
+        self.connectedAt = connectedAt
+        self.lastActivityAt = lastActivityAt
+    }
+
+    func withActivity(at date: Date) -> MCPClientConnectionInfo {
+        MCPClientConnectionInfo(
+            id: id,
+            processID: processID,
+            connectedAt: connectedAt,
+            lastActivityAt: date
+        )
+    }
+}
+
 /// A newline-delimited JSON-RPC listener on a Unix domain socket.
 ///
 /// **No TCP, no port, no token.** The socket file is created with mode 0600,
@@ -69,9 +97,22 @@ public final class MCPSocketServer: @unchecked Sendable {
     /// Framing cap. A single JSON-RPC line larger than this is a client bug,
     /// and buffering it would let one connection grow without bound.
     public static let maximumLineBytes = 4 * 1024 * 1024
-    /// Concurrent clients. Two agents plus a stray bridge is the realistic
-    /// peak; the cap exists so a runaway client cannot exhaust descriptors.
-    public static let maximumConnections = 16
+    /// Concurrent clients. Desktop clients may keep one stdio bridge per open
+    /// task, so sixteen is not a realistic ceiling. Sixty-four stays well below
+    /// the process descriptor budget while leaving room for a real task board.
+    public static let maximumConnections = 64
+    /// Idle expiry is opt-in. A library cannot assume its client will respawn a
+    /// stdio child after an intentional EOF; hosts that own that lifecycle can
+    /// pass a timeout explicitly.
+    public static let defaultIdleTimeout: TimeInterval? = nil
+    static let connectionLimitError = MCPRPCError(
+        code: -32_098,
+        message: "The MCP server has reached its client connection limit."
+    )
+    static let connectionLimitFrame = MCPResponse(
+        id: .null,
+        error: connectionLimitError
+    ).framed()
 
     public let socketPath: String
 
@@ -81,12 +122,18 @@ public final class MCPSocketServer: @unchecked Sendable {
     /// server never creates a directory itself: chmod-ing a path it was
     /// merely handed is not its business.
     private let ensureDirectory: @Sendable () throws -> Void
+    private let maximumConnectionCount: Int
+    private let idleTimeout: TimeInterval?
     private let acceptQueue = DispatchQueue(label: "com.astroqore.AgentSessionKit.mcp.accept")
     private let stateLock = NSLock()
 
     private var listenFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
-    private var connections: [ObjectIdentifier: Connection] = [:]
+    private struct ConnectionRecord {
+        let connection: Connection
+        var info: MCPClientConnectionInfo
+    }
+    private var connections: [UUID: ConnectionRecord] = [:]
     private var didBindSocketFile = false
     private var statusValue: MCPSocketServerStatus = .stopped
 
@@ -94,6 +141,9 @@ public final class MCPSocketServer: @unchecked Sendable {
     /// with the live connection count. A settings surface uses it to show
     /// whether anything is attached without polling.
     public var onConnectionChange: (@Sendable (Int, Date) -> Void)?
+    /// Richer connection snapshots for hosts that show and manage clients.
+    /// Emitted on connect, activity, disconnect, idle expiry, and stop.
+    public var onConnectionsChange: (@Sendable ([MCPClientConnectionInfo]) -> Void)?
 
     /// - Parameters:
     ///   - handler: answers each framed line.
@@ -105,10 +155,14 @@ public final class MCPSocketServer: @unchecked Sendable {
     public init(
         handler: any MCPLineHandler,
         socketPath: String,
+        maximumConnections: Int = MCPSocketServer.maximumConnections,
+        idleTimeout: TimeInterval? = MCPSocketServer.defaultIdleTimeout,
         ensureDirectory: @escaping @Sendable () throws -> Void = {}
     ) {
         self.handler = handler
         self.socketPath = socketPath
+        self.maximumConnectionCount = max(1, maximumConnections)
+        self.idleTimeout = idleTimeout.flatMap { $0 > 0 ? $0 : nil }
         self.ensureDirectory = ensureDirectory
     }
 
@@ -135,6 +189,29 @@ public final class MCPSocketServer: @unchecked Sendable {
         stateLock.lock()
         defer { stateLock.unlock() }
         return connections.count
+    }
+
+    public var clientConnections: [MCPClientConnectionInfo] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return connectionSnapshotLocked()
+    }
+
+    /// Disconnect one exact accepted socket. The peer process is not killed;
+    /// its bridge simply observes EOF and exits, which is the same safe path as
+    /// the host app shutting down.
+    @discardableResult
+    public func disconnectClient(id: UUID) -> Bool {
+        stateLock.lock()
+        guard let record = connections.removeValue(forKey: id) else {
+            stateLock.unlock()
+            return false
+        }
+        let snapshot = connectionSnapshotLocked()
+        stateLock.unlock()
+        record.connection.close()
+        publishConnectionChange(snapshot, at: Date())
+        return true
     }
 
     // MARK: - Lifecycle
@@ -226,7 +303,7 @@ public final class MCPSocketServer: @unchecked Sendable {
     public func stop() {
         stateLock.lock()
         let source = acceptSource
-        let openConnections = Array(connections.values)
+        let openConnections = connections.values.map(\.connection)
         let shouldUnlink = didBindSocketFile
         acceptSource = nil
         connections = [:]
@@ -237,6 +314,7 @@ public final class MCPSocketServer: @unchecked Sendable {
 
         source?.cancel()
         for connection in openConnections { connection.close() }
+        publishConnectionChange([], at: Date())
         // Only remove a socket file this instance actually created: a `stop`
         // during a failed start must not delete a healthy server's socket.
         if shouldUnlink {
@@ -255,7 +333,8 @@ public final class MCPSocketServer: @unchecked Sendable {
                 // EAGAIN/EWOULDBLOCK simply means the backlog drained.
                 return
             }
-            guard connectionCount < Self.maximumConnections else {
+            guard connectionCount < maximumConnectionCount else {
+                Self.writeConnectionLimitFrame(to: clientFD)
                 close(clientFD)
                 KitLog.warn("MCP server refused a connection: too many clients.")
                 continue
@@ -272,23 +351,92 @@ public final class MCPSocketServer: @unchecked Sendable {
     }
 
     private func open(clientFD: Int32) {
-        let connection = Connection(fd: clientFD, handler: handler)
-        connection.onClose = { [weak self] closed in
-            guard let self else { return }
-            self.stateLock.lock()
-            self.connections.removeValue(forKey: ObjectIdentifier(closed))
-            let remaining = self.connections.count
-            self.stateLock.unlock()
-            self.onConnectionChange?(remaining, Date())
+        let id = UUID()
+        let now = Date()
+        let connection = Connection(fd: clientFD, handler: handler, idleTimeout: idleTimeout)
+        connection.onClose = { [weak self] in
+            self?.connectionClosed(id: id)
+        }
+        connection.onActivity = { [weak self] at in
+            self?.connectionActivity(id: id, at: at)
         }
 
         stateLock.lock()
-        connections[ObjectIdentifier(connection)] = connection
-        let count = connections.count
+        connections[id] = ConnectionRecord(
+            connection: connection,
+            info: MCPClientConnectionInfo(
+                id: id,
+                processID: Self.peerProcessID(clientFD),
+                connectedAt: now,
+                lastActivityAt: now
+            )
+        )
+        let snapshot = connectionSnapshotLocked()
         stateLock.unlock()
 
         connection.resume()
-        onConnectionChange?(count, Date())
+        publishConnectionChange(snapshot, at: now)
+    }
+
+    private func connectionClosed(id: UUID) {
+        stateLock.lock()
+        guard connections.removeValue(forKey: id) != nil else {
+            stateLock.unlock()
+            return
+        }
+        let snapshot = connectionSnapshotLocked()
+        stateLock.unlock()
+        publishConnectionChange(snapshot, at: Date())
+    }
+
+    private func connectionActivity(id: UUID, at: Date) {
+        stateLock.lock()
+        guard var record = connections[id] else {
+            stateLock.unlock()
+            return
+        }
+        record.info = record.info.withActivity(at: at)
+        connections[id] = record
+        let snapshot = connectionSnapshotLocked()
+        stateLock.unlock()
+        publishConnectionChange(snapshot, at: at)
+    }
+
+    private func connectionSnapshotLocked() -> [MCPClientConnectionInfo] {
+        connections.values.map(\.info).sorted {
+            if $0.connectedAt != $1.connectedAt { return $0.connectedAt < $1.connectedAt }
+            return $0.id.uuidString < $1.id.uuidString
+        }
+    }
+
+    private func publishConnectionChange(_ snapshot: [MCPClientConnectionInfo], at: Date) {
+        onConnectionChange?(snapshot.count, at)
+        onConnectionsChange?(snapshot)
+    }
+
+    private static func peerProcessID(_ fd: Int32) -> Int32? {
+        var pid: pid_t = 0
+        var length = socklen_t(MemoryLayout<pid_t>.size)
+        guard getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &length) == 0 else {
+            return nil
+        }
+        return Int32(pid)
+    }
+
+    private static func writeConnectionLimitFrame(to fd: Int32) {
+        var remaining = connectionLimitFrame
+        while !remaining.isEmpty {
+            let written = remaining.withUnsafeBytes { raw -> Int in
+                guard let base = raw.baseAddress else { return 0 }
+                return Darwin.write(fd, base, raw.count)
+            }
+            if written > 0 {
+                remaining = remaining.dropFirst(written)
+                continue
+            }
+            if errno == EINTR { continue }
+            return
+        }
     }
 
     static func setNonBlocking(_ fd: Int32) {
@@ -368,8 +516,10 @@ public final class MCPSocketServer: @unchecked Sendable {
 private final class Connection: @unchecked Sendable {
     private let fd: Int32
     private let handler: any MCPLineHandler
+    private let idleTimeout: TimeInterval?
     private let queue: DispatchQueue
     private var source: DispatchSourceRead?
+    private var idleTimer: DispatchSourceTimer?
     private var buffer = Data()
     private var isClosed = false
     /// Requests handed to `handler.handle` whose reply has not been written yet.
@@ -380,11 +530,13 @@ private final class Connection: @unchecked Sendable {
     /// `tools/list` and closes stdin must still get both answers.
     private var peerFinished = false
 
-    var onClose: (@Sendable (Connection) -> Void)?
+    var onClose: (@Sendable () -> Void)?
+    var onActivity: (@Sendable (Date) -> Void)?
 
-    init(fd: Int32, handler: any MCPLineHandler) {
+    init(fd: Int32, handler: any MCPLineHandler, idleTimeout: TimeInterval?) {
         self.fd = fd
         self.handler = handler
+        self.idleTimeout = idleTimeout
         self.queue = DispatchQueue(label: "com.astroqore.AgentSessionKit.mcp.connection.\(fd)")
     }
 
@@ -393,6 +545,7 @@ private final class Connection: @unchecked Sendable {
         source.setEventHandler { [weak self] in self?.readAvailable() }
         self.source = source
         source.resume()
+        armIdleTimer()
     }
 
     func close() {
@@ -418,9 +571,11 @@ private final class Connection: @unchecked Sendable {
         guard !isClosed else { return }
         isClosed = true
         stopReading()
+        idleTimer?.cancel()
+        idleTimer = nil
         Darwin.close(fd)
         buffer = Data()
-        onClose?(self)
+        onClose?()
     }
 
     /// Close once the peer is done *and* nothing is still being answered.
@@ -434,6 +589,7 @@ private final class Connection: @unchecked Sendable {
         while true {
             let count = chunk.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
             if count > 0 {
+                noteActivity()
                 buffer.append(contentsOf: chunk[0..<count])
                 if !drainLines() { return }
                 continue
@@ -486,7 +642,10 @@ private final class Connection: @unchecked Sendable {
             let reply = await handler.handle(line: line)
             self?.queue.async { [weak self] in
                 guard let self else { return }
-                if let reply { self.write(reply) }
+                if let reply {
+                    self.noteActivity()
+                    self.write(reply)
+                }
                 self.inFlight -= 1
                 self.closeIfDrained()
             }
@@ -517,5 +676,32 @@ private final class Connection: @unchecked Sendable {
             closeOnQueue()
             return
         }
+    }
+
+    private func noteActivity() {
+        let now = Date()
+        onActivity?(now)
+        armIdleTimer()
+    }
+
+    private func armIdleTimer() {
+        guard let idleTimeout, !isClosed else { return }
+        let timer: DispatchSourceTimer
+        if let idleTimer {
+            timer = idleTimer
+        } else {
+            timer = DispatchSource.makeTimerSource(queue: queue)
+            timer.setEventHandler { [weak self] in
+                guard let self, !self.isClosed else { return }
+                if self.inFlight > 0 {
+                    self.armIdleTimer()
+                } else {
+                    self.closeOnQueue()
+                }
+            }
+            idleTimer = timer
+            timer.resume()
+        }
+        timer.schedule(deadline: .now() + idleTimeout, leeway: .seconds(1))
     }
 }

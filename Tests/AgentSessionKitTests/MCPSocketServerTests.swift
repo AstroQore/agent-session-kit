@@ -29,8 +29,17 @@ final class MCPSocketServerTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    private func makeServer(path: String? = nil) -> MCPSocketServer {
-        MCPSocketServer(handler: EchoLineHandler(), socketPath: path ?? socketPath)
+    private func makeServer(
+        path: String? = nil,
+        maximumConnections: Int = MCPSocketServer.maximumConnections,
+        idleTimeout: TimeInterval? = MCPSocketServer.defaultIdleTimeout
+    ) -> MCPSocketServer {
+        MCPSocketServer(
+            handler: EchoLineHandler(),
+            socketPath: path ?? socketPath,
+            maximumConnections: maximumConnections,
+            idleTimeout: idleTimeout
+        )
     }
 
     @discardableResult
@@ -213,7 +222,68 @@ final class MCPSocketServerTests: XCTestCase {
         let client = try MCPSocketTestClient(path: socketPath)
         _ = try client.request(id: 1)
         XCTAssertEqual(socket.connectionCount, 1)
+        let disconnected = expectation(description: "server releases the disconnected client")
+        socket.onConnectionChange = { count, _ in
+            if count == 0 { disconnected.fulfill() }
+        }
         client.close()
+        wait(for: [disconnected], timeout: 5)
+        socket.onConnectionChange = nil
+        XCTAssertEqual(socket.connectionCount, 0)
+    }
+
+    func testConnectionDiagnosticsExposePeerPIDAndAllowSafeDisconnect() throws {
+        let socket = try startServer()
+        let client = try MCPSocketTestClient(path: socketPath)
+        defer { client.close() }
+        _ = try client.request(id: 1)
+
+        let info = try XCTUnwrap(socket.clientConnections.first)
+        XCTAssertEqual(info.processID, Int32(getpid()))
+        XCTAssertLessThanOrEqual(info.connectedAt, info.lastActivityAt)
+        XCTAssertTrue(socket.disconnectClient(id: info.id))
+        XCTAssertEqual(socket.connectionCount, 0)
+        XCTAssertTrue(client.readUntilEOF(timeoutSeconds: 5))
+        XCTAssertFalse(socket.disconnectClient(id: info.id))
+    }
+
+    func testIdleClientIsReclaimedWithoutKillingItsProcess() throws {
+        let socket = makeServer(idleTimeout: 0.05)
+        socketServer = socket
+        try socket.start()
+        let expired = expectation(description: "idle client expires")
+        socket.onConnectionChange = { count, _ in
+            if count == 0 { expired.fulfill() }
+        }
+
+        let client = try MCPSocketTestClient(path: socketPath)
+        defer { client.close() }
+        _ = try client.request(id: 1)
+        wait(for: [expired], timeout: 5)
+        socket.onConnectionChange = nil
+        XCTAssertTrue(client.readUntilEOF(timeoutSeconds: 5))
+        XCTAssertEqual(socket.connectionCount, 0)
+    }
+
+    func testSeventeenthClientGetsAnExplicitCapacityError() throws {
+        let socket = makeServer(maximumConnections: 16)
+        socketServer = socket
+        try socket.start()
+        var clients: [MCPSocketTestClient] = []
+        defer { clients.forEach { $0.close() } }
+        for id in 1...16 {
+            let client = try MCPSocketTestClient(path: socketPath)
+            _ = try client.request(id: id)
+            clients.append(client)
+        }
+        XCTAssertEqual(socket.connectionCount, 16)
+
+        let refused = try MCPSocketTestClient(path: socketPath)
+        defer { refused.close() }
+        let error = try refused.readLine()["error"]
+        XCTAssertEqual(error?["code"]?.intValue, -32_098)
+        XCTAssertEqual(error?["message"]?.stringValue, MCPSocketServer.connectionLimitError.message)
+        XCTAssertTrue(refused.readUntilEOF(timeoutSeconds: 5))
     }
 
     func testAPathTooLongForSockaddrUnFailsClearly() {

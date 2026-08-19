@@ -142,6 +142,15 @@ a socket someone is *answering* on is not — the server reports
 `.socketOwnedByAnotherInstance` rather than cutting off the agents attached to
 the other copy.
 
+The default client cap is 64; pass `maximumConnections:` to tune it. Hosts
+whose stdio clients reconnect after EOF may also opt into idle reclamation
+with `idleTimeout:`; it is disabled by default because the library cannot
+assume every client respawns a deliberately closed child. `clientConnections` and
+`onConnectionsChange` expose only a connection id, peer pid, connected time,
+and last activity. A host can call `disconnectClient(id:)` to close one socket
+safely. A client beyond the configured cap receives a framed JSON-RPC
+capacity error instead of a silent close.
+
 `MCPStdioBridge` runs the same binary as a plain stdio MCP server that pumps
 bytes to that socket, which is how MCP clients that spawn a command reach a
 running GUI app:
@@ -163,6 +172,10 @@ if bridge.isRequested() { exit(bridge.run()) }
 The static functions this wraps (`MCPStdioBridge.isRequested`,
 `.socketPath`, `.run`, each taking `config` explicitly) are still there
 unchanged, for callers that would rather not hold an instance.
+If the listener is full, the bridge writes the configured
+`connectionLimitMessage` to stderr and exits with
+`MCPStdioBridge.ExitCode.connectionLimit` (2); it does not report a successful
+empty session.
 
 `MCPJSON`, `MCPRequest`, `MCPResponse`, `MCPTool`, `MCPResource`, and
 `MCPArguments` are here too, so a host writes its tool catalog and its
