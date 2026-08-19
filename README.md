@@ -369,7 +369,23 @@ conversation is `unknown` however long the quiet has lasted. Nothing in
 `IngestCoordinator` is the only thing a host starts. It owns one
 `FSEventsWatcher` over the union of every adapter's roots, a tailer per
 discovered source, a debounce in front of each tailer, a safety-net poll
-behind it, and a rediscovery pass for sessions that did not exist at start.
+behind it, and two ways of noticing a session that did not exist at start.
+
+A change to a path something already tails polls that tailer. A change to a
+path nothing tails goes to the adapters whose declared `watchRoots` contain
+it — and to no others — as `discover(home:activeSince:under:)` over the one
+directory it happened in. That containment test is load-bearing:
+`mightBeSessionFile` is a rule about names, so without it Codex's "any
+`*.lock` could be a thread" claims every writer lock Grok rewrites, and
+Cursor's "any `*.jsonl`" claims every Claude Code transcript. A path no
+adapter claims costs nothing at all. Behind that, every adapter sweeps its
+whole store once a minute as the safety net for a notification that never
+arrived — and that sweep is the only pass that can drop a source, because
+"nobody discovered this" needs somebody to have looked everywhere.
+
+The narrowing is a default, not a requirement: an adapter that does not
+implement `discover(home:activeSince:under:)` sweeps, which is correct and
+merely as expensive as sweeping always was.
 
 ```swift
 let coordinator = IngestCoordinator(

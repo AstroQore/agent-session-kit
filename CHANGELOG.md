@@ -33,6 +33,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   menu item that quietly disappears explains nothing. `Harness.sessionProvider`
   is the inverse of `SessionProvider.defaultHarness`, which is not injective —
   Codex and ChatGPT Work share one rollout tree.
+- **`SourceAdapter.discover(home:activeSince:under:)`** — discovery narrowed to
+  one directory. `nil` means the whole store, and the default implementation
+  sweeps, so an adapter outside this package is unaffected and merely as
+  expensive as it always was. Every adapter here narrows: Grok reads a scope
+  positionally against `~/.grok/sessions`, Codex recognises a `<yyyy>/<MM>/<dd>`
+  directory by shape, Claude Code and Cowork resolve a project directory from
+  any path below it, Cursor resolves a workspace or an agent, and AntiGravity
+  resolves which of its two roots a change was in. Each of them refuses to
+  narrow what it cannot — `~/.claude/sessions`, Codex's lock directory,
+  AntiGravity's summaries store — and sweeps instead, because an entry
+  appearing in any of those can make a session far older than the cutoff worth
+  tailing.
+- **`FSEventBatch.isDirectory(_:)`** — whether FSEvents said a delivered path is
+  itself a directory. Meaningful only under `CreateFlags.fileEvents`, which is
+  what makes FSEvents report per-item flags at all.
+- **`IngestConfiguration.discoveryDebounce`** — how long a routed discovery
+  waits for the rest of its burst. Default 250 ms.
 - **`GrokBotLiveAdapter`** — Grok Bot is now live, not just indexed. A
   conversation is a JSON document the desktop client rewrites whole, so
   `GrokBotTranscriptTailer` diffs the file against itself rather than walking
@@ -67,12 +84,61 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `SessionSnapshot`, which is encoded structurally, so a host that persisted
   snapshots re-seeds rather than decoding rows from a model it no longer
   speaks. That is the contract the constant already documented.
+- **A file-system change is routed, not broadcast.** An unrecognised path used
+  to restart discovery for every adapter over every store, throttled to once
+  per three seconds; with a transcript gaining a line a second, that is a sweep
+  of the whole machine every three seconds. A change now goes to the adapters
+  whose declared `watchRoots` contain it, about the one directory it happened
+  in. Nothing checked containment before, and `mightBeSessionFile` is a rule
+  about names: Codex's "any `*.lock` could be a thread" claimed every writer
+  lock Grok rewrites and every presence file AntiGravity heartbeats, and
+  Cursor's "any `*.jsonl`" claimed every Claude Code transcript. Each of those
+  was a full sweep. FSEvents also announces every watch root as a directory
+  event the moment a stream arms, which woke every adapter once per launch for
+  news that was not news.
+- **`IngestConfiguration.rediscoverEvery` is 60 s, was 15 s.** It is the safety
+  net now rather than the mechanism: a session that appears while the pipeline
+  runs is found by routing, in well under a second. It is also still the only
+  pass that drops a source, because "nobody discovered this" needs somebody to
+  have looked everywhere. `rediscoverThrottle` still defaults to 3 s and is now
+  per adapter — Grok being rewritten is no reason to make Claude Code wait.
+- **Discovery does not re-read what cannot have changed.** Each adapter keeps
+  what it derived from a file until that file moves: Claude Code and Cowork key
+  a transcript's head on the *inode*, because an append-only file that grew by
+  a thousand lines has the same first three; Grok keys a source on its
+  `summary.json`; Cursor keys the conversation card on the store's own stamp;
+  AntiGravity keys the summaries index on the store *and* its WAL, since in WAL
+  mode that is where the writes land.
+- **Grok's writer-lock probe is asked last, and remembered.** It is a `readdir`
+  plus an `F_GETLK` per lock file, Grok keeps one lock per mutable file, and it
+  ran for every session in the store on every pass — about seven hundred
+  syscalls, and the single most expensive thing the pipeline did at rest. It is
+  asked only after the mtimes and the registry have failed to answer, and only
+  when the answer can have changed: taking a lock creates a file, which moves
+  the directory's mtime, and a session doing anything moves one of its logs. A
+  *held* verdict additionally expires after thirty seconds, because a lock is
+  released without leaving a trace on disk.
+- **Codex's second pass no longer re-walks history for the same unresolvable
+  ids.** The whole-tree walk that finds a locked thread whose rollout predates
+  the cutoff kept running, every year of it, for lock files left behind by
+  threads whose rollouts are long gone. `CodexRolloutIndex` remembers where a
+  rollout was found and which ids have none; a rollout that appears later is
+  found by the first pass, on the notification that creates it.
+- **AntiGravity asks the cheap questions first.** Whether a conversation is
+  worth tailing is a disjunction of five facts, four of them `stat`s already
+  half in hand and the fifth an `open`/`F_GETLK`/`close` on somebody else's
+  presence file. The probe was asked first, so it was paid for every
+  conversation in the store on every pass. Same answer, asked last.
 - **`GrokBotSessionAdapter`'s key vocabulary is public.** The store path, the
   blob extension, the variant, `decodedKey`, `transcriptKey`, `rosterKey`,
   `rosterURL`, and `rosterRows` are what the live adapter reads the same
   directory with; a second copy of any of it is how a store ends up listed on
   one screen and missing from the other. No behaviour changed and nothing was
   renamed. `RosterRow` gains `awaitingUserResponse`, absent reading as `false`.
+
+Measured over a synthetic home of 743 sources across five stores, a second
+sweep with nothing changed went from 494 directory listings, 301 lock probes
+and 677 file reads to 271, 1 and 0.
 
 ### Note
 - 0.2.0 is tagged at `fd0c95a`. Nothing here is breaking, so the next tag is a
