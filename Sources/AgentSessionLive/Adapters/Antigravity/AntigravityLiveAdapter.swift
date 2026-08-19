@@ -61,9 +61,13 @@ public struct AntigravityLiveAdapter: SourceAdapter {
     public static let ideVariant = "ide"
 
     /// The environment variable `agy` passes its conversation id down in.
-    public static let conversationEnvironmentKey = "ANTIGRAVITY_CONVERSATION_ID"
+    /// Spelled once in ``SessionEnvironmentVariables``, which is also where
+    /// the cross-harness linker reads it from.
+    public static let conversationEnvironmentKey =
+        SessionEnvironmentVariables.antigravityConversationID
     /// The trajectory id passed alongside it. Read for evidence only.
-    public static let trajectoryEnvironmentKey = "ANTIGRAVITY_TRAJECTORY_ID"
+    public static let trajectoryEnvironmentKey =
+        SessionEnvironmentVariables.antigravityTrajectoryID
     /// The command line's own executable name.
     public static let processName = "agy"
 

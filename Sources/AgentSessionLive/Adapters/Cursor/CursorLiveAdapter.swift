@@ -85,7 +85,9 @@ public struct CursorLiveAdapter: SourceAdapter {
     public let deadAfter: TimeInterval
 
     /// The environment variable `cursor-agent` passes its agent id down in.
-    public static let chatIDVariable = "CURSOR_AGENT_CHAT_ID"
+    /// Spelled once in ``SessionEnvironmentVariables``, which is also where
+    /// the cross-harness linker reads it from.
+    public static let chatIDVariable = SessionEnvironmentVariables.cursorChatID
 
     /// ``SessionIdentity/entrypoint`` for a session a CLI drove — the ones
     /// with a thin transcript.
