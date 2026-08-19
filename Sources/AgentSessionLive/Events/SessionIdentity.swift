@@ -90,6 +90,12 @@ public struct SessionIdentity: Hashable, Codable, Sendable {
 /// evidence a tailer observed, and observing nothing is not evidence that
 /// the previous observation was wrong — a transcript line that omits the
 /// model does not mean the model was unset.
+///
+/// ``parent`` is the one field that is not simply last-writer-wins. Parent
+/// links come from sources of very different quality — a person's own
+/// decision, the parent's own log, an inherited environment variable, a
+/// process-tree walk — and a weak one arriving late must not displace a
+/// strong one. See ``applied(to:)``.
 public struct SessionIdentityPatch: Hashable, Codable, Sendable {
     /// New working directory, when observed.
     public var cwd: String?
@@ -107,6 +113,19 @@ public struct SessionIdentityPatch: Hashable, Codable, Sendable {
     public var entrypoint: String?
     /// A harness-internal flavour.
     public var variant: String?
+    /// The session that spawned this one, once something established it.
+    /// Applied subject to ``ParentLink/precedence`` — see ``applied(to:)``.
+    public var parent: SessionKey?
+    /// The evidence behind ``parent``. A patch that sets `parent` should
+    /// always set this too; one that sets only this upgrades the evidence for
+    /// a parent already recorded.
+    public var parentLink: ParentLink?
+    /// The enclosing git repository root, once a host's project resolver
+    /// worked it out. Never observed by an adapter.
+    public var gitRoot: String?
+    /// The git worktree the session is operating in, when it differs from
+    /// ``gitRoot``.
+    public var worktreePath: String?
 
     /// Creates a patch. Every field defaults to `nil`, meaning "unchanged".
     public init(
@@ -117,7 +136,11 @@ public struct SessionIdentityPatch: Hashable, Codable, Sendable {
         pid: pid_t? = nil,
         procStart: Date? = nil,
         entrypoint: String? = nil,
-        variant: String? = nil
+        variant: String? = nil,
+        parent: SessionKey? = nil,
+        parentLink: ParentLink? = nil,
+        gitRoot: String? = nil,
+        worktreePath: String? = nil
     ) {
         self.cwd = cwd
         self.gitBranch = gitBranch
@@ -127,6 +150,10 @@ public struct SessionIdentityPatch: Hashable, Codable, Sendable {
         self.procStart = procStart
         self.entrypoint = entrypoint
         self.variant = variant
+        self.parent = parent
+        self.parentLink = parentLink
+        self.gitRoot = gitRoot
+        self.worktreePath = worktreePath
     }
 
     /// `true` when the patch carries no observation at all. Reducers use
@@ -134,9 +161,21 @@ public struct SessionIdentityPatch: Hashable, Codable, Sendable {
     public var isEmpty: Bool {
         cwd == nil && gitBranch == nil && title == nil && model == nil
             && pid == nil && procStart == nil && entrypoint == nil && variant == nil
+            && parent == nil && parentLink == nil && gitRoot == nil && worktreePath == nil
     }
 
     /// Applies the non-`nil` fields of this patch to `identity`.
+    ///
+    /// Every field but the parent is last-writer-wins. The parent is applied
+    /// only when its ``ParentLink/precedence`` is at least that of the link
+    /// already recorded, which is what makes ``ParentLink/manual``'s promise —
+    /// "never overwritten" — true no matter who emits a patch, and stops a
+    /// three-second process-table tick from demoting a spawn the parent's own
+    /// log recorded. Equal precedence still wins: fresher evidence of the same
+    /// kind is the later observation of the two.
+    ///
+    /// A patch naming a parent with no link is treated as the weakest kind,
+    /// since a caller who knew better would have said so.
     public func applied(to identity: SessionIdentity) -> SessionIdentity {
         var merged = identity
         if let cwd { merged.cwd = cwd }
@@ -147,6 +186,19 @@ public struct SessionIdentityPatch: Hashable, Codable, Sendable {
         if let procStart { merged.procStart = procStart }
         if let entrypoint { merged.entrypoint = entrypoint }
         if let variant { merged.variant = variant }
+        if let gitRoot { merged.gitRoot = gitRoot }
+        if let worktreePath { merged.worktreePath = worktreePath }
+
+        let recorded = identity.parent == nil ? nil : identity.parentLink?.precedence ?? 0
+        if let parent {
+            let incoming = (parentLink ?? .spawnedProcess).precedence
+            if recorded == nil || incoming >= recorded! {
+                merged.parent = parent
+                merged.parentLink = parentLink ?? .spawnedProcess
+            }
+        } else if let parentLink, let recorded, parentLink.precedence >= recorded {
+            merged.parentLink = parentLink
+        }
         return merged
     }
 }

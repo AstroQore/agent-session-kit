@@ -68,3 +68,26 @@ public enum ParentLink: Hashable, Codable, Sendable {
     /// A person linked the two in the UI. Never inferred, never overwritten.
     case manual
 }
+
+extension ParentLink {
+    /// How much this kind of evidence is worth, higher being stronger.
+    ///
+    /// The one place the ranking is written down, so that everything which has
+    /// to choose between two answers — ``SessionIdentityPatch/applied(to:)``,
+    /// ``ProcessLinker``, a host's own merge — chooses the same way:
+    /// `manual` > `subagent` > `envInherited` > `spawnedProcess`.
+    ///
+    /// The order is the order of how directly each one was *observed*. A person
+    /// saying so is not evidence that can be wrong. A logged spawn is the
+    /// parent's own record of the act. An inherited session id is an
+    /// identifier only the parent could have written. A process ancestry is a
+    /// relationship a shared shell produces just as readily as a spawn.
+    public var precedence: Int {
+        switch self {
+        case .manual: 3
+        case .subagent: 2
+        case .envInherited: 1
+        case .spawnedProcess: 0
+        }
+    }
+}
