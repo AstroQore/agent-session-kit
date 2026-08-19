@@ -235,7 +235,13 @@ public actor IngestCoordinator {
 
     private var isRunning = false
     private var isBootstrapped = false
-    private var cursorsDirty = false
+    /// The sources whose cursor has moved since the last successful save.
+    ///
+    /// A set rather than a flag, because the flag meant every save rewrote
+    /// every cursor. One harness appending a transcript line a second dirties
+    /// exactly one source, and a board with seven hundred of them was writing
+    /// all seven hundred to record it.
+    private var dirtyCursorPaths: Set<String> = []
 
     /// Creates a coordinator.
     ///
@@ -340,8 +346,7 @@ public actor IngestCoordinator {
         watcher?.stop()
         watcher = nil
 
-        cursorsDirty = true
-        await persistCursorsIfDirty()
+        await persistCursors(everything: true)
 
         entries.removeAll()
         pathOwner.removeAll()
@@ -537,7 +542,7 @@ public actor IngestCoordinator {
         // Keep the cursor. A session that went quiet for an hour and came
         // back should resume, not replay.
         savedCursors[path] = entry.tailer.cursor
-        cursorsDirty = true
+        dirtyCursorPaths.insert(path)
         noticeContinuation?.yield(.sourceDropped(entry.source.key, path: path))
     }
 
@@ -771,7 +776,7 @@ public actor IngestCoordinator {
             let events = try await Task.detached(priority: .utility) { try await work() }.value
             guard !events.isEmpty else { return }
             for event in events { eventContinuation?.yield(event) }
-            cursorsDirty = true
+            dirtyCursorPaths.insert(path)
         } catch {
             noticeContinuation?.yield(.tailerError(path: path, error: describe(error)))
         }
@@ -787,20 +792,37 @@ public actor IngestCoordinator {
                 return
             }
             guard isRunning else { return }
-            await persistCursorsIfDirty()
+            await persistCursors()
         }
     }
 
-    private func persistCursorsIfDirty() async {
-        guard cursorsDirty, let cursorStore else { return }
-        cursorsDirty = false
-        let cursors = snapshotCursors()
+    /// Writes the cursors that moved, or all of them on the way out.
+    ///
+    /// `everything` is for shutdown, where the cost of one full write is
+    /// nothing against the certainty that the next launch resumes rather than
+    /// re-seeds — including for a source that was registered and never
+    /// produced an event, whose cursor no incremental save would have
+    /// carried.
+    private func persistCursors(everything: Bool = false) async {
+        guard let cursorStore else { return }
+        guard everything || !dirtyCursorPaths.isEmpty else { return }
+
+        // Taken and cleared before the await: a source that moves while the
+        // store is writing has to stay owed, and re-dirtying a path this save
+        // already carried costs one redundant write rather than a lost one.
+        let owed = dirtyCursorPaths
+        dirtyCursorPaths.removeAll()
+
+        let all = snapshotCursors()
+        let changed = everything ? all : all.filter { owed.contains($0.key) }
         do {
-            try await cursorStore.save(cursors)
-            savedCursors = cursors
+            try await cursorStore.save(changed: changed, all: all)
+            // Only what was written: a source registered since the last save
+            // and still silent is in `all` and in neither `changed` nor the
+            // store, and claiming otherwise would skip it on the next pass.
+            savedCursors.merge(changed) { _, new in new }
         } catch {
-            // Put the flag back: a save that failed is still owed.
-            cursorsDirty = true
+            dirtyCursorPaths.formUnion(owed)
             noticeContinuation?.yield(.tailerError(path: "<cursor-store>", error: describe(error)))
         }
     }

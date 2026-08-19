@@ -24,10 +24,40 @@ public protocol SourceCursorStore: Sendable {
 
     /// Replaces the stored set with `cursors`.
     ///
-    /// Called every couple of seconds while anything is moving, and once
-    /// more on shutdown. An implementation that cannot make that cheap
-    /// should coalesce internally; the coordinator will not batch further.
+    /// Called on shutdown, and on every periodic save by a store that has
+    /// not implemented ``save(changed:all:)``.
     func save(_ cursors: [String: SourceCursor]) async throws
+
+    /// Persists the cursors that actually moved.
+    ///
+    /// This is the call the periodic save makes, and on a live machine
+    /// `changed` is tiny while `all` is not: one harness writing a transcript
+    /// line a second moves *one* cursor, and a board with seven hundred
+    /// sources was rewriting all seven hundred every two seconds to record
+    /// it. A store that can write a subset should implement this and ignore
+    /// `all` entirely; the whole set is passed so that a store which can only
+    /// replace still has what it needs, which is what the default does.
+    ///
+    /// Both dictionaries are keyed by ``SessionSource/primaryPath``. A key in
+    /// `changed` is a cursor to write or overwrite — never a deletion, which
+    /// this protocol has no way to express and no caller wants: a source that
+    /// stopped being discovered keeps its cursor precisely so that it resumes
+    /// if it comes back.
+    ///
+    /// An implementation is expected to apply the whole of `changed` in one
+    /// transaction. The coordinator calls this at most once per
+    /// ``IngestConfiguration/cursorSaveEvery`` and does not batch further, so
+    /// a store that writes each key separately pays a durability barrier per
+    /// source.
+    func save(changed: [String: SourceCursor], all: [String: SourceCursor]) async throws
+}
+
+public extension SourceCursorStore {
+    /// Replaces everything, which is correct for any store and is what a
+    /// store that cannot write a subset should keep doing.
+    func save(changed: [String: SourceCursor], all: [String: SourceCursor]) async throws {
+        try await save(all)
+    }
 }
 
 /// A cursor store that keeps everything in memory.
