@@ -72,6 +72,8 @@ public struct ClaudeCoworkLiveAdapter: SourceAdapter {
 
     private let linker: ClaudeSubagentLinker
     private let clock: @Sendable () -> Date
+    /// See ``ClaudeSourceCache``. This adapter's own, never Claude Code's.
+    private let cache = ClaudeSourceCache()
 
     /// Creates an adapter.
     ///
@@ -110,14 +112,48 @@ public struct ClaudeCoworkLiveAdapter: SourceAdapter {
     // MARK: - Discovery
 
     public func discover(home: String, activeSince: Date) async throws -> [SessionSource] {
-        let builder = ClaudeSourceBuilder(harness: harness, linker: linker)
-        var sources: [SessionSource] = []
-        for projectDirectory in Self.projectDirectories(home: home) {
-            sources.append(contentsOf: builder.sources(
-                in: projectDirectory, entries: [], activeSince: activeSince
-            ))
+        try await discover(home: home, activeSince: activeSince, under: nil)
+    }
+
+    /// The same, over one `…/.claude/projects/<encoded cwd>` directory when a
+    /// notification named one or something below it.
+    ///
+    /// Narrowing here is worth more than for Claude Code, because the sweep
+    /// this replaces is a *recursive* walk of Claude.app's whole workspace
+    /// tree — the depth between the root and a `.claude` directory is the
+    /// app's business and cannot be assumed, so finding the project
+    /// directories at all means visiting every directory under the root.
+    public func discover(
+        home: String,
+        activeSince: Date,
+        under directory: URL?
+    ) async throws -> [SessionSource] {
+        let projects = directory.flatMap(Self.projectDirectory(under:)).map { [$0] }
+            ?? Self.projectDirectories(home: home)
+        guard !projects.isEmpty else { return [] }
+
+        let builder = ClaudeSourceBuilder(harness: harness, linker: linker, cache: cache)
+        return projects.flatMap { projectDirectory in
+            builder.sources(in: projectDirectory, entries: [], activeSince: activeSince)
         }
-        return sources
+    }
+
+    /// The `…/.claude/projects/<encoded cwd>` directory a scope sits in, or
+    /// `nil` when the scope is above one — a workspace directory, or the root
+    /// itself, which has to be walked to be understood.
+    ///
+    /// Read off the path rather than the filesystem: the segment after
+    /// `/.claude/projects/` is the project directory, whatever depth the app
+    /// put the whole thing at, and anything deeper — the `<session
+    /// id>/subagents` directory, the `tool-results` spill below it — is news
+    /// about that same project.
+    static func projectDirectory(under directory: URL) -> URL? {
+        let marker = "/.claude/projects/"
+        let path = directory.path
+        guard let range = path.range(of: marker) else { return nil }
+        let rest = path[range.upperBound...]
+        guard let project = rest.split(separator: "/").first else { return nil }
+        return URL(fileURLWithPath: String(path[path.startIndex..<range.upperBound]) + project)
     }
 
     /// Every `…/.claude/projects/<encoded cwd>` directory under the Cowork

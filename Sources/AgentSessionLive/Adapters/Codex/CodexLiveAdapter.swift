@@ -104,6 +104,11 @@ public struct CodexLiveAdapter: SourceAdapter {
     /// different file and is re-read.
     private let seedCache = CodexSeedCache()
 
+    /// Where the whole-tree walk found the rollout for a locked thread, and
+    /// which locked threads have no rollout at all. See the second pass of
+    /// ``discover(home:activeSince:under:)``.
+    private let rolloutIndex = CodexRolloutIndex()
+
     /// Creates an adapter.
     ///
     /// - Parameter linker: Where parent → child edges are remembered. Shared
@@ -147,38 +152,105 @@ public struct CodexLiveAdapter: SourceAdapter {
     /// for local midnight and `activeSince` is an instant; without it, a
     /// session started at 23:58 disappears two minutes later.
     public func discover(home: String, activeSince: Date) async throws -> [SessionSource] {
+        try await discover(home: home, activeSince: activeSince, under: nil)
+    }
+
+    /// The same, over one day directory when a notification named one.
+    ///
+    /// A rollout is created in, and only ever appended to, the day directory
+    /// named for the local midnight its thread opened at, so a change under
+    /// `<root>/2026/08/19` is news about that day and about nothing else. A
+    /// change anywhere else under the roots — the lock directory, a year, a
+    /// month, a root itself — falls through to the full pass.
+    public func discover(
+        home: String,
+        activeSince: Date,
+        under directory: URL?
+    ) async throws -> [SessionSource] {
+        if let day = Self.dayDirectory(home: home, under: directory) {
+            return rollouts(in: day, since: activeSince)
+                .sorted { $0.key < $1.key }
+                .compactMap { source(sessionID: $0.key, file: $0.value) }
+        }
+
         let directories = scanDirectories(home: home)
         let floor = Calendar.current.startOfDay(for: activeSince).addingTimeInterval(-86_400)
 
         // Pass one: recent day directories, recently written files.
         var candidates: [String: URL] = [:]
         for directory in directories where directory.date.map({ $0 >= floor }) ?? true {
-            for file in rolloutFiles(in: directory.url) {
-                guard let sessionID = Self.sessionID(inFilename: file) else { continue }
-                guard let modified = FileStamp.read(path: file.path)?.modified,
-                      modified >= activeSince
-                else { continue }
-                candidates[sessionID] = file
-            }
+            candidates.merge(rollouts(in: directory.url, since: activeSince)) { _, new in new }
         }
 
         // Pass two: anything holding a writer lock is alive by definition, so
         // it is discovered even if it has not been written to in a month.
-        let unresolved = heldLocks(home: home).subtracting(candidates.keys)
-        if !unresolved.isEmpty {
+        //
+        // The walk that needs is the whole tree, every year of it, and the
+        // ids that reach it are the ones no recent pass could account for —
+        // which, on a machine carrying lock files left behind by threads
+        // whose rollouts are long gone, is the same set every single time. So
+        // the walk's answers are kept: where an id's rollout turned out to
+        // be, and which ids have no rollout anywhere. A thread whose rollout
+        // appears later is found by pass one, on the notification that
+        // creates it.
+        let unresolved = rolloutIndex.resolve(heldLocks(home: home).subtracting(candidates.keys))
+        for (sessionID, path) in unresolved.known {
+            candidates[sessionID] = URL(fileURLWithPath: path)
+        }
+        if !unresolved.unknown.isEmpty {
+            var found: [String: String] = [:]
             for directory in directories {
                 for file in rolloutFiles(in: directory.url) {
                     guard let sessionID = Self.sessionID(inFilename: file),
-                          unresolved.contains(sessionID)
+                          unresolved.unknown.contains(sessionID)
                     else { continue }
                     candidates[sessionID] = file
+                    found[sessionID] = file.path
                 }
             }
+            rolloutIndex.record(found: found, missing: unresolved.unknown.subtracting(found.keys))
         }
 
         return candidates
             .sorted { $0.key < $1.key }
             .compactMap { source(sessionID: $0.key, file: $0.value) }
+    }
+
+    /// The rollouts directly inside one directory written since
+    /// `activeSince`, keyed by thread id.
+    private func rollouts(in directory: URL, since activeSince: Date) -> [String: URL] {
+        var out: [String: URL] = [:]
+        for file in rolloutFiles(in: directory) {
+            guard let sessionID = Self.sessionID(inFilename: file) else { continue }
+            guard let modified = FileStamp.read(path: file.path)?.modified,
+                  modified >= activeSince
+            else { continue }
+            out[sessionID] = file
+        }
+        return out
+    }
+
+    /// The `<yyyy>/<MM>/<dd>` directory a scope names, or `nil` for any other
+    /// scope — including `nil` itself, which means "sweep".
+    ///
+    /// Shape only: three components of the right widths, all digits, below a
+    /// root this adapter declared. A directory somebody dropped in there and
+    /// called `notes` falls through to the full pass rather than being walked
+    /// as if it were a day.
+    static func dayDirectory(home: String, under directory: URL?) -> URL? {
+        guard let directory else { return nil }
+        let path = directory.path
+        for root in [sessionsPath, archivedPath] {
+            let rootPath = URL(fileURLWithPath: home).appendingPathComponent(root).path
+            guard DiscoveryIO.path(path, isUnder: rootPath), path != rootPath else { continue }
+            let relative = path.dropFirst(rootPath.count).split(separator: "/").map(String.init)
+            guard relative.count == 3,
+                  relative[0].count == 4, relative[1].count == 2, relative[2].count == 2,
+                  relative.allSatisfy({ $0.allSatisfy(\.isNumber) })
+            else { return nil }
+            return directory
+        }
+        return nil
     }
 
     /// Builds a source by reading the head of a rollout.
@@ -214,6 +286,7 @@ public struct CodexLiveAdapter: SourceAdapter {
     }
 
     private func buildSource(sessionID: String, file: URL) -> SessionSource? {
+        DiscoveryIO.countFileRead()
         let head = JSONLHeadTail.headLines(url: file, count: Self.seedLines)
             .compactMap(CodexRolloutRecord.decode)
         let meta = head.first { $0.type == "session_meta" }?.payload
@@ -418,29 +491,18 @@ public struct CodexLiveAdapter: SourceAdapter {
     }
 
     /// Directory entries, never following a symlink.
-    ///
-    /// A link inside a session store can resolve anywhere, and this package
-    /// does not read anywhere.
     private func children(of url: URL) -> [URL] {
-        let keys: Set<URLResourceKey> = [.isSymbolicLinkKey, .isDirectoryKey]
-        guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: url,
-            includingPropertiesForKeys: Array(keys),
-            options: [.skipsHiddenFiles]
-        ) else { return [] }
-        return entries.filter { (try? $0.resourceValues(forKeys: keys).isSymbolicLink) != true }
+        DiscoveryIO.children(of: url, options: [.skipsHiddenFiles], sorted: false)
     }
 
-    private func isDirectory(_ url: URL) -> Bool {
-        (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-    }
+    private func isDirectory(_ url: URL) -> Bool { DiscoveryIO.isDirectory(url) }
 
     /// The session ids whose writer locks are held right now.
     private func heldLocks(home: String) -> Set<String> {
         let directory = URL(fileURLWithPath: home).appendingPathComponent(Self.locksPath)
         var out: Set<String> = []
         for file in children(of: directory) where file.pathExtension == "lock" {
-            guard LockFileProbe.isLocked(path: file.path) else { continue }
+            guard DiscoveryIO.isLocked(path: file.path) else { continue }
             out.insert(file.deletingPathExtension().lastPathComponent)
         }
         return out
@@ -482,6 +544,85 @@ final class CodexSeedCache: Sendable {
             // Bounded: a machine with a year of rollouts should not keep a
             // year of seeds. Recent files are re-read at most once per eviction.
             if map.count > 512 { map.removeAll() }
+        }
+    }
+}
+
+/// Where the rollout for a thread holding a writer lock lives, once the
+/// whole-tree walk has been paid for.
+///
+/// The second pass of discovery exists for one rare and important case: a
+/// thread opened last month, still running, whose rollout is nowhere near the
+/// recent window. Finding it costs a walk of every day directory under both
+/// roots — three years of them on a working machine.
+///
+/// The cost is worth paying once and never again, because both answers are
+/// stable. A rollout does not move: a thread appends to the file it was
+/// created in, in the day directory named for the midnight it opened at. And
+/// a lock with no rollout anywhere — the usual reason this pass runs at all,
+/// a file left behind by a thread whose rollout was deleted — will not grow
+/// one silently; a rollout appearing is a file being created under a watched
+/// root, which the first pass sees on the notification.
+///
+/// A class so the value-typed adapter shares one across its copies, and a
+/// `Mutex` because discovery runs off the coordinator's actor.
+final class CodexRolloutIndex: Sendable {
+    /// What is already known about a set of locked thread ids.
+    struct Resolution {
+        /// Ids whose rollout was found before, and is still on disk.
+        var known: [String: String] = [:]
+        /// Ids the tree has to be walked for.
+        var unknown: Set<String> = []
+    }
+
+    private struct State {
+        var found: [String: String] = [:]
+        var missing: Set<String> = []
+    }
+
+    private let state = Mutex(State())
+    private let limit: Int
+
+    init(limit: Int = 512) {
+        self.limit = limit
+    }
+
+    /// Splits `sessionIDs` into what the index can answer and what it cannot.
+    ///
+    /// A remembered path is re-`stat`ed rather than trusted: a rollout can be
+    /// deleted, and handing the coordinator a source over a file that is not
+    /// there would cost a tailer error per poll.
+    func resolve(_ sessionIDs: Set<String>) -> Resolution {
+        guard !sessionIDs.isEmpty else { return Resolution() }
+        return state.withLock { state in
+            var resolution = Resolution()
+            for sessionID in sessionIDs {
+                if let path = state.found[sessionID] {
+                    if FileStamp.read(path: path) != nil {
+                        resolution.known[sessionID] = path
+                        continue
+                    }
+                    state.found[sessionID] = nil
+                }
+                if state.missing.contains(sessionID) { continue }
+                resolution.unknown.insert(sessionID)
+            }
+            return resolution
+        }
+    }
+
+    /// Records what a walk turned up, and what it did not.
+    func record(found: [String: String], missing: Set<String>) {
+        state.withLock { state in
+            if state.found.count + state.missing.count > limit {
+                state.found.removeAll(keepingCapacity: true)
+                state.missing.removeAll(keepingCapacity: true)
+            }
+            for (sessionID, path) in found {
+                state.found[sessionID] = path
+                state.missing.remove(sessionID)
+            }
+            state.missing.formUnion(missing)
         }
     }
 }

@@ -89,6 +89,9 @@ public struct AntigravityLiveAdapter: SourceAdapter {
     public static let deadAfter: TimeInterval = 10 * 60
 
     private let registry: AntigravityConversationRegistry
+    /// The summaries index's rows, keyed by the store and its WAL. See
+    /// ``summaries(home:)``.
+    private let summaryCache = DiscoveryCache<[FileStamp], [AntigravitySummariesReader.Summary]>()
 
     /// Creates an adapter.
     ///
@@ -167,13 +170,33 @@ public struct AntigravityLiveAdapter: SourceAdapter {
     /// A row the index knows about but whose database is not on disk is
     /// dropped: there is nothing to tail.
     public func discover(home: String, activeSince: Date) async throws -> [SessionSource] {
-        let summaries = AntigravitySummariesReader(databaseURL: Self.summariesPath(home: home))
-            .summaries()
+        try await discover(home: home, activeSince: activeSince, under: nil)
+    }
+
+    /// The same, over one root's conversations directory when a notification
+    /// named one.
+    ///
+    /// The two roots are independent stores that happen to share a schema, so
+    /// a database appearing under the CLI's says nothing about the IDE's. A
+    /// change to the summaries index is not narrowable — `not_fully_idle`
+    /// flipping there can make a conversation of *either* root worth tailing
+    /// — and sweeps. So does a presence lock being touched, which is the
+    /// only sign an attached conversation that has written nothing yet
+    /// exists at all.
+    public func discover(
+        home: String,
+        activeSince: Date,
+        under directory: URL?
+    ) async throws -> [SessionSource] {
+        let roots = Self.roots(home: home, under: directory)
+        guard !roots.isEmpty else { return [] }
+
+        let summaries = summaries(home: home)
         registry.record(summaries)
         let byID = Dictionary(summaries.map { ($0.conversationID, $0) }, uniquingKeysWith: { a, _ in a })
 
         var candidates: [String: (url: URL, root: String)] = [:]
-        for root in [Self.cliRoot, Self.ideRoot] {
+        for root in roots {
             let directory = Self.conversationsPath(home: home, root: root)
             for file in databases(in: directory) {
                 let id = file.deletingPathExtension().lastPathComponent.lowercased()
@@ -194,6 +217,37 @@ public struct AntigravityLiveAdapter: SourceAdapter {
         }
     }
 
+    /// The roots a scope names.
+    ///
+    /// A scope inside one root's `conversations` directory is that root; a
+    /// scope anywhere else under the declared watch roots — the summaries
+    /// store, a `presence` directory — is both, because either can carry the
+    /// news.
+    static func roots(home: String, under directory: URL?) -> [String] {
+        guard let directory else { return [cliRoot, ideRoot] }
+        let path = directory.path
+        for root in [cliRoot, ideRoot] {
+            let conversations = conversationsPath(home: home, root: root).path
+            if DiscoveryIO.path(path, isUnder: conversations) { return [root] }
+        }
+        return [cliRoot, ideRoot]
+    }
+
+    /// The CLI index's rows, re-read only when the store or its WAL moved.
+    ///
+    /// Opening somebody else's live SQLite database and walking a table is
+    /// the most expensive thing in this adapter, and the answer changes only
+    /// when AntiGravity writes — which, in WAL mode, shows up on the `-wal`
+    /// sibling rather than on the `.db`, so both are part of the key.
+    private func summaries(home: String) -> [AntigravitySummariesReader.Summary] {
+        let path = Self.summariesPath(home: home).path
+        let version = [FileStamp.version(ofPath: path), .version(ofPath: path + "-wal")]
+        return summaryCache.value(path: path, version: version) {
+            DiscoveryIO.countFileRead()
+            return AntigravitySummariesReader(databaseURL: URL(fileURLWithPath: path)).summaries()
+        }
+    }
+
     /// Whether a conversation has done anything recent enough to be worth a
     /// tailer.
     private func isActive(
@@ -203,7 +257,7 @@ public struct AntigravityLiveAdapter: SourceAdapter {
         activeSince: Date
     ) -> Bool {
         if summary?.notFullyIdle == true { return true }
-        if LockFileProbe.isLocked(path: presence) { return true }
+        if DiscoveryIO.isLocked(path: presence) { return true }
         if LockFileProbe.mtimeWithin(path: presence, seconds: Self.presenceFreshWindow) { return true }
         if let modified = summary?.lastModified, modified >= activeSince { return true }
         guard let modified = Self.storeModified(path: file.path) else { return false }
@@ -369,16 +423,8 @@ public struct AntigravityLiveAdapter: SourceAdapter {
     /// The `-wal` and `-shm` siblings carry the `db-wal` / `db-shm` extension,
     /// so an exact extension match already excludes them.
     private func databases(in directory: URL) -> [URL] {
-        let keys: Set<URLResourceKey> = [.isSymbolicLinkKey]
-        guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: Array(keys),
-            options: [.skipsHiddenFiles]
-        ) else { return [] }
-        return entries.filter { entry in
-            entry.pathExtension == "db"
-                && (try? entry.resourceValues(forKeys: keys).isSymbolicLink) != true
-        }
+        DiscoveryIO.children(of: directory, options: [.skipsHiddenFiles], sorted: false)
+            .filter { $0.pathExtension == "db" }
     }
 
     /// The newer of a SQLite store's own mtime and its `-wal` sibling's.

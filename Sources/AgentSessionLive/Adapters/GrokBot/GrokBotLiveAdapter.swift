@@ -190,16 +190,10 @@ public struct GrokBotLiveAdapter: SourceAdapter {
 
     /// `*.blob` directly inside the store, never following a symlink.
     static func blobs(in directory: URL) -> [URL] {
-        let keys: Set<URLResourceKey> = [.isSymbolicLinkKey]
-        guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: Array(keys),
+        DiscoveryIO.children(
+            of: directory,
             options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
-        ) else { return [] }
-        return entries
-            .filter { $0.pathExtension == GrokBotSessionAdapter.blobExtension }
-            .filter { (try? $0.resourceValues(forKeys: keys).isSymbolicLink) != true }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        ).filter { $0.pathExtension == GrokBotSessionAdapter.blobExtension }
     }
 
     // MARK: - Tailing

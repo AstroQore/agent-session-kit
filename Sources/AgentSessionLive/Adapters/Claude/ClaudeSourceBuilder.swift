@@ -20,6 +20,9 @@ struct ClaudeSourceBuilder: Sendable {
     let harness: Harness
     /// The parent/child join child transcripts are announced through.
     let linker: ClaudeSubagentLinker
+    /// Where the file reads per transcript are remembered between passes.
+    /// Owned by the adapter, because a builder is built fresh per discovery.
+    let cache: ClaudeSourceCache
 
     /// The parent transcripts directly inside `projectDirectory`, each
     /// followed by the subagents beside it.
@@ -70,7 +73,7 @@ struct ClaudeSourceBuilder: Sendable {
         entry: ClaudeLiveSession?
     ) -> SessionSource {
         let key = SessionKey(harness: harness, sessionID: sessionID)
-        let head = Self.headRecord(of: transcript)
+        let head = cache.headRecord(of: transcript)
         var identity = SessionIdentity(key: key, sourcePath: transcript.path)
         identity.cwd = entry?.cwd
             ?? head?.cwd
@@ -98,7 +101,7 @@ struct ClaudeSourceBuilder: Sendable {
         let directory = projectDirectory
             .appendingPathComponent(sessionID)
             .appendingPathComponent("subagents")
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        let names = DiscoveryIO.names(in: directory)
 
         return names.sorted().compactMap { name -> SessionSource? in
             guard name.hasPrefix(ClaudeLiveAdapter.subagentFilePrefix),
@@ -111,7 +114,7 @@ struct ClaudeSourceBuilder: Sendable {
                 name.dropFirst(ClaudeLiveAdapter.subagentFilePrefix.count).dropLast(".jsonl".count)
             )
             guard !agentID.isEmpty else { return nil }
-            let meta = ClaudeSubagentMeta.read(
+            let meta = cache.subagentMeta(
                 path: directory.appendingPathComponent(
                     "\(ClaudeLiveAdapter.subagentFilePrefix)\(agentID).meta.json"
                 ).path
@@ -156,16 +159,54 @@ struct ClaudeSourceBuilder: Sendable {
 
     /// The immediate subdirectories of a project root, sorted by name.
     static func subdirectories(of root: URL) -> [URL] {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
-        return names.sorted().map(root.appendingPathComponent)
+        DiscoveryIO.names(in: root).sorted().map(root.appendingPathComponent)
     }
 
     /// The parent transcripts in a project directory: `<session id>.jsonl`,
     /// never a subagent's file and never a dotfile.
     static func transcripts(in projectDirectory: URL) -> [URL] {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: projectDirectory.path)) ?? []
-        return names.sorted()
+        DiscoveryIO.names(in: projectDirectory).sorted()
             .filter { $0.hasSuffix(".jsonl") && !$0.hasPrefix(ClaudeLiveAdapter.subagentFilePrefix) }
             .map(projectDirectory.appendingPathComponent)
+    }
+}
+
+/// The two file reads a Claude transcript costs discovery, remembered.
+///
+/// Both are of documents that do not change:
+///
+/// - **The transcript's head.** Three lines off the front of an append-only
+///   file, for the `cwd`, the git branch, the entrypoint, and the model. It is
+///   keyed on the **inode** rather than on the whole stamp, because a
+///   transcript that grew by a thousand lines has exactly the same first three
+///   — and re-reading them for every session on every pass was the largest
+///   single cost in Claude Code's discovery.
+/// - **A subagent's `meta.json`.** Written once when the child is spawned.
+///   Keyed on the stamp, since it is small enough that a rewrite is plausible
+///   and re-reading it costs almost nothing when one happens.
+///
+/// One cache per adapter: Claude Code and Claude Cowork read the same format
+/// out of different trees, and each keeps its own so a path collision between
+/// them is not even expressible.
+final class ClaudeSourceCache: Sendable {
+    private let heads = DiscoveryCache<UInt64, ClaudeTranscriptRecord?>()
+    private let metas = DiscoveryCache<FileStamp, ClaudeSubagentMeta?>()
+
+    /// The first fully-stamped record of a transcript, from a bounded read of
+    /// its head.
+    func headRecord(of transcript: URL) -> ClaudeTranscriptRecord? {
+        guard let inode = FileStamp.read(path: transcript.path)?.inode else { return nil }
+        return heads.value(path: transcript.path, version: inode) {
+            DiscoveryIO.countFileRead()
+            return ClaudeSourceBuilder.headRecord(of: transcript)
+        }
+    }
+
+    /// One `agent-<id>.meta.json`.
+    func subagentMeta(path: String) -> ClaudeSubagentMeta? {
+        metas.value(path: path, version: .version(ofPath: path)) {
+            DiscoveryIO.countFileRead()
+            return ClaudeSubagentMeta.read(path: path)
+        }
     }
 }

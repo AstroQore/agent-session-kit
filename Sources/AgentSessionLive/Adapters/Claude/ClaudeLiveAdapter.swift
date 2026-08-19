@@ -96,6 +96,8 @@ public struct ClaudeLiveAdapter: SourceAdapter {
 
     private let linker: ClaudeSubagentLinker
     private let clock: @Sendable () -> Date
+    /// See ``ClaudeSourceCache``. This adapter's own, never Cowork's.
+    private let cache = ClaudeSourceCache()
 
     /// Creates an adapter.
     ///
@@ -148,18 +150,58 @@ public struct ClaudeLiveAdapter: SourceAdapter {
     // MARK: - Discovery
 
     public func discover(home: String, activeSince: Date) async throws -> [SessionSource] {
-        let entries = ClaudeSessionsDirectory.read(home: home)
-        let builder = ClaudeSourceBuilder(harness: harness, linker: linker)
-        var sources: [SessionSource] = []
+        try await discover(home: home, activeSince: activeSince, under: nil)
+    }
 
-        for root in Self.projectRoots(home: home) {
-            for projectDirectory in ClaudeSourceBuilder.subdirectories(of: root) {
-                sources.append(contentsOf: builder.sources(
-                    in: projectDirectory, entries: entries, activeSince: activeSince
-                ))
-            }
+    /// The same, over one project directory when a notification named one.
+    ///
+    /// Everything a transcript's line arrives in — the transcript, the
+    /// `<session id>/subagents` directory beside it, the `tool-results` spill
+    /// below that — belongs to exactly one project directory, so a change
+    /// anywhere in that subtree is news about that project and no other. A
+    /// change in `~/.claude/sessions`, where a session's pid file appears
+    /// before its transcript does, is not narrowable and sweeps.
+    public func discover(
+        home: String,
+        activeSince: Date,
+        under directory: URL?
+    ) async throws -> [SessionSource] {
+        let roots = Self.projectRoots(home: home)
+        // A scope outside every project root is `~/.claude/sessions`, and an
+        // entry appearing there can make a transcript far older than the
+        // cutoff worth tailing — a session that has sat at a prompt for an
+        // hour. That is exactly the row a board must not lose, and finding it
+        // takes a sweep.
+        let projects = directory.flatMap { Self.projectDirectories(under: $0, roots: roots) }
+            ?? roots.flatMap(ClaudeSourceBuilder.subdirectories)
+        guard !projects.isEmpty else { return [] }
+
+        let entries = ClaudeSessionsDirectory.read(home: home)
+        let builder = ClaudeSourceBuilder(harness: harness, linker: linker, cache: cache)
+        return projects.flatMap { projectDirectory in
+            builder.sources(in: projectDirectory, entries: entries, activeSince: activeSince)
         }
-        return sources
+    }
+
+    /// The project directories a scope names, `nil` when the scope is not
+    /// under any project root — which for this adapter means
+    /// `~/.claude/sessions`, and is the caller's cue to sweep.
+    static func projectDirectories(under directory: URL, roots: [URL]) -> [URL]? {
+        let path = directory.path
+        for root in roots {
+            // The scope is a project root, or an ancestor of one: every
+            // project in it.
+            if DiscoveryIO.path(root.path, isUnder: path) {
+                return roots
+                    .filter { DiscoveryIO.path($0.path, isUnder: path) }
+                    .flatMap(ClaudeSourceBuilder.subdirectories)
+            }
+            guard DiscoveryIO.path(path, isUnder: root.path) else { continue }
+            let relative = path.dropFirst(root.path.count).split(separator: "/").map(String.init)
+            guard let project = relative.first else { return roots.flatMap(ClaudeSourceBuilder.subdirectories) }
+            return [root.appendingPathComponent(project)]
+        }
+        return nil
     }
 
     // MARK: - Tailing

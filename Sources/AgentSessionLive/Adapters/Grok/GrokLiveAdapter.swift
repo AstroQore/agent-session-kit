@@ -92,6 +92,20 @@ public struct GrokLiveAdapter: SourceAdapter {
     private let options: GrokRecordMapper.Options
     private let clock: @Sendable () -> Date
 
+    /// Sources already built, keyed by `summary.json` and stamped with what
+    /// that file looked like when it was parsed.
+    ///
+    /// Everything a Grok source carries beyond its paths comes out of
+    /// `summary.json` — title, model, persona, recorded cwd — and the rest is
+    /// derived from directory names that cannot change under a session. A
+    /// store with a hundred and forty sessions re-parsed a hundred and forty
+    /// JSON documents on every pass to learn nothing new.
+    private let sourceCache = DiscoveryCache<FileStamp, SessionSource?>()
+
+    /// Whether each session directory had a writer lock, and when that was
+    /// worth asking. See ``GrokLockCache``.
+    private let lockCache = GrokLockCache()
+
     /// Creates an adapter.
     ///
     /// - Parameters:
@@ -148,46 +162,101 @@ public struct GrokLiveAdapter: SourceAdapter {
     /// `AgentSessionKit`'s `GrokSessionAdapter` does cover) are not walked at
     /// all — a session is archived precisely because nothing is driving it.
     public func discover(home: String, activeSince: Date) async throws -> [SessionSource] {
+        try await discover(home: home, activeSince: activeSince, under: nil)
+    }
+
+    /// The same, over one project directory or one session directory when a
+    /// notification named one.
+    ///
+    /// The scope is read positionally against `~/.grok/sessions`: a direct
+    /// child of it is a project and only its sessions are walked, a
+    /// grandchild is a single session and only that one is examined, and
+    /// anything at or above the root — `~/.grok` itself, which is where
+    /// `active_sessions.json` lives — is the whole store.
+    public func discover(
+        home: String,
+        activeSince: Date,
+        under directory: URL?
+    ) async throws -> [SessionSource] {
+        let scope = Self.scope(home: home, under: directory)
+        guard !scope.isEmpty else { return [] }
+
         let running = Set(
             GrokActiveSessions.read(home: home).compactMap(\.sessionID).map { $0.lowercased() }
         )
+        let now = clock()
         var sources: [SessionSource] = []
 
-        for projectDirectory in children(of: Self.sessionsRoot(home: home)) where isDirectory(projectDirectory) {
+        for (projectDirectory, sessionDirectory) in scope {
             let cwd = GrokSessionsPath.decodeCwd(directoryName: projectDirectory.lastPathComponent)
+            let sessionID = sessionDirectory.lastPathComponent
+            guard !sessionID.isEmpty, !sessionID.hasPrefix(".") else { continue }
 
-            for directory in children(of: projectDirectory) where isDirectory(directory) {
-                let sessionID = directory.lastPathComponent
-                guard !sessionID.isEmpty, !sessionID.hasPrefix(".") else { continue }
-
-                let stamps = Self.sessionFiles.compactMap {
-                    FileStamp.read(path: directory.appendingPathComponent($0).path)
-                }
-                // A directory with none of a session's files in it is not a
-                // session, whatever it is named.
-                guard !stamps.isEmpty else { continue }
-
-                let isRecent = stamps.contains { $0.modified >= activeSince }
-                // The registry is the cheap answer for a running session; the
-                // lock probe (a readdir plus an fcntl per lock file) is the
-                // fallback, and only worth asking of a directory written to
-                // within the last few days. A session that has been silent
-                // longer than that and still holds its locks is a process
-                // nobody has typed into for days — the registry names it, and
-                // if it does not, the next write brings it back into the window.
-                let newest = stamps.map(\.modified).max() ?? .distantPast
-                let mightHoldLock = newest >= activeSince.addingTimeInterval(-Self.lockProbeWindow)
-                let isRunning = running.contains(sessionID.lowercased())
-                    || (mightHoldLock && Self.heldLock(in: directory) != nil)
-                guard isRecent || isRunning else { continue }
-
-                guard let source = source(directory: directory, sessionID: sessionID, cwd: cwd) else {
-                    continue
-                }
-                sources.append(source)
+            let stamps = Self.sessionFiles.compactMap {
+                FileStamp.read(path: sessionDirectory.appendingPathComponent($0).path)
             }
+            // A directory with none of a session's files in it is not a
+            // session, whatever it is named.
+            guard !stamps.isEmpty else { continue }
+
+            let newest = stamps.map(\.modified).max() ?? .distantPast
+            // Ordered by what each answer costs. The mtimes are already in
+            // hand; the registry is one file read for the whole pass; the
+            // lock probe is a readdir plus an `F_GETLK` per lock file in the
+            // directory, and it is the one worth not asking. It is also only
+            // worth asking of a directory written to within the last few
+            // days: a session silent longer than that and still holding its
+            // locks is a process nobody has typed into for days, the registry
+            // names it, and if it does not, the next write brings it back
+            // into the window.
+            if !stamps.contains(where: { $0.modified >= activeSince }),
+               !running.contains(sessionID.lowercased()) {
+                guard newest >= activeSince.addingTimeInterval(-Self.lockProbeWindow),
+                      lockCache.isHeld(directory: sessionDirectory, newest: newest, now: now, probe: {
+                          Self.heldLock(in: sessionDirectory) != nil
+                      })
+                else { continue }
+            }
+
+            guard let source = source(
+                directory: sessionDirectory, sessionID: sessionID, cwd: cwd
+            ) else { continue }
+            sources.append(source)
         }
         return sources.sorted { $0.key.sessionID < $1.key.sessionID }
+    }
+
+    /// The `(project directory, session directory)` pairs a scope names.
+    ///
+    /// Empty means "nothing of ours changed", which a caller must treat as no
+    /// sources rather than as a sweep — a scope outside the store is a scope
+    /// this adapter has nothing to say about.
+    static func scope(home: String, under directory: URL?) -> [(URL, URL)] {
+        let root = sessionsRoot(home: home)
+        guard let directory else { return everySessionDirectory(root: root) }
+
+        let path = directory.path
+        // The scope is the sessions root, or an ancestor of it.
+        if DiscoveryIO.path(root.path, isUnder: path) { return everySessionDirectory(root: root) }
+        guard DiscoveryIO.path(path, isUnder: root.path) else { return [] }
+
+        let relative = path.dropFirst(root.path.count).split(separator: "/").map(String.init)
+        guard let project = relative.first else { return everySessionDirectory(root: root) }
+        let projectDirectory = root.appendingPathComponent(project)
+        guard relative.count >= 2 else {
+            return children(of: projectDirectory)
+                .filter(isDirectory)
+                .map { (projectDirectory, $0) }
+        }
+        // Deeper than a session directory — a `tool-results` spill, say — is
+        // still news about that session and nothing else.
+        return [(projectDirectory, projectDirectory.appendingPathComponent(relative[1]))]
+    }
+
+    private static func everySessionDirectory(root: URL) -> [(URL, URL)] {
+        children(of: root).filter(isDirectory).flatMap { project in
+            children(of: project).filter(isDirectory).map { (project, $0) }
+        }
     }
 
     /// Builds a source from a session directory, seeding what `summary.json`
@@ -202,7 +271,22 @@ public struct GrokLiveAdapter: SourceAdapter {
     /// directory name is the authority and a session with no summary yet is
     /// simply new.
     private func source(directory: URL, sessionID: String, cwd: String?) -> SessionSource? {
-        let summary = GrokSummary.read(path: directory.appendingPathComponent("summary.json").path)
+        let summaryPath = directory.appendingPathComponent("summary.json").path
+        return sourceCache.value(path: summaryPath, version: .version(ofPath: summaryPath)) {
+            DiscoveryIO.countFileRead()
+            return buildSource(
+                summaryPath: summaryPath, directory: directory, sessionID: sessionID, cwd: cwd
+            )
+        }
+    }
+
+    private func buildSource(
+        summaryPath: String,
+        directory: URL,
+        sessionID: String,
+        cwd: String?
+    ) -> SessionSource? {
+        let summary = GrokSummary.read(path: summaryPath)
         if let claimed = summary?.sessionID,
            claimed.caseInsensitiveCompare(sessionID) != .orderedSame {
             return nil
@@ -341,7 +425,7 @@ public struct GrokLiveAdapter: SourceAdapter {
     /// whether a writer is there.
     static func heldLock(in directory: URL) -> LockFileProbe.LockState? {
         for file in children(of: directory) where file.pathExtension == "lock" {
-            let state = LockFileProbe.lockState(path: file.path)
+            let state = DiscoveryIO.lockState(path: file.path)
             if state.isLocked { return state }
         }
         return nil
@@ -357,26 +441,71 @@ public struct GrokLiveAdapter: SourceAdapter {
         return now.timeIntervalSince(newest)
     }
 
-    /// Directory entries, never following a symlink.
-    ///
-    /// A link inside a session store can resolve anywhere, and this package
-    /// does not read anywhere.
+    /// Directory entries, never following a symlink. Hidden entries are kept:
+    /// nothing about a Grok session directory's name is guaranteed not to
+    /// start with a dot.
     private static func children(of url: URL) -> [URL] {
-        let keys: Set<URLResourceKey> = [.isSymbolicLinkKey, .isDirectoryKey]
-        guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: url,
-            includingPropertiesForKeys: Array(keys),
-            options: []
-        ) else { return [] }
-        return entries
-            .filter { (try? $0.resourceValues(forKeys: keys).isSymbolicLink) != true }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        DiscoveryIO.children(of: url)
     }
 
-    private func children(of url: URL) -> [URL] { Self.children(of: url) }
+    private static func isDirectory(_ url: URL) -> Bool { DiscoveryIO.isDirectory(url) }
+}
 
-    private func isDirectory(_ url: URL) -> Bool {
-        (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+/// Whether a Grok session directory has a writer lock, remembered between
+/// passes.
+///
+/// The probe is a `readdir` plus an `open`/`F_GETLK`/`close` per lock file,
+/// and Grok keeps one lock per mutable file, so asking it of every session in
+/// a store of a hundred and forty costs about seven hundred syscalls. It was
+/// the single most expensive thing the live pipeline did at rest.
+///
+/// It is also nearly always the same answer. A lock is taken by creating the
+/// file, which moves the directory's own mtime, and a session doing anything
+/// at all writes one of its logs, which moves the newest file mtime. So a
+/// cached **no** survives until one of those changes — nothing can have
+/// started without moving one of them. A cached **yes** additionally expires,
+/// because a lock is released without leaving a trace anywhere on disk, and a
+/// session whose process is gone would otherwise be held on the board by a
+/// verdict nothing could ever refresh.
+final class GrokLockCache: Sendable {
+    private struct Entry {
+        let directory: FileStamp
+        let newest: Date?
+        let held: Bool
+        let at: Date
+    }
+
+    /// How long a *held* verdict is reused before the locks are probed again.
+    static let heldLifetime: TimeInterval = 30
+
+    private let entries = Mutex<[String: Entry]>([:])
+    private let heldLifetime: TimeInterval
+    private let limit: Int
+
+    init(heldLifetime: TimeInterval = GrokLockCache.heldLifetime, limit: Int = 1024) {
+        self.heldLifetime = heldLifetime
+        self.limit = limit
+    }
+
+    /// Whether `directory` holds a writer lock, asking `probe` only when the
+    /// remembered answer cannot still be true.
+    func isHeld(directory: URL, newest: Date?, now: Date, probe: () -> Bool) -> Bool {
+        let path = directory.path
+        let stamp = FileStamp.version(ofPath: path)
+        let cached = entries.withLock { map -> Bool? in
+            guard let entry = map[path], entry.directory == stamp, entry.newest == newest
+            else { return nil }
+            if entry.held, now.timeIntervalSince(entry.at) > heldLifetime { return nil }
+            return entry.held
+        }
+        if let cached { return cached }
+
+        let held = probe()
+        entries.withLock { map in
+            if map.count >= limit { map.removeAll(keepingCapacity: true) }
+            map[path] = Entry(directory: stamp, newest: newest, held: held, at: now)
+        }
+        return held
     }
 }
 

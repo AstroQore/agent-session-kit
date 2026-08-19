@@ -97,6 +97,12 @@ public struct CursorLiveAdapter: SourceAdapter {
 
     private let clock: @Sendable () -> Date
 
+    /// The conversation card, keyed by the store it was read out of. See
+    /// ``source(home:store:stamp:agentID:meta:)``.
+    private let cardCache = DiscoveryCache<FileStamp, CursorStoreMeta?>()
+    /// `meta.json`, keyed by its own stamp.
+    private let agentMetaCache = DiscoveryCache<FileStamp, CursorAgentMeta?>()
+
     /// Creates an adapter.
     ///
     /// - Parameters:
@@ -133,32 +139,82 @@ public struct CursorLiveAdapter: SourceAdapter {
     // MARK: - Discovery
 
     public func discover(home: String, activeSince: Date) async throws -> [SessionSource] {
+        try await discover(home: home, activeSince: activeSince, under: nil)
+    }
+
+    /// The same, over one workspace or one agent directory when a
+    /// notification named one.
+    ///
+    /// The tree is `chats/<workspace hash>/<agent id>/`, and everything a
+    /// turn writes — the store, its `-wal` and `-shm`, `meta.json` — is in
+    /// the agent's own directory. A change under `projects/` or in the worker
+    /// directory is a `cursor-agent` starting or a socket appearing, which
+    /// can make a store far older than the cutoff worth tailing, so those
+    /// sweep.
+    public func discover(
+        home: String,
+        activeSince: Date,
+        under directory: URL?
+    ) async throws -> [SessionSource] {
+        let agents = agentDirectories(home: home, under: directory)
+        guard !agents.isEmpty else { return [] }
+
         let hasLiveWorker = Self.hasLiveWorker(home: home)
         var sources: [SessionSource] = []
-
-        for workspace in subdirectories(of: CursorPaths.chatsRoot(home: home)) {
-            for agent in subdirectories(of: workspace) {
-                let store = agent.appendingPathComponent(CursorPaths.storeFileName)
-                guard let stamp = FileStamp.read(path: store.path) else { continue }
-                let meta = CursorAgentMeta.read(path: CursorPaths.metaPath(forStore: store.path))
-
-                let written = Self.lastWrite(store: store.path, stamp: stamp, meta: meta)
-                var include = written >= activeSince
-                if !include, hasLiveWorker, let cwd = meta?.cwd {
-                    include = FileManager.default.fileExists(
-                        atPath: CursorPaths.workerSocketPath(
-                            home: home, slug: CursorPaths.slug(forCWD: cwd)
-                        )
-                    )
-                }
-                guard include else { continue }
-                guard let source = source(home: home, store: store, agentID: agent.lastPathComponent,
-                                          meta: meta)
-                else { continue }
-                sources.append(source)
+        for agent in agents {
+            let store = agent.appendingPathComponent(CursorPaths.storeFileName)
+            guard let stamp = FileStamp.read(path: store.path) else { continue }
+            let metaPath = CursorPaths.metaPath(forStore: store.path)
+            let meta = agentMetaCache.value(path: metaPath, version: .version(ofPath: metaPath)) {
+                DiscoveryIO.countFileRead()
+                return CursorAgentMeta.read(path: metaPath)
             }
+
+            let written = Self.lastWrite(store: store.path, stamp: stamp, meta: meta)
+            var include = written >= activeSince
+            if !include, hasLiveWorker, let cwd = meta?.cwd {
+                include = FileManager.default.fileExists(
+                    atPath: CursorPaths.workerSocketPath(
+                        home: home, slug: CursorPaths.slug(forCWD: cwd)
+                    )
+                )
+            }
+            guard include else { continue }
+            guard let source = source(
+                home: home,
+                store: store,
+                stamp: stamp,
+                agentID: agent.lastPathComponent,
+                meta: meta
+            ) else { continue }
+            sources.append(source)
         }
         return sources.sorted { $0.key.sessionID < $1.key.sessionID }
+    }
+
+    /// The agent directories a scope names.
+    ///
+    /// A scope at or above `chats/` is every agent of every workspace; a
+    /// workspace directory is its own agents; an agent directory, or anything
+    /// below one, is that agent. A scope elsewhere under the declared roots —
+    /// the projects tree, the worker directory — is not narrowable, and
+    /// sweeps rather than answering nothing.
+    func agentDirectories(home: String, under directory: URL?) -> [URL] {
+        let root = CursorPaths.chatsRoot(home: home)
+        func everyAgent() -> [URL] {
+            subdirectories(of: root).flatMap(subdirectories)
+        }
+        guard let directory else { return everyAgent() }
+
+        let path = directory.path
+        if DiscoveryIO.path(root.path, isUnder: path) { return everyAgent() }
+        guard DiscoveryIO.path(path, isUnder: root.path) else { return everyAgent() }
+
+        let relative = path.dropFirst(root.path.count).split(separator: "/").map(String.init)
+        guard let workspace = relative.first else { return everyAgent() }
+        let workspaceDirectory = root.appendingPathComponent(workspace)
+        guard relative.count >= 2 else { return subdirectories(of: workspaceDirectory) }
+        return [workspaceDirectory.appendingPathComponent(relative[1])]
     }
 
     /// Builds a source, reading the conversation card for the title and mode.
@@ -174,11 +230,21 @@ public struct CursorLiveAdapter: SourceAdapter {
     private func source(
         home: String,
         store: URL,
+        stamp: FileStamp,
         agentID: String,
         meta: CursorAgentMeta?
     ) -> SessionSource? {
         guard !agentID.isEmpty else { return nil }
-        let card = CursorStoreReader(path: store.path).readMeta()
+        // The card is one SQLite open of a database Cursor holds, which is
+        // the most expensive thing in this adapter's discovery. It is keyed
+        // on the store's own stamp rather than on the WAL's: the title and
+        // the mode reach the `.db` on a checkpoint, and re-opening the store
+        // on every WAL write of a busy conversation would cost far more than
+        // learning a renamed title a checkpoint late is worth.
+        let card = cardCache.value(path: store.path, version: stamp) {
+            DiscoveryIO.countFileRead()
+            return CursorStoreReader(path: store.path).readMeta()
+        }
         if let card, card.agentID.caseInsensitiveCompare(agentID) != .orderedSame { return nil }
 
         let cwd = meta?.cwd
@@ -323,21 +389,7 @@ public struct CursorLiveAdapter: SourceAdapter {
 
     /// Directory entries that are themselves directories, never following a
     /// symlink.
-    ///
-    /// A link inside a session store can resolve anywhere, and this package
-    /// does not read anywhere.
     private func subdirectories(of url: URL) -> [URL] {
-        let keys: Set<URLResourceKey> = [.isSymbolicLinkKey, .isDirectoryKey]
-        guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: url,
-            includingPropertiesForKeys: Array(keys),
-            options: [.skipsHiddenFiles]
-        ) else { return [] }
-        return entries
-            .filter { entry in
-                guard let values = try? entry.resourceValues(forKeys: keys) else { return false }
-                return values.isSymbolicLink != true && values.isDirectory == true
-            }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        DiscoveryIO.children(of: url, options: [.skipsHiddenFiles]).filter(DiscoveryIO.isDirectory)
     }
 }
