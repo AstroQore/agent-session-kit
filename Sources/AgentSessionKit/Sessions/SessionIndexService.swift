@@ -18,6 +18,12 @@ public actor SessionIndexService {
     private let registry: SessionProviderRegistry
     private let bodyIndexing: @Sendable () -> Bool
 
+    /// Body bytes committed in one SQLite/FTS5 transaction. The cap is on
+    /// source excerpt bytes (not session count), so a batch remains bounded
+    /// even when several sessions hit the existing 512 KiB per-session cap.
+    static let indexBatchExcerptByteLimit = 4 * 1024 * 1024
+    static let indexBatchEntryLimit = 128
+
     public init(
         homeDirectory: String = RealHomeDirectory.path,
         store: SessionIndexStore,
@@ -60,13 +66,32 @@ public actor SessionIndexService {
         var seen: Set<String> = []
         let total = files.count
         var done = 0
+        var batch: [SessionIndexStore.IndexBatchEntry] = []
+        var batchExcerptBytes = 0
         for file in files {
             let hash = Self.pathHash(file.url.path)
             seen.insert(hash)
-            await index(file: file.url, adapter: file.adapter, pathHash: hash, bodies: indexBodies)
+            if let entry = await prepareIndexEntry(
+                file: file.url,
+                adapter: file.adapter,
+                pathHash: hash,
+                bodies: indexBodies
+            ) {
+                let entryBytes = entry.excerpts?.reduce(0) { $0 + $1.excerpt.utf8.count } ?? 0
+                if !batch.isEmpty,
+                   batchExcerptBytes + entryBytes > Self.indexBatchExcerptByteLimit
+                    || batch.count >= Self.indexBatchEntryLimit {
+                    await commit(batch)
+                    batch.removeAll(keepingCapacity: true)
+                    batchExcerptBytes = 0
+                }
+                batch.append(entry)
+                batchExcerptBytes += entryBytes
+            }
             done += 1
             progress?(done, total)
         }
+        await commit(batch)
 
         do {
             try await store.pruneMissing(existingPathHashes: seen)
@@ -147,38 +172,40 @@ public actor SessionIndexService {
         )
     }
 
-    // MARK: - One file
+    // MARK: - Bounded rebuild batches
 
-    private func index(
+    private func prepareIndexEntry(
         file url: URL,
         adapter: any SessionProviderAdapter,
         pathHash: String,
         bodies: Bool
-    ) async {
-        guard let fingerprint = Self.fingerprint(url) else { return }
+    ) async -> SessionIndexStore.IndexBatchEntry? {
+        guard let fingerprint = Self.fingerprint(url) else { return nil }
         do {
             if let cursor = try await store.fileCursor(pathHash: pathHash),
                cursor.mtimeNanos == fingerprint.mtimeNanos,
                cursor.size == fingerprint.size {
-                return
+                return nil
             }
-            let summary = try adapter.extractMetadata(fileURL: url)
-            let row = try await store.upsertSession(summary)
-            if bodies {
-                let document = try adapter.parseTranscript(fileURL: url, range: nil)
-                try await store.replaceMessages(
-                    sessionRow: row,
-                    excerpts: Self.excerpts(from: document, provider: summary.provider)
+            return try autoreleasepool {
+                let summary = try adapter.extractMetadata(fileURL: url)
+                let excerpts: [SessionIndexStore.MessageExcerpt]?
+                if bodies {
+                    let document = try adapter.parseTranscript(fileURL: url, range: nil)
+                    excerpts = Self.excerpts(from: document, provider: summary.provider)
+                } else {
+                    excerpts = nil
+                }
+                return SessionIndexStore.IndexBatchEntry(
+                    summary: summary,
+                    pathHash: pathHash,
+                    path: url.path,
+                    provider: adapter.provider,
+                    mtimeNanos: fingerprint.mtimeNanos,
+                    size: fingerprint.size,
+                    excerpts: excerpts
                 )
             }
-            try await store.saveFileCursor(
-                pathHash: pathHash,
-                path: url.path,
-                provider: adapter.provider,
-                mtimeNanos: fingerprint.mtimeNanos,
-                size: fingerprint.size,
-                sessionRow: row
-            )
         } catch {
             // The path is the user's own filesystem; log the file name
             // only, and let the next refresh retry.
@@ -186,7 +213,19 @@ public actor SessionIndexService {
                 "Session index: skipped \(adapter.provider.rawValue) file "
                     + "\(KitLog.sanitize(url.lastPathComponent))."
             )
+            return nil
         }
+    }
+
+    private func commit(_ entries: [SessionIndexStore.IndexBatchEntry]) async {
+        guard !entries.isEmpty else { return }
+        do {
+            try await store.applyIndexBatch(entries)
+        } catch {
+            KitLog.warn("Session index: committing a bounded batch failed.")
+        }
+        await store.releaseTransientMemory()
+        _ = malloc_zone_pressure_relief(nil, 0)
     }
 
     static func pathHash(_ path: String) -> String {

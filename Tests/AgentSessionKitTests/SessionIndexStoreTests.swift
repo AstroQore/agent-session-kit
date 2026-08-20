@@ -97,6 +97,45 @@ final class SessionIndexStoreTests: XCTestCase {
         XCTAssertEqual(count, 2)
     }
 
+    func testBoundedIndexBatchPreservesSessionsBodiesAndCursors() async throws {
+        let store = try makeStore()
+        let first = summary(id: "first", path: "/first.jsonl")
+        let second = summary(id: "second", path: "/second.jsonl")
+        try await store.applyIndexBatch([
+            .init(
+                summary: first,
+                pathHash: "hash-first",
+                path: first.sourcePath,
+                provider: first.provider,
+                mtimeNanos: 11,
+                size: 22,
+                excerpts: [.init(seq: 0, role: .user, excerpt: "first complete body")]
+            ),
+            .init(
+                summary: second,
+                pathHash: "hash-second",
+                path: second.sourcePath,
+                provider: second.provider,
+                mtimeNanos: 33,
+                size: 44,
+                excerpts: [.init(seq: 0, role: .tool, excerpt: "second file operation")]
+            )
+        ])
+
+        let sessionCount = try await store.sessionCount()
+        let messageCount = try await store.messageCount()
+        let firstHits = try await store.search(text: "complete body", scopes: [.user])
+        let secondHits = try await store.search(text: "file operation", scopes: [.tool])
+        XCTAssertEqual(sessionCount, 2)
+        XCTAssertEqual(messageCount, 2)
+        XCTAssertEqual(firstHits.map(\.summary.sessionID), ["first"])
+        XCTAssertEqual(secondHits.map(\.summary.sessionID), ["second"])
+        let cursor = try await store.fileCursor(pathHash: "hash-second")
+        XCTAssertEqual(cursor?.mtimeNanos, 33)
+        XCTAssertEqual(cursor?.size, 44)
+        XCTAssertNotNil(cursor?.sessionRow)
+    }
+
     func testSummariesComeBackMostRecentlyActiveFirst() async throws {
         let store = try makeStore()
         try await store.upsertSession(summary(
@@ -618,9 +657,9 @@ final class SessionIndexStoreTests: XCTestCase {
 
         let rebuilt = try makeStore()
         let remaining = try await rebuilt.sessionCount()
-        XCTAssertEqual(SessionIndexStore.schemaVersion, 4)
+        XCTAssertEqual(SessionIndexStore.schemaVersion, 5)
         XCTAssertEqual(remaining, 0)
-        XCTAssertEqual(try userVersion(), 4)
+        XCTAssertEqual(try userVersion(), 5)
 
         try await rebuilt.upsertSession(summary(harness: .claudeCode, model: "claude-fable-5"))
         let model = try await rebuilt.allSummaries().first?.model
