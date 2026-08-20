@@ -65,7 +65,12 @@ public actor SessionIndexStore {
     ///
     /// v4 also changes no columns; it backfills system and tool excerpts now
     /// that callers can choose the message roles a search is allowed to hit.
-    static let schemaVersion = 4
+    ///
+    /// v5 rebuilds the same logical index through bounded bulk transactions.
+    /// The body/search result set is unchanged; only the construction path is
+    /// different, so an interrupted v4 rebuild cannot keep its pathological
+    /// one-session-per-FTS-transaction layout.
+    static let schemaVersion = 5
 
     /// Open (or create) the index at `url`.
     ///
@@ -114,6 +119,8 @@ public actor SessionIndexStore {
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
             PRAGMA foreign_keys=ON;
+            PRAGMA temp_store=FILE;
+            PRAGMA cache_size=-32768;
             """
         guard sqlite3_exec(database, preamble, nil, nil, nil) == SQLITE_OK else {
             throw SessionIndexError.open
@@ -285,37 +292,116 @@ public actor SessionIndexStore {
         }
     }
 
-    /// Replace every indexed excerpt for one session. The delete trigger
-    /// clears the old FTS rows, so this is also how a shrinking
-    /// transcript stops matching its removed text.
-    public func replaceMessages(sessionRow: Int64, excerpts: [MessageExcerpt]) throws {
+    public struct IndexBatchEntry: Sendable {
+        public let summary: SessionSummary
+        public let pathHash: String
+        public let path: String
+        public let provider: SessionProvider
+        public let mtimeNanos: Int64
+        public let size: Int64
+        /// `nil` means metadata-only indexing. An empty array deliberately
+        /// clears a session whose readable transcript became empty.
+        public let excerpts: [MessageExcerpt]?
+
+        public init(
+            summary: SessionSummary,
+            pathHash: String,
+            path: String,
+            provider: SessionProvider,
+            mtimeNanos: Int64,
+            size: Int64,
+            excerpts: [MessageExcerpt]?
+        ) {
+            self.summary = summary
+            self.pathHash = pathHash
+            self.path = path
+            self.provider = provider
+            self.mtimeNanos = mtimeNanos
+            self.size = size
+            self.excerpts = excerpts
+        }
+    }
+
+    /// Commits a bounded group of sessions as one FTS transaction. Building a
+    /// large index one session per transaction creates thousands of tiny FTS5
+    /// segments and repeatedly merges them; batching keeps both segment count
+    /// and merge working sets bounded without dropping a single excerpt.
+    public func applyIndexBatch(_ entries: [IndexBatchEntry]) throws {
+        guard !entries.isEmpty else { return }
         try execute("BEGIN IMMEDIATE")
         do {
-            try run("DELETE FROM session_messages WHERE session_row = ?", [.integer(sessionRow)])
-            if !excerpts.isEmpty {
-                let statement = try prepare(
-                    "INSERT INTO session_messages(session_row, seq, role, excerpt) VALUES(?, ?, ?, ?)"
-                )
-                defer { sqlite3_finalize(statement) }
-                for excerpt in excerpts {
-                    sqlite3_reset(statement)
-                    sqlite3_clear_bindings(statement)
-                    bindAll([
-                        .integer(sessionRow),
-                        .integer(Int64(excerpt.seq)),
-                        .text(excerpt.role.rawValue),
-                        .text(excerpt.excerpt)
-                    ], to: statement)
-                    guard sqlite3_step(statement) == SQLITE_DONE else {
-                        throw SessionIndexError.statement
-                    }
+            for entry in entries {
+                let row = try upsertSession(entry.summary)
+                if let excerpts = entry.excerpts {
+                    try replaceMessagesUncommitted(sessionRow: row, excerpts: excerpts)
                 }
+                try saveFileCursor(
+                    pathHash: entry.pathHash,
+                    path: entry.path,
+                    provider: entry.provider,
+                    mtimeNanos: entry.mtimeNanos,
+                    size: entry.size,
+                    sessionRow: row
+                )
             }
             try execute("COMMIT")
         } catch {
             try? execute("ROLLBACK")
             throw error
         }
+    }
+
+    /// Replace every indexed excerpt for one session. The delete trigger
+    /// clears the old FTS rows, so this is also how a shrinking
+    /// transcript stops matching its removed text.
+    public func replaceMessages(sessionRow: Int64, excerpts: [MessageExcerpt]) throws {
+        try execute("BEGIN IMMEDIATE")
+        do {
+            try replaceMessagesUncommitted(sessionRow: sessionRow, excerpts: excerpts)
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    private func replaceMessagesUncommitted(
+        sessionRow: Int64,
+        excerpts: [MessageExcerpt]
+    ) throws {
+        try run("DELETE FROM session_messages WHERE session_row = ?", [.integer(sessionRow)])
+        guard !excerpts.isEmpty else { return }
+        let statement = try prepare(
+            "INSERT INTO session_messages(session_row, seq, role, excerpt) VALUES(?, ?, ?, ?)"
+        )
+        defer { sqlite3_finalize(statement) }
+        for excerpt in excerpts {
+            sqlite3_reset(statement)
+            sqlite3_clear_bindings(statement)
+            bindAll([
+                .integer(sessionRow),
+                .integer(Int64(excerpt.seq)),
+                .text(excerpt.role.rawValue),
+                .text(excerpt.excerpt)
+            ], to: statement)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw SessionIndexError.statement
+            }
+        }
+    }
+
+    /// Asks SQLite to release connection-local caches after each bulk batch.
+    /// The host additionally applies malloc-zone pressure relief, so neither
+    /// layer retains a rebuild-sized high-water mark.
+    public func releaseTransientMemory() {
+        guard let database else { return }
+        _ = sqlite3_db_release_memory(database)
+        var logFrames: Int32 = 0
+        var checkpointedFrames: Int32 = 0
+        _ = sqlite3_wal_checkpoint_v2(
+            database, nil, SQLITE_CHECKPOINT_PASSIVE,
+            &logFrames, &checkpointedFrames
+        )
     }
 
     /// Fingerprint of a file as of its last successful index pass.

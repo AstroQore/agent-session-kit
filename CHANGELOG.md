@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Full-text session rebuilds now have a bounded working set.** Schema v5
+  still indexes every eligible session and the same title, user, assistant,
+  system, tool, and file-operation excerpts, but commits them in transactions
+  capped at 4 MiB or 128 sessions instead of one FTS5 segment per session.
+  Each batch releases SQLite caches and applies malloc-zone pressure relief,
+  preventing a large first-run rebuild from retaining a multi-gigabyte heap.
+  SQLite temporary storage is file-backed and its page cache is capped at
+  32 MiB; search semantics, snippets, roles, and the existing 512 KiB
+  per-session body policy are unchanged.
+
 ## [0.4.1] - 2026-08-20
 
 Release validation no longer races an FSEvents stream rearm when a watched
