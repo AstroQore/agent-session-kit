@@ -691,6 +691,76 @@ struct CodexLiveAdapterDiscoveryTests {
         #expect(seed.parent == SessionKey(harness: .codex, sessionID: Self.live))
         #expect(seed.parentLink == .subagent(toolUseID: nil))
         #expect(seed.entrypoint == "subagent")
+        // And it says *what kind* of spawned thread it is, in the encoding the
+        // on-disk index already uses, so a host has one parse for both layers.
+        #expect(seed.variant == "auto-review:\(Self.live)")
+        #expect(
+            CodexSessionAdapter.autoReviewParentSessionID(providerVariant: seed.variant)
+                == Self.live
+        )
+    }
+
+    @Test("a guardian rollout with only a parent thread id still names its root")
+    func guardianParentThreadFallback() async throws {
+        let home = CodexHome(tree: TemporaryTree())
+        let today = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        let day = (today.year ?? 2026, today.month ?? 1, today.day ?? 1)
+        let guardianID = "33333333-4444-5555-6666-777777777777"
+        // No `session_id` at all: the only thing pointing anywhere is
+        // `parent_thread_id`, which is read here precisely because the header
+        // says this is a guardian run. On an ordinary thread it can name an
+        // intermediate sub-agent and is still not trusted.
+        home.rollout(
+            sessionID: guardianID,
+            day: day,
+            contents: """
+                {"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"\(guardianID)","parent_thread_id":"\(Self.live)","cwd":"/Users/example/code/demo","originator":"codex_cli_rs","source":{"subagent":{"other":"guardian"}}}}
+
+                """)
+
+        let sources = try await CodexLiveAdapter().discover(
+            home: home.path, activeSince: Date().addingTimeInterval(-3600))
+        let seed = try #require(sources.first?.seedIdentity)
+        #expect(seed.variant == "auto-review:\(Self.live)")
+        #expect(seed.parent == SessionKey(harness: .codex, sessionID: Self.live))
+        #expect(seed.parentLink == .subagent(toolUseID: nil))
+    }
+
+    @Test("the review runtime is recognised without a guardian marker")
+    func reviewRuntimeIsRecognised() async throws {
+        let home = CodexHome(tree: TemporaryTree())
+        let today = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        let day = (today.year ?? 2026, today.month ?? 1, today.day ?? 1)
+        let reviewID = "44444444-5555-6666-7777-888888888888"
+        home.rollout(
+            sessionID: reviewID,
+            day: day,
+            contents: """
+                {"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"\(reviewID)","session_id":"\(Self.live)","thread_source":"subagent","cwd":"/Users/example/code/demo","originator":"codex_cli_rs","source":"cli"}}
+                {"timestamp":"2026-01-01T00:00:01.000Z","type":"turn_context","payload":{"model":"codex-auto-review"}}
+
+                """)
+
+        let sources = try await CodexLiveAdapter().discover(
+            home: home.path, activeSince: Date().addingTimeInterval(-3600))
+        let seed = try #require(sources.first?.seedIdentity)
+        #expect(seed.variant == "auto-review:\(Self.live)")
+        #expect(seed.model == "codex-auto-review")
+    }
+
+    @Test("an ordinary thread keeps its originator in the variant")
+    func ordinaryThreadKeepsItsOriginator() async throws {
+        let home = CodexHome(tree: TemporaryTree())
+        let today = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        home.rollout(
+            sessionID: Self.live,
+            day: (today.year ?? 2026, today.month ?? 1, today.day ?? 1))
+
+        let sources = try await CodexLiveAdapter().discover(
+            home: home.path, activeSince: Date().addingTimeInterval(-3600))
+        let seed = try #require(sources.first?.seedIdentity)
+        #expect(seed.variant == "codex_cli_rs")
+        #expect(CodexSessionAdapter.autoReviewParentSessionID(providerVariant: seed.variant) == nil)
     }
 
     @Test("the tailer produces exactly what the mapper does")

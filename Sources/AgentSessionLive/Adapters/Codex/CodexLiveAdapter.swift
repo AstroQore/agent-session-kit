@@ -13,7 +13,10 @@ import Synchronization
 /// VS Code extension, the desktop app, `codex exec`, and every sub-agent any
 /// of them spawns — writes into that one tree; only the header's `originator`
 /// separates them, and this adapter keeps it in
-/// ``SessionIdentity/variant``.
+/// ``SessionIdentity/variant``. The one exception is a guardian / Auto Review
+/// rollout, which spends that field on `auto-review:<root session id>` — the
+/// same encoding `SessionSummary.providerVariant` carries, so a host has one
+/// parse rather than one per layer.
 ///
 /// ## Two harnesses, one store
 ///
@@ -313,20 +316,55 @@ public struct CodexLiveAdapter: SourceAdapter {
         identity.entrypoint = entrypoint(meta)
         identity.model = head.first { $0.type == "turn_context" }?.payload["model"]?.string
 
+        // A guardian rollout says what it is in the same place the on-disk
+        // index does, so a host can recognise an Auto Review run through one
+        // parse whichever layer handed it the session. The originator is
+        // displaced rather than kept alongside: `providerVariant` on a
+        // `SessionSummary` is already this and only this, and a second
+        // encoding would be a second thing to keep in step.
+        let autoReviewRoot = Self.autoReviewRootID(meta: meta, model: identity.model)
+        if let autoReviewRoot {
+            identity.variant = CodexSessionAdapter.autoReviewVariantPrefix + autoReviewRoot
+        }
+
         if let link = linker.link(forChild: sessionID) {
             identity.parent = link.parent
             identity.parentLink = .subagent(toolUseID: link.toolUseID)
-        } else if let rootID = meta?["session_id"]?.string,
+        } else if let rootID = meta?["session_id"]?.string ?? autoReviewRoot,
                   rootID.caseInsensitiveCompare(sessionID) != .orderedSame {
             // A thread Codex spawned itself keeps its own id in `id` and the
             // thread it belongs to in `session_id`. That names an ancestor
             // rather than necessarily the direct parent, and it carries no
             // call id, so a linker edge — which has both — always wins.
+            //
+            // `parent_thread_id` is the fallback and only for a guardian run,
+            // which is what `autoReviewRootID(meta:model:)` will have fallen
+            // back to: on an ordinary thread it can name an intermediate
+            // sub-agent, and preferring it would file a review under a middle
+            // of a chain rather than under the thread a person started.
             identity.parent = SessionKey(harness: harness, sessionID: rootID)
             identity.parentLink = .subagent(toolUseID: nil)
         }
 
         return SessionSource(key: key, primaryPath: file.path, seedIdentity: identity)
+    }
+
+    /// The root thread a guardian / Auto Review rollout belongs to, or `nil`
+    /// for an ordinary one.
+    ///
+    /// The same two tells `CodexSessionAdapter` reads off a summary, against
+    /// the same header: `source.subagent.other == "guardian"`, and the review
+    /// runtime — a `thread_source` of `subagent` running the
+    /// `codex-auto-review` model. Kept in step with that one by having exactly
+    /// the same shape; the encoding they both produce is
+    /// ``CodexSessionAdapter/autoReviewVariantPrefix``.
+    static func autoReviewRootID(meta: CodexJSON?, model: String?) -> String? {
+        guard let meta else { return nil }
+        let isGuardian = meta["source"]?["subagent"]?["other"]?.string?.lowercased() == "guardian"
+        let isReviewRuntime = meta["thread_source"]?.string?.lowercased() == "subagent"
+            && model?.lowercased() == "codex-auto-review"
+        guard isGuardian || isReviewRuntime else { return nil }
+        return meta.firstString("session_id", "parent_thread_id")
     }
 
     private func entrypoint(_ meta: CodexJSON?) -> String? {

@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **The live layer names an Auto Review run the same way the index does.**
+  `CodexLiveAdapter` seeds a guardian rollout's `SessionIdentity.variant` with
+  `auto-review:<root session id>` rather than its originator, so
+  `CodexSessionAdapter.autoReviewParentSessionID(providerVariant:)` is one
+  parse for a session whichever layer produced it. 0.4.0 added the encoding to
+  `SessionSummary.providerVariant` only, which left a host tailing live
+  sessions unable to tell a review from an ordinary thread without reading the
+  rollout header itself. An ordinary thread still carries its originator, and
+  nothing consults the variant for a Codex resume. `parent_thread_id` is now
+  read as the root as well — but only for a rollout whose header already
+  identifies it as a guardian run, where it is the last thing pointing
+  anywhere; on an ordinary thread it can name an intermediate sub-agent and is
+  still not trusted.
+
 ## [0.4.2] - 2026-08-20
 
 Full-text session indexing now rebuilds large derived indexes with a bounded
