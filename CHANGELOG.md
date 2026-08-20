@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-20
+
+Full-text session indexing now rebuilds large derived indexes with a bounded
+working set while preserving the complete existing search surface.
+
 ### Fixed
 - **Full-text session rebuilds now have a bounded working set.** Schema v5
   still indexes every eligible session and the same title, user, assistant,
