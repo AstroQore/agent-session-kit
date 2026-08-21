@@ -356,6 +356,75 @@ struct AntigravityConversationReaderTests {
         #expect(AntigravityConversationReader(databaseURL: url).stepCount() == 6)
     }
 
+    @Test("the model comes from the newest gen_metadata turn that named one")
+    func recentModel() throws {
+        let home = AntigravityHome()
+        let url = try home.write(id: conversationA, steps: canonicalSteps())
+        try home.writeGenMetadata(id: conversationA, turns: [
+            .init(idx: 0, seconds: base, model: "Gemini 3.5 Pro", inputTokens: 900),
+            .init(idx: 1, seconds: base + 60, model: "Gemini 3.5 Flash (High)", outputTokens: 40)
+        ])
+        #expect(AntigravityConversationReader(databaseURL: url).recentModel()
+            == "Gemini 3.5 Flash (High)")
+    }
+
+    @Test("a turn with only a router alias still names something")
+    func routedModelFallback() throws {
+        let home = AntigravityHome()
+        let url = try home.write(id: conversationA, steps: canonicalSteps())
+        try home.writeGenMetadata(id: conversationA, turns: [
+            .init(idx: 0, seconds: base, routedModel: "gemini-default")
+        ])
+        #expect(AntigravityConversationReader(databaseURL: url).recentModel() == "gemini-default")
+    }
+
+    @Test("a usage record with no timestamp still names its model")
+    func modelWithoutATimestamp() throws {
+        let home = AntigravityHome()
+        let url = try home.write(id: conversationA, steps: canonicalSteps())
+        let row = AntigravityDatabaseFixture.GenMetadataFixture(
+            idx: 0, seconds: base, routedModel: "gemini-3.7-flash",
+            modelEnum: "MODEL_PLACEHOLDER_M298", omitTimestamp: true)
+        try home.writeGenMetadata(id: conversationA, turns: [row])
+
+        // The record is not a turn — a cost scanner cannot place it in a day
+        // — and the model is on it all the same.
+        #expect(AntigravityGenMetadataReader.decodeTurn(blob: row.blob) == nil)
+        #expect(AntigravityConversationReader(databaseURL: url).recentModel()
+            == "gemini-3.7-flash")
+    }
+
+    @Test("the display name prefers a label, then the alias, then the enum")
+    func modelNamePreference() {
+        let labelled = AntigravityDatabaseFixture.GenMetadataFixture(
+            idx: 0, seconds: base, model: "Gemini 3.5 Flash (High)",
+            routedModel: "gemini-default", modelEnum: "MODEL_PLACEHOLDER_M84")
+        let names = AntigravityGenMetadataReader.modelNames(blob: labelled.blob)
+        #expect(names.label == "Gemini 3.5 Flash (High)")
+        #expect(names.routed == "gemini-default")
+        #expect(names.modelEnum == "MODEL_PLACEHOLDER_M84")
+        #expect(names.display == "Gemini 3.5 Flash (High)")
+
+        // Pricing wants the enum; a row on a board wants the alias, because
+        // `MODEL_PLACEHOLDER_M84` names nothing a reader knows.
+        let unlabelled = AntigravityDatabaseFixture.GenMetadataFixture(
+            idx: 0, seconds: base, routedModel: "gemini-3.7-flash",
+            modelEnum: "MODEL_PLACEHOLDER_M298")
+        #expect(AntigravityGenMetadataReader.modelNames(blob: unlabelled.blob).display
+            == "gemini-3.7-flash")
+        #expect(AntigravityGenMetadataReader.decodeTurn(blob: unlabelled.blob)?.model
+            == "MODEL_PLACEHOLDER_M298")
+
+        #expect(AntigravityGenMetadataReader.modelNames(blob: Data()).display == nil)
+    }
+
+    @Test("a conversation that has not billed a turn claims no model")
+    func noModelYet() throws {
+        let home = AntigravityHome()
+        let url = try home.write(id: conversationA, steps: canonicalSteps())
+        #expect(AntigravityConversationReader(databaseURL: url).recentModel() == nil)
+    }
+
     @Test("a database that is not there answers nil, not a crash")
     func missing() {
         let reader = AntigravityConversationReader(
@@ -363,7 +432,116 @@ struct AntigravityConversationReaderTests {
         #expect(reader.steps() == nil)
         #expect(reader.stepCount() == nil)
         #expect(reader.trajectoryMeta() == nil)
+        #expect(reader.recentModel() == nil)
         #expect(reader.parentReferences().isEmpty)
+    }
+}
+
+// MARK: - Workspace attribution
+
+@Suite("AntigravityWorkspaceIndex")
+struct AntigravityWorkspaceIndexTests {
+    private func line(_ text: String) -> Data { Data(text.utf8) }
+
+    @Test("the startup banner gives up the launch directory")
+    func banner() {
+        let workspace = AntigravityWorkspaceIndex.workspaceDirectory(in: line(
+            "I0821 16:12:26 1 server.go:270] Creating CLI server backend: product=antigravity "
+                + "workspaceDirs=[/Users/example/code/demo] appDataDir=/Users/example/.gemini"))
+        #expect(workspace == "/Users/example/code/demo")
+    }
+
+    @Test("a space inside a directory name is not a separator, one before a path is")
+    func bannerSpacing() {
+        #expect(
+            AntigravityWorkspaceIndex.workspaceDirectory(
+                in: line("workspaceDirs=[/Users/example/agy misc/news] appDataDir=/x"))
+                == "/Users/example/agy misc/news")
+        #expect(
+            AntigravityWorkspaceIndex.workspaceDirectory(
+                in: line("workspaceDirs=[/Users/example/one /Users/example/two] appDataDir=/x"))
+                == "/Users/example/one")
+        // A relative or empty list is not a directory anybody can group by.
+        #expect(AntigravityWorkspaceIndex.workspaceDirectory(in: line("workspaceDirs=[]")) == nil)
+        #expect(
+            AntigravityWorkspaceIndex.workspaceDirectory(in: line("workspaceDirs=[./here]")) == nil)
+        #expect(AntigravityWorkspaceIndex.workspaceDirectory(in: line("nothing here")) == nil)
+    }
+
+    @Test("an id is read off a line however that line phrases it")
+    func idsComeOffAnyLine() {
+        #expect(
+            AntigravityWorkspaceIndex.conversationIDs(
+                in: line("server.go:1074] Created conversation \(conversationA)"))
+                == [conversationA])
+        #expect(
+            AntigravityWorkspaceIndex.conversationIDs(
+                in: line("server.go:2704] GetConversationDetail: found conversation "
+                    + "\(conversationA.uppercased()) (active=true)"))
+                == [conversationA])
+        // The line some conversations get and no other: it never says
+        // "conversation", and the id on it is still theirs.
+        #expect(
+            AntigravityWorkspaceIndex.conversationIDs(
+                in: line("server.go:1123] Stream goroutine exited for \(conversationB), "
+                    + "sending completion signal"))
+                == [conversationB])
+        // Anything that is not 8-4-4-4-12 hex is not an id.
+        #expect(AntigravityWorkspaceIndex.conversationIDs(in: line("conversation none")).isEmpty)
+        #expect(
+            AntigravityWorkspaceIndex.conversationIDs(
+                in: line("request AAAABBBBCCCCDDDD1234-wxyz bot-11111111-2222")).isEmpty)
+    }
+
+    @Test("a log with no banner attributes nothing")
+    func logWithoutBanner() throws {
+        let home = AntigravityHome()
+        let url = try home.writeLog(
+            name: "cli-20260821_161225.log", workspace: nil, conversations: [conversationA])
+        #expect(AntigravityWorkspaceIndex.logWorkspaces(at: url).isEmpty)
+    }
+
+    @Test("the prompt history maps a conversation to where it was typed")
+    func history() throws {
+        let home = AntigravityHome()
+        try home.writeHistory([
+            (id: conversationA, workspace: "/Users/example/code/demo", display: "run the tests"),
+            (id: nil, workspace: "/Users/example/elsewhere", display: "unattributable"),
+            (id: conversationB, workspace: nil, display: "exit")
+        ])
+        let rows = AntigravityWorkspaceIndex.historyWorkspaces(
+            at: AntigravityWorkspaceIndex.historyPath(
+                home: home.path, root: AntigravityLiveAdapter.cliRoot))
+        #expect(rows == [conversationA: "/Users/example/code/demo"])
+    }
+
+    @Test("the newest logs are the ones read, oldest first")
+    func recentLogsAreNewestWritten() throws {
+        let home = AntigravityHome()
+        let now = Date()
+        for index in 0..<(AntigravityWorkspaceIndex.logsScanned + 3) {
+            try home.writeLog(
+                name: "cli-2026081\(index % 10)_00000\(index).log",
+                workspace: "/Users/example/run\(index)",
+                conversations: [],
+                modified: now.addingTimeInterval(TimeInterval(index) * -600))
+        }
+        let logs = AntigravityWorkspaceIndex.recentLogs(
+            in: AntigravityWorkspaceIndex.logDirectory(
+                home: home.path, root: AntigravityLiveAdapter.cliRoot))
+        #expect(logs.count == AntigravityWorkspaceIndex.logsScanned)
+        // Oldest first, so a merge in this order leaves the newest run on top.
+        let stamps = logs.compactMap { FileStamp.read(path: $0.path)?.modified }
+        #expect(stamps == stamps.sorted())
+    }
+
+    @Test("a log directory that is not there is not an error")
+    func missingLogDirectory() {
+        let logs = AntigravityWorkspaceIndex.recentLogs(
+            in: URL(fileURLWithPath: "/nonexistent/.gemini/antigravity-cli/log"))
+        #expect(logs.isEmpty)
+        #expect(AntigravityWorkspaceIndex.historyWorkspaces(
+            at: URL(fileURLWithPath: "/nonexistent/history.jsonl")).isEmpty)
     }
 }
 
@@ -953,6 +1131,139 @@ struct AntigravityLiveAdapterDiscoveryTests {
         }
         #expect(children == [SessionKey(harness: .antigravity, sessionID: conversationB)])
         #expect(canonical(url.path) == canonical(parent.primaryPath))
+    }
+
+    @Test("a conversation the index forgot takes its workspace from the CLI log")
+    func workspaceFromLog() async throws {
+        let home = AntigravityHome()
+        try home.write(id: conversationA, steps: canonicalSteps())
+        try home.writeLog(
+            name: "cli-20260821_161225.log",
+            workspace: "/Users/example/code/demo",
+            conversations: [conversationA])
+
+        let sources = try await AntigravityLiveAdapter().discover(
+            home: home.path, activeSince: Date().addingTimeInterval(-3_600))
+        #expect(try #require(sources.first).seedIdentity.cwd == "/Users/example/code/demo")
+    }
+
+    @Test("the index outranks the prompt history, and the history outranks a log")
+    func workspacePrecedence() async throws {
+        let home = AntigravityHome()
+        for id in [conversationA, conversationB, conversationC] {
+            try home.write(id: id, steps: canonicalSteps())
+        }
+        try home.writeSummaries([
+            .init(id: conversationA, title: "Indexed",
+                  workspaces: #"["file:///Users/example/from-index"]"#),
+            .init(id: conversationB, title: "Typed"),
+            .init(id: conversationC, title: "Logged")
+        ])
+        try home.writeHistory([
+            (id: conversationA, workspace: "/Users/example/from-history", display: "one"),
+            (id: conversationB, workspace: "/Users/example/from-history", display: "two")
+        ])
+        try home.writeLog(
+            name: "cli-20260821_161225.log",
+            workspace: "/Users/example/from-log",
+            conversations: [conversationA, conversationB, conversationC])
+
+        let sources = try await AntigravityLiveAdapter().discover(
+            home: home.path, activeSince: Date().addingTimeInterval(-3_600))
+        let byID = Dictionary(
+            sources.map { ($0.key.sessionID, $0.seedIdentity) }, uniquingKeysWith: { a, _ in a })
+        #expect(byID[conversationA]?.cwd == "/Users/example/from-index")
+        #expect(byID[conversationB]?.cwd == "/Users/example/from-history")
+        #expect(byID[conversationC]?.cwd == "/Users/example/from-log")
+    }
+
+    @Test("the run that touched a conversation last is the one that names it")
+    func newestLogWins() async throws {
+        let home = AntigravityHome()
+        try home.write(id: conversationA, steps: canonicalSteps())
+        let now = Date()
+        try home.writeLog(
+            name: "cli-20260820_090000.log", workspace: "/Users/example/yesterday",
+            conversations: [conversationA], modified: now.addingTimeInterval(-86_400))
+        try home.writeLog(
+            name: "cli-20260821_161225.log", workspace: "/Users/example/today",
+            conversations: [conversationA], modified: now)
+
+        let sources = try await AntigravityLiveAdapter().discover(
+            home: home.path, activeSince: now.addingTimeInterval(-3_600))
+        #expect(try #require(sources.first).seedIdentity.cwd == "/Users/example/today")
+    }
+
+    @Test("the seed identity carries the model the newest turn billed against")
+    func seedsTheModel() async throws {
+        let home = AntigravityHome()
+        try home.write(id: conversationA, steps: canonicalSteps())
+        try home.write(id: conversationB, steps: canonicalSteps())
+        try home.writeGenMetadata(id: conversationA, turns: [
+            .init(idx: 0, seconds: base, model: "Gemini 3.5 Pro"),
+            .init(idx: 1, seconds: base + 60, model: "Gemini 3.5 Flash (High)")
+        ])
+
+        let sources = try await AntigravityLiveAdapter().discover(
+            home: home.path, activeSince: Date().addingTimeInterval(-3_600))
+        let byID = Dictionary(
+            sources.map { ($0.key.sessionID, $0.seedIdentity) }, uniquingKeysWith: { a, _ in a })
+        #expect(byID[conversationA]?.model == "Gemini 3.5 Flash (High)")
+        // Nothing is invented for a conversation whose store never named one.
+        #expect(byID[conversationB]?.model == nil)
+    }
+
+    @Test("a second sweep re-reads neither the side files nor gen_metadata")
+    func identitySourcesAreCached() async throws {
+        let home = AntigravityHome()
+        try home.write(id: conversationA, steps: canonicalSteps())
+        try home.writeGenMetadata(id: conversationA, turns: [
+            .init(idx: 0, seconds: base, model: "Gemini 3.5 Pro")
+        ])
+        try home.writeHistory([
+            (id: conversationB, workspace: "/Users/example/elsewhere", display: "one")
+        ])
+        try home.writeLog(
+            name: "cli-20260821_161225.log", workspace: "/Users/example/code/demo",
+            conversations: [conversationA])
+
+        let adapter = AntigravityLiveAdapter()
+        let cutoff = Date().addingTimeInterval(-3_600)
+        let first = try await DiscoveryIO.counting {
+            try await adapter.discover(home: home.path, activeSince: cutoff)
+        }
+        let second = try await DiscoveryIO.counting {
+            try await adapter.discover(home: home.path, activeSince: cutoff)
+        }
+        #expect(first.value.first?.seedIdentity.cwd == "/Users/example/code/demo")
+        #expect(first.value.first?.seedIdentity.model == "Gemini 3.5 Pro")
+        #expect(first.cost.fileReads > 0)
+        #expect(second.cost.fileReads == 0)
+        #expect(second.value.first?.seedIdentity.cwd == first.value.first?.seedIdentity.cwd)
+        #expect(second.value.first?.seedIdentity.model == first.value.first?.seedIdentity.model)
+    }
+
+    @Test("a conversation with a workspace on its own row costs no side-file read")
+    func indexedConversationsSkipTheSideFiles() async throws {
+        let home = AntigravityHome()
+        try home.write(id: conversationA, steps: canonicalSteps())
+        try home.writeSummaries([
+            .init(id: conversationA, title: "Indexed",
+                  workspaces: #"["file:///Users/example/from-index"]"#)
+        ])
+        try home.writeLog(
+            name: "cli-20260821_161225.log", workspace: "/Users/example/from-log",
+            conversations: [conversationA])
+
+        let adapter = AntigravityLiveAdapter()
+        let result = try await DiscoveryIO.counting {
+            try await adapter.discover(
+                home: home.path, activeSince: Date().addingTimeInterval(-3_600))
+        }
+        #expect(result.value.first?.seedIdentity.cwd == "/Users/example/from-index")
+        // The summaries store and the conversation's own gen_metadata, and
+        // neither the log directory nor the prompt history.
+        #expect(result.cost.fileReads == 2)
     }
 
     @Test("a killed conversation ends, once")

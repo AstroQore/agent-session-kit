@@ -18,6 +18,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ModelNames.display` orders the three names for a reader — label, router
   alias, internal enum — rather than for a price list, which is `Turn.model`'s
   order and is unchanged.
+- **`AntigravityConversationReader.recentModel(limit:)`** — the newest model a
+  conversation billed against, decoded from a bounded window at the end of
+  `gen_metadata`. `steps` does not record it: a reply and a tool call look the
+  same whichever model served them.
+
+### Fixed
+- **An AntiGravity session arrives with the directory it was launched in.**
+  `conversation_summaries.workspace_uris` is the conversation's own row and
+  still wins, but it is populated for a fraction of the databases on disk — the
+  store goes stale, and a conversation the CLI opened non-interactively never
+  reaches it — so a live board filed most of a day's AntiGravity work under no
+  project at all. Two side files the CLI writes answer for the rest:
+  `history.jsonl`, which records the directory a person typed a prompt in, and
+  `log/cli-<stamp>.log`, whose startup banner names the directories the server
+  was launched over and whose body names every conversation that run handled.
+  One server, one workspace. Both are read bounded and cached against their own
+  mtimes, so the run still being written is the only one re-read, a sweep that
+  changes nothing reads nothing, and a conversation whose row already had a
+  workspace costs neither. The conversation database is not a third source — it
+  records a trajectory, a cascade, and a project label, and nowhere in it is the
+  directory the CLI was launched in.
+- **A live AntiGravity identity carries its model.** Discovery seeds
+  `SessionIdentity.model` from the conversation's own `gen_metadata`, cached
+  against the store and its WAL. Nothing else in the live layer could: the
+  tailer reads `steps`, and the summaries index records no model at all.
 
 ### Changed
 - **The live layer names an Auto Review run the same way the index does.**

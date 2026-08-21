@@ -18,9 +18,16 @@ import Foundation
 /// `conversations/<uuid>.db`, a WAL-mode SQLite database per conversation, and
 /// `presence/<uuid>.lock`, a zero-byte file whose mtime is touched while the
 /// conversation is attached. Only the CLI root has
-/// `conversation_summaries.db`, and it is the only place a title, a workspace,
-/// a parent conversation, or a busy flag is recorded at all — the IDE writes
+/// `conversation_summaries.db`, and it is the only place a title, a parent
+/// conversation, or a busy flag is recorded at all — the IDE writes
 /// `agyhub_summaries_proto.pb` instead, which nothing here decodes.
+///
+/// The workspace is the one fact with more than one source. The summaries
+/// store's `workspace_uris` is the conversation's own row and wins; the CLI's
+/// `history.jsonl` and its `log/cli-<stamp>.log` answer for the conversations
+/// that row never reached, which on a real machine is most of them. See
+/// ``AntigravityWorkspaceIndex``. The model has exactly one source, and it is
+/// not the one a tailer reads: `gen_metadata`, decoded a few rows deep.
 ///
 /// ## Discovery is a union, not an index lookup
 ///
@@ -92,6 +99,13 @@ public struct AntigravityLiveAdapter: SourceAdapter {
     /// The summaries index's rows, keyed by the store and its WAL. See
     /// ``summaries(home:)``.
     private let summaryCache = DiscoveryCache<[FileStamp], [AntigravitySummariesReader.Summary]>()
+    /// `conversationId → workspace` from one side file, keyed by that file.
+    /// One entry per CLI log plus one for the prompt history, so a run still
+    /// being written re-reads and the rest do not. See ``workspaces(home:)``.
+    private let workspaceCache = DiscoveryCache<FileStamp, [String: String]>()
+    /// The newest model one conversation's `gen_metadata` named, keyed by the
+    /// store and its WAL. See ``model(of:)``.
+    private let modelCache = DiscoveryCache<[FileStamp], String?>()
 
     /// Creates an adapter.
     ///
@@ -212,8 +226,20 @@ public struct AntigravityLiveAdapter: SourceAdapter {
             }
         }
 
+        // The side files are read only when the index left somebody without a
+        // workspace, which on a machine whose summaries store is current is
+        // never.
+        let unattributed = candidates.contains { byID[$0.key]?.workspacePath == nil }
+        let fallback = unattributed ? workspaces(home: home) : [:]
+
         return candidates.sorted { $0.key < $1.key }.map { id, candidate in
-            source(id: id, file: candidate.url, root: candidate.root, summary: byID[id])
+            source(
+                id: id,
+                file: candidate.url,
+                root: candidate.root,
+                summary: byID[id],
+                workspace: fallback[id]
+            )
         }
     }
 
@@ -248,6 +274,58 @@ public struct AntigravityLiveAdapter: SourceAdapter {
         }
     }
 
+    /// `conversationId → workspace` for the conversations the summaries store
+    /// has no `workspace_uris` for.
+    ///
+    /// Only the CLI root is consulted: the IDE writes neither a prompt history
+    /// nor a server log, and a conversation it owns is never named in one of
+    /// `agy`'s. Each file is cached against its own mtime, so the one run
+    /// still writing is the only one re-read.
+    ///
+    /// The prompt history is applied last because it is the stronger evidence:
+    /// a person typed that prompt in that directory, where a log line only
+    /// says which server the conversation belonged to.
+    private func workspaces(home: String) -> [String: String] {
+        var out: [String: String] = [:]
+        let logs = AntigravityWorkspaceIndex.recentLogs(
+            in: AntigravityWorkspaceIndex.logDirectory(home: home, root: Self.cliRoot))
+        for log in logs {
+            let rows = workspaceCache.value(
+                path: log.path, version: .version(ofPath: log.path)
+            ) {
+                DiscoveryIO.countFileRead()
+                return AntigravityWorkspaceIndex.logWorkspaces(at: log)
+            }
+            out.merge(rows) { _, newer in newer }
+        }
+
+        let history = AntigravityWorkspaceIndex.historyPath(home: home, root: Self.cliRoot)
+        let prompts = workspaceCache.value(
+            path: history.path, version: .version(ofPath: history.path)
+        ) {
+            DiscoveryIO.countFileRead()
+            return AntigravityWorkspaceIndex.historyWorkspaces(at: history)
+        }
+        out.merge(prompts) { _, typed in typed }
+        return out
+    }
+
+    /// The newest model a conversation's `gen_metadata` named, re-read only
+    /// when its store or WAL moved.
+    ///
+    /// Discovery is where this has to happen. The table is the only place the
+    /// model is written down, and ``AntigravityConversationTailer`` reads
+    /// `steps` — where a reply and a tool call look the same whichever model
+    /// served them.
+    private func model(of file: URL) -> String? {
+        let path = file.path
+        let version = [FileStamp.version(ofPath: path), .version(ofPath: path + "-wal")]
+        return modelCache.value(path: path, version: version) {
+            DiscoveryIO.countFileRead()
+            return AntigravityConversationReader(databaseURL: file).recentModel()
+        }
+    }
+
     /// Whether a conversation has done anything recent enough to be worth a
     /// tailer.
     private func isActive(
@@ -275,13 +353,17 @@ public struct AntigravityLiveAdapter: SourceAdapter {
         id: String,
         file: URL,
         root: String,
-        summary: AntigravitySummariesReader.Summary?
+        summary: AntigravitySummariesReader.Summary?,
+        workspace: String?
     ) -> SessionSource {
         let key = SessionKey(harness: harness, sessionID: id)
         var identity = SessionIdentity(key: key, sourcePath: file.path)
         identity.variant = root == Self.cliRoot ? Self.cliVariant : Self.ideVariant
         identity.title = summary?.title
-        identity.cwd = summary?.workspacePath
+        // `workspace_uris` first: it is the conversation's own row. The side
+        // files answer for the conversations that row never reached.
+        identity.cwd = summary?.workspacePath ?? workspace
+        identity.model = model(of: file)
         // The child's own database records only that *a* subtrajectory
         // exists, never whose. The index names the parent from the child's
         // side, and that is the only place the edge is written down.

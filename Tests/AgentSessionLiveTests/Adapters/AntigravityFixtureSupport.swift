@@ -302,6 +302,90 @@ enum AntigravityDatabaseFixture {
         try insert(handle, step)
     }
 
+    // MARK: - gen_metadata
+
+    /// One `gen_metadata` row: the usage record AntiGravity writes per model
+    /// turn, and the only place in the store the model is named.
+    struct GenMetadataFixture: Sendable {
+        var idx: Int
+        var seconds: UInt64
+        /// Field 21, the precise label — `Gemini 3.5 Flash (High)`.
+        var model: String?
+        /// Field 19, the router alias — `gemini-default`.
+        var routedModel: String?
+        /// Field 20's `model_enum` — `MODEL_PLACEHOLDER_M298`.
+        var modelEnum: String?
+        var inputTokens: UInt64 = 0
+        var outputTokens: UInt64 = 0
+        /// Leaves out `9.4`, which is what AntiGravity builds from 2026-08 do
+        /// — and what makes the record undecodable as a whole turn.
+        var omitTimestamp = false
+
+        init(
+            idx: Int,
+            seconds: UInt64,
+            model: String? = nil,
+            routedModel: String? = nil,
+            modelEnum: String? = nil,
+            inputTokens: UInt64 = 0,
+            outputTokens: UInt64 = 0,
+            omitTimestamp: Bool = false
+        ) {
+            self.idx = idx
+            self.seconds = seconds
+            self.model = model
+            self.routedModel = routedModel
+            self.modelEnum = modelEnum
+            self.inputTokens = inputTokens
+            self.outputTokens = outputTokens
+            self.omitTimestamp = omitTimestamp
+        }
+
+        /// `1{4{2,3}, 9{4{1,2}}, 19, 20{1,2}, 21}` — the fields the reader
+        /// decodes and nothing it does not.
+        var blob: Data {
+            var inner = AntigravityProto.message(
+                4,
+                AntigravityProto.varintField(2, inputTokens)
+                    + AntigravityProto.varintField(3, outputTokens))
+            inner += omitTimestamp
+                ? AntigravityProto.message(9, AntigravityProto.varintField(2, 7))
+                : AntigravityProto.message(9, AntigravityProto.timestamp(4, seconds))
+            if let routedModel { inner += AntigravityProto.string(19, routedModel) }
+            if let modelEnum {
+                inner += AntigravityProto.message(
+                    20,
+                    AntigravityProto.string(1, "model_enum")
+                        + AntigravityProto.string(2, modelEnum))
+            }
+            if let model { inner += AntigravityProto.string(21, model) }
+            return Data(AntigravityProto.message(1, inner))
+        }
+    }
+
+    /// Adds `gen_metadata` rows to a conversation database that already exists.
+    static func writeGenMetadata(at url: URL, turns: [GenMetadataFixture]) throws {
+        let handle = try open(url)
+        defer { sqlite3_close_v2(handle) }
+        for turn in turns {
+            var statement: OpaquePointer?
+            let sql = "INSERT OR REPLACE INTO gen_metadata(idx, data, size) VALUES (?, ?, ?)"
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw FixtureError.sqlite(String(cString: sqlite3_errmsg(handle)))
+            }
+            defer { sqlite3_finalize(statement) }
+            let blob = turn.blob
+            sqlite3_bind_int64(statement, 1, sqlite3_int64(turn.idx))
+            _ = blob.withUnsafeBytes { raw in
+                sqlite3_bind_blob(statement, 2, raw.baseAddress, Int32(blob.count), transient)
+            }
+            sqlite3_bind_int64(statement, 3, sqlite3_int64(blob.count))
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw FixtureError.sqlite(String(cString: sqlite3_errmsg(handle)))
+            }
+        }
+    }
+
     /// One `conversation_summaries` row.
     struct SummaryFixture: Sendable {
         var id: String
@@ -416,6 +500,66 @@ struct AntigravityHome {
 
     func writeSummaries(_ rows: [AntigravityDatabaseFixture.SummaryFixture]) throws {
         try AntigravityDatabaseFixture.writeSummaries(at: summariesURL, rows: rows)
+    }
+
+    func writeGenMetadata(
+        id: String,
+        root: String = AntigravityLiveAdapter.cliRoot,
+        turns: [AntigravityDatabaseFixture.GenMetadataFixture]
+    ) throws {
+        try AntigravityDatabaseFixture.writeGenMetadata(
+            at: conversation(id: id, root: root), turns: turns)
+    }
+
+    // MARK: - The CLI's side files
+
+    /// One `log/cli-<stamp>.log`, in the shape `agy`'s Go server writes: a
+    /// startup banner naming the launch directories, then one line per
+    /// conversation the run touched.
+    @discardableResult
+    func writeLog(
+        name: String,
+        workspace: String?,
+        conversations: [String],
+        modified: Date? = nil
+    ) throws -> URL {
+        let directory = AntigravityWorkspaceIndex.logDirectory(
+            home: path, root: AntigravityLiveAdapter.cliRoot)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var lines = ["ERROR: logging before google.Init: I0821 16:12:26.499301 1 flags.go:12] starting"]
+        if let workspace {
+            lines.append(
+                "ERROR: logging before google.Init: I0821 16:12:26.529709 1 server.go:270] "
+                    + "Creating CLI server backend: product=antigravity workspaceDirs=[\(workspace)] "
+                    + "appDataDir=\(path)/.gemini/antigravity-cli cascadeManager=true")
+        }
+        for id in conversations {
+            lines.append(
+                "ERROR: logging before google.Init: I0821 16:12:33.493865 1 server.go:1074] "
+                    + "Created conversation \(id)")
+        }
+        let url = directory.appendingPathComponent(name)
+        try (lines.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
+        if let modified {
+            try? FileManager.default.setAttributes(
+                [.modificationDate: modified], ofItemAtPath: url.path)
+        }
+        return url
+    }
+
+    /// `history.jsonl`: one object per prompt a person submitted.
+    func writeHistory(_ rows: [(id: String?, workspace: String?, display: String)]) throws {
+        let url = AntigravityWorkspaceIndex.historyPath(
+            home: path, root: AntigravityLiveAdapter.cliRoot)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let lines = rows.map { row -> String in
+            var object: [String] = ["\"display\":\"\(row.display)\"", "\"timestamp\":1779249577634"]
+            if let workspace = row.workspace { object.append("\"workspace\":\"\(workspace)\"") }
+            if let id = row.id { object.append("\"conversationId\":\"\(id)\"") }
+            return "{\(object.joined(separator: ","))}"
+        }
+        try (lines.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
     }
 
     /// Creates the presence file for a conversation and returns its path.

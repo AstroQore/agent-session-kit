@@ -230,6 +230,51 @@ public struct AntigravityConversationReader: Sendable {
         }
     }
 
+    // MARK: - gen_metadata
+
+    /// Turns decoded from the end of `gen_metadata` when the model is looked
+    /// for. Two or three is usually enough; the window covers a tail of turns
+    /// a router served without naming one.
+    public static let modelWindow = 8
+
+    /// The newest model `gen_metadata` names, or `nil` when no turn has
+    /// billed against one yet.
+    ///
+    /// `steps` does not record the model — a tool call and a reply look the
+    /// same whoever served them — so this table is the only place in the
+    /// store the answer exists. Only the newest few rows are decoded: a
+    /// conversation's model can change mid-thread and the current one is what
+    /// a board shows, so reading the whole usage history to find it would be
+    /// both slower and wrong.
+    ///
+    /// The blob is read through ``AgentSessionKit/AntigravityGenMetadataReader/modelNames(blob:)``
+    /// rather than as a whole turn. Recent builds write usage records with no
+    /// wall-clock timestamp, which a turn cannot be without and a model can.
+    public func recentModel(limit: Int = modelWindow) -> String? {
+        let cap = max(1, min(limit, LiveSQLiteReader.maxRows))
+        return LiveSQLiteReader.read(at: databaseURL) { database in
+            let statement = try LiveSQLiteReader.prepare(
+                database, "SELECT data FROM gen_metadata ORDER BY idx DESC LIMIT ?"
+            )
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_int64(statement, 1, sqlite3_int64(cap))
+            var found: String?
+            var result = sqlite3_step(statement)
+            var seen = 0
+            while result == SQLITE_ROW, seen < cap {
+                seen += 1
+                defer { result = sqlite3_step(statement) }
+                guard found == nil, let data = LiveSQLiteReader.blob(statement, 0)
+                else { continue }
+                found = AntigravityGenMetadataReader.modelNames(blob: data).display
+            }
+            guard result == SQLITE_DONE || seen >= cap else {
+                throw LiveSQLiteReader.ReadError.statement
+            }
+            return found
+        } ?? nil
+    }
+
     // MARK: - parent_references
 
     /// `parent_references`, keyed by `idx`.
