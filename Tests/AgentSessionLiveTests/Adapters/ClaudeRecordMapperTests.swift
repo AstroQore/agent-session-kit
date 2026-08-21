@@ -40,6 +40,9 @@ struct ClaudeRecordMapperTests {
             "toolCallFinished": 11,
             // One per assistant record.
             "usage": 8,
+            // One per assistant record too: the same counters read as a level
+            // rather than a delta.
+            "contextUsage": 8,
             // The single `stop_reason: "end_turn"`.
             "turnEnded": 1,
             // `system` / `compact_boundary`.
@@ -322,6 +325,92 @@ struct ClaudeRecordMapperTests {
         #expect(firstPrompt?.timestamp == Date(timeIntervalSince1970: 1_767_603_603.0))
     }
 
+    // MARK: - The context gauge
+
+    /// One assistant record with the `usage` shape Claude Code writes, and
+    /// nothing else — a fill of `input + cache_read + cache_creation`.
+    private func assistantLine(model: String) -> Data {
+        Data("""
+            {"type":"assistant","uuid":"a1","sessionId":"s1","cwd":"/Users/example/code/demo",\
+            "timestamp":"2026-08-20T09:00:00.000Z","message":{"model":"\(model)",\
+            "stop_reason":"end_turn","content":[{"type":"text","text":"done"}],\
+            "usage":{"input_tokens":4000,"cache_creation_input_tokens":18800,\
+            "cache_read_input_tokens":876000,"output_tokens":600,"service_tier":"standard"}}}
+            """.utf8)
+    }
+
+    private func contextUsage(_ events: [AgentEvent]) -> (Int, Int?, Int?, ContextUsage.Source)? {
+        for event in events {
+            guard case let .contextUsage(used, window, cached, source) = event.kind else { continue }
+            return (used, window, cached, source)
+        }
+        return nil
+    }
+
+    @Test("an assistant record's usage is also a context level, and a derived one")
+    func contextFillIsDerived() {
+        let events = ClaudeRecordMapper.events(
+            from: assistantLine(model: "claude-fable-5"),
+            session: ClaudeFixture.parentKey,
+            isSubagent: false,
+            now: claudeNow
+        )
+        let reading = contextUsage(events)
+        // 4,000 fresh + 876,000 read + 18,800 written = 898,800.
+        #expect(reading?.0 == 898_800)
+        #expect(reading?.1 == 200_000)
+        #expect(reading?.2 == 894_800)
+        #expect(reading?.3 == .derived)
+    }
+
+    @Test("a 1M-context model gets a 1M denominator")
+    func millionTokenWindow() {
+        let events = ClaudeRecordMapper.events(
+            from: assistantLine(model: "claude-fable-5[1m]"),
+            session: ClaudeFixture.parentKey,
+            isSubagent: false,
+            now: claudeNow
+        )
+        #expect(contextUsage(events)?.1 == 1_000_000)
+    }
+
+    @Test("a model the table does not know yields a fill with no window")
+    func unknownModelStillReportsAFill() {
+        let events = ClaudeRecordMapper.events(
+            from: assistantLine(model: "some-future-model"),
+            session: ClaudeFixture.parentKey,
+            isSubagent: false,
+            now: claudeNow
+        )
+        #expect(contextUsage(events)?.0 == 898_800)
+        #expect(contextUsage(events)?.1 == nil)
+    }
+
+    @Test("a host's table is what the reading is derived against")
+    func hostOverride() {
+        let events = ClaudeRecordMapper.events(
+            from: assistantLine(model: "some-future-model"),
+            session: ClaudeFixture.parentKey,
+            isSubagent: false,
+            now: claudeNow,
+            contextWindows: ModelContextWindows.standard.overriding(["some-future-": 500_000])
+        )
+        #expect(contextUsage(events)?.1 == 500_000)
+    }
+
+    @Test("a record with no usage reports no level")
+    func noUsageNoLevel() {
+        let line = Data("""
+            {"type":"assistant","uuid":"a2","sessionId":"s1","cwd":"/Users/example/code/demo",\
+            "timestamp":"2026-08-20T09:00:01.000Z","message":{"model":"claude-fable-5",\
+            "content":[{"type":"text","text":"still here"}]}}
+            """.utf8)
+        let events = ClaudeRecordMapper.events(
+            from: line, session: ClaudeFixture.parentKey, isSubagent: false, now: claudeNow
+        )
+        #expect(contextUsage(events) == nil)
+    }
+
     @Test("the mapper leaves sequence and raw to the tailer")
     func mapperDoesNotStamp() {
         #expect(sessionEvents().allSatisfy { $0.sequence == 0 && $0.raw == nil })
@@ -339,6 +428,7 @@ struct ClaudeRecordMapperTests {
             "toolCallStarted": 1,
             "toolCallFinished": 1,
             "usage": 2,
+            "contextUsage": 2,
             "turnEnded": 1,
             "textBody": 3
         ])

@@ -24,7 +24,7 @@ import Foundation
 /// | `assistant`, `thinking` block | `thinking` |
 /// | `assistant`, `text` block | `assistantText(preview:)`, `textBody(.assistant, …)` |
 /// | `assistant`, `tool_use` block | `toolCallStarted(id:name:kind:target:)` |
-/// | `assistant`, `message.usage` | `usage(model:input:output:cached:)` |
+/// | `assistant`, `message.usage` | `usage(model:input:output:cached:)`, `contextUsage(used:window:cached:source:)` |
 /// | `assistant`, `stop_reason: end_turn` with no `tool_use` | `turnEnded(.complete)` |
 /// | `custom-title` | `identityUpdated(title:)` |
 /// | `worktree-state` | `identityUpdated(cwd:gitBranch:)` |
@@ -55,6 +55,16 @@ import Foundation
 ///   sidecar holds the `stdout`/`stderr` that actually ran. When there is
 ///   more than one result block on the record the sidecar cannot be attributed
 ///   to either, so each block falls back to its own content.
+/// - **The context gauge is derived, and says so.** Claude Code's `/context`
+///   panel is computed in-process and never written to disk — no record carries
+///   the window size, and the category breakdown (messages, system tools,
+///   skills, MCP tools, memory files) exists only in the running program. What
+///   *is* on disk is the prompt the model was last sent: `input_tokens` plus
+///   both cache counters, which is the fill. The denominator comes from
+///   ``ModelContextWindows`` keyed on `message.model`, so the reading is marked
+///   ``ContextUsage/Source/derived`` and a host can render it as the estimate it
+///   is. A model the table does not know yields a fill with no window rather
+///   than no reading at all: "421k used" is still worth showing.
 /// - **Auxiliary records are stamped `now`.** `custom-title`, `mode`,
 ///   `queue-operation`, and `worktree-state` carry no timestamp at all. Using
 ///   the observation clock keeps them ordered after the conversation records
@@ -75,14 +85,25 @@ public enum ClaudeRecordMapper: Sendable {
     ///   - now: The observation clock. Becomes ``AgentEvent/observedAt`` on
     ///     every event, and ``AgentEvent/timestamp`` on the auxiliary records
     ///     that carry none.
+    ///   - contextWindows: How a model id becomes a context window size, for
+    ///     the ``AgentEventKind/contextUsage(used:window:cached:source:)`` an
+    ///     assistant record produces. Nothing on disk records the window; see
+    ///     the type's discussion.
     public static func events(
         from data: Data,
         session: SessionKey,
         isSubagent: Bool,
-        now: Date
+        now: Date,
+        contextWindows: ModelContextWindows = .standard
     ) -> [AgentEvent] {
         guard let record = ClaudeTranscriptRecord.decode(data) else { return [] }
-        return events(for: record, session: session, isSubagent: isSubagent, now: now)
+        return events(
+            for: record,
+            session: session,
+            isSubagent: isSubagent,
+            now: now,
+            contextWindows: contextWindows
+        )
     }
 
     /// Maps an already-parsed record. Split out so the adapter can reuse a
@@ -91,7 +112,8 @@ public enum ClaudeRecordMapper: Sendable {
         for record: ClaudeTranscriptRecord,
         session: SessionKey,
         isSubagent: Bool,
-        now: Date
+        now: Date,
+        contextWindows: ModelContextWindows = .standard
     ) -> [AgentEvent] {
         var kinds: [AgentEventKind] = []
 
@@ -103,7 +125,7 @@ public enum ClaudeRecordMapper: Sendable {
         case "user":
             kinds.append(contentsOf: userKinds(record))
         case "assistant":
-            kinds.append(contentsOf: assistantKinds(record))
+            kinds.append(contentsOf: assistantKinds(record, contextWindows: contextWindows))
         case "custom-title":
             if let title = record.customTitle {
                 kinds.append(.identityUpdated(SessionIdentityPatch(
@@ -212,7 +234,10 @@ public enum ClaudeRecordMapper: Sendable {
         return kinds
     }
 
-    private static func assistantKinds(_ record: ClaudeTranscriptRecord) -> [AgentEventKind] {
+    private static func assistantKinds(
+        _ record: ClaudeTranscriptRecord,
+        contextWindows: ModelContextWindows
+    ) -> [AgentEventKind] {
         var kinds: [AgentEventKind] = []
         var sawToolUse = false
 
@@ -242,6 +267,18 @@ public enum ClaudeRecordMapper: Sendable {
                 inputTokens: usage.inputTokens,
                 outputTokens: usage.outputTokens,
                 cachedTokens: usage.cachedTokens
+            ))
+            // The prompt this step was sent: fresh input plus everything read
+            // from or written to the cache. That *is* the context window's
+            // occupancy, which is why it is a level and the counters above are
+            // deltas. `outputTokens` is left out on purpose — it lands in the
+            // next call's input, and adding it here would run the gauge one
+            // message ahead of the window.
+            kinds.append(.contextUsage(
+                used: usage.inputTokens + usage.cachedTokens,
+                window: contextWindows.window(for: record.model),
+                cached: usage.cachedTokens,
+                source: .derived
             ))
         }
 

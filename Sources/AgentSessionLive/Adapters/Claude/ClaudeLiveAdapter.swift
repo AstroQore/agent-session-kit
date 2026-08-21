@@ -96,6 +96,9 @@ public struct ClaudeLiveAdapter: SourceAdapter {
 
     private let linker: ClaudeSubagentLinker
     private let clock: @Sendable () -> Date
+    /// How a model id becomes a context window. Nothing Claude Code writes
+    /// records the window itself; see ``ClaudeRecordMapper``.
+    private let contextWindows: ModelContextWindows
     /// See ``ClaudeSourceCache``. This adapter's own, never Cowork's.
     private let cache = ClaudeSourceCache()
     /// `~/.claude/sessions` as the last liveness pass read it. See
@@ -112,17 +115,22 @@ public struct ClaudeLiveAdapter: SourceAdapter {
     ///     own is how a test drives it directly.
     ///   - clock: The observation clock, injected so the suite does not have
     ///     to wait for real time to pass.
+    ///   - contextWindows: The model-id → window table the context gauge is
+    ///     derived against. Pass your own to teach it a model this package
+    ///     has not heard of.
     public init(
         deadAfter: TimeInterval = 600,
         startTolerance: TimeInterval = 2,
         linker: ClaudeSubagentLinker = ClaudeSubagentLinker(),
-        clock: @escaping @Sendable () -> Date = { Date() }
+        clock: @escaping @Sendable () -> Date = { Date() },
+        contextWindows: ModelContextWindows = .standard
     ) {
         self.init(
             deadAfter: deadAfter,
             startTolerance: startTolerance,
             linker: linker,
             clock: clock,
+            contextWindows: contextWindows,
             sessionsLifetime: RegistrySnapshot<[ClaudeLiveSession]>.defaultLifetime
         )
     }
@@ -142,12 +150,14 @@ public struct ClaudeLiveAdapter: SourceAdapter {
         startTolerance: TimeInterval = 2,
         linker: ClaudeSubagentLinker = ClaudeSubagentLinker(),
         clock: @escaping @Sendable () -> Date = { Date() },
+        contextWindows: ModelContextWindows = .standard,
         sessionsLifetime: TimeInterval
     ) {
         self.deadAfter = deadAfter
         self.startTolerance = startTolerance
         self.linker = linker
         self.clock = clock
+        self.contextWindows = contextWindows
         self.sessions = RegistrySnapshot(lifetime: sessionsLifetime)
     }
 
@@ -238,7 +248,13 @@ public struct ClaudeLiveAdapter: SourceAdapter {
     // MARK: - Tailing
 
     public func makeTailer(_ source: SessionSource, cursor: SourceCursor?) throws -> any SessionTailer {
-        ClaudeSessionTailer(source: source, cursor: cursor, linker: linker, clock: clock)
+        ClaudeSessionTailer(
+            source: source,
+            cursor: cursor,
+            linker: linker,
+            clock: clock,
+            contextWindows: contextWindows
+        )
     }
 
     // MARK: - Liveness
@@ -352,7 +368,8 @@ final class ClaudeSessionTailer: SessionTailer {
         source: SessionSource,
         cursor: SourceCursor?,
         linker: ClaudeSubagentLinker,
-        clock: @escaping @Sendable () -> Date
+        clock: @escaping @Sendable () -> Date,
+        contextWindows: ModelContextWindows = .standard
     ) {
         self.source = source
         self.linker = linker
@@ -361,13 +378,14 @@ final class ClaudeSessionTailer: SessionTailer {
 
         let key = source.key
         let subagent = isSubagent
+        let windows = contextWindows
         let filter = Mutex(ClaudeIdentityFilter())
         filter.withLock { $0.prime(with: source.seedIdentity) }
 
         inner = JSONLTailer(source: source, cursor: cursor) { data, _ in
             let now = clock()
             let events = ClaudeRecordMapper.events(
-                from: data, session: key, isSubagent: subagent, now: now
+                from: data, session: key, isSubagent: subagent, now: now, contextWindows: windows
             )
             return events.compactMap { event in
                 guard case let .identityUpdated(patch) = event.kind else { return event }

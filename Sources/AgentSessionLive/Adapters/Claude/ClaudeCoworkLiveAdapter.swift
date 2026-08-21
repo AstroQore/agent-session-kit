@@ -72,6 +72,9 @@ public struct ClaudeCoworkLiveAdapter: SourceAdapter {
 
     private let linker: ClaudeSubagentLinker
     private let clock: @Sendable () -> Date
+    /// See ``ClaudeLiveAdapter``'s: a Cowork transcript is the same shape and
+    /// records the window no more than Claude Code's does.
+    private let contextWindows: ModelContextWindows
     /// See ``ClaudeSourceCache``. This adapter's own, never Claude Code's.
     private let cache = ClaudeSourceCache()
 
@@ -83,16 +86,20 @@ public struct ClaudeCoworkLiveAdapter: SourceAdapter {
     ///   - linker: The parent/child join. Its own, never Claude Code's: a
     ///     Cowork subagent belongs to a Cowork parent.
     ///   - clock: The observation clock, injected for the suite.
+    ///   - contextWindows: The model-id → window table the context gauge is
+    ///     derived against.
     public init(
         aliveWithin: TimeInterval = 120,
         deadAfter: TimeInterval = 600,
         linker: ClaudeSubagentLinker = ClaudeSubagentLinker(),
-        clock: @escaping @Sendable () -> Date = { Date() }
+        clock: @escaping @Sendable () -> Date = { Date() },
+        contextWindows: ModelContextWindows = .standard
     ) {
         self.aliveWithin = aliveWithin
         self.deadAfter = deadAfter
         self.linker = linker
         self.clock = clock
+        self.contextWindows = contextWindows
     }
 
     /// The parent/child join this adapter announces subagents through.
@@ -187,7 +194,13 @@ public struct ClaudeCoworkLiveAdapter: SourceAdapter {
     // MARK: - Tailing
 
     public func makeTailer(_ source: SessionSource, cursor: SourceCursor?) throws -> any SessionTailer {
-        ClaudeSessionTailer(source: source, cursor: cursor, linker: linker, clock: clock)
+        ClaudeSessionTailer(
+            source: source,
+            cursor: cursor,
+            linker: linker,
+            clock: clock,
+            contextWindows: contextWindows
+        )
     }
 
     // MARK: - Liveness
