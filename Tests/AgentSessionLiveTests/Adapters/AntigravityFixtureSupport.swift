@@ -609,6 +609,8 @@ func antigravityLabel(_ kind: AgentEventKind) -> String {
     case .subagentFinished: "subagentFinished"
     case .turnEnded(let reason): "turnEnded.\(reason.rawValue)"
     case .usage: "usage"
+    case .contextUsage: "contextUsage"
+    case .quota: "quota"
     case .compaction: "compaction"
     case .sessionEnded(let reason): "sessionEnded.\(reason.rawValue)"
     case .liveness: "liveness"

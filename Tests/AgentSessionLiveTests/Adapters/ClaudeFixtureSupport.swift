@@ -106,6 +106,8 @@ extension AgentEventKind {
         case .subagentFinished: "subagentFinished"
         case .turnEnded: "turnEnded"
         case .usage: "usage"
+        case .contextUsage: "contextUsage"
+        case .quota: "quota"
         case .compaction: "compaction"
         case .sessionEnded: "sessionEnded"
         case .liveness: "liveness"

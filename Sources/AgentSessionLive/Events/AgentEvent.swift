@@ -136,8 +136,24 @@ public enum AgentEventKind: Hashable, Codable, Sendable {
     /// Token accounting for one billed step. Counts are deltas, not totals —
     /// the reducer sums them.
     case usage(model: String?, inputTokens: Int, outputTokens: Int, cachedTokens: Int)
+    /// How full the context window was when the model was last called — the
+    /// `/context` gauge. A *level*, not a delta: the reducer keeps the newest
+    /// and never sums them, which is the whole difference between this and
+    /// ``usage(model:inputTokens:outputTokens:cachedTokens:)``.
+    ///
+    /// `window` is `nil` when neither the store nor ``ModelContextWindows``
+    /// could say how big the window is, and `source` says which of the two
+    /// answered — a gauge a host may state flatly, or one it has to hedge.
+    /// ``ContextUsage`` has the per-harness table of what `used` counts.
+    case contextUsage(used: Int, window: Int?, cached: Int?, source: ContextUsage.Source)
     /// The harness compacted or summarised its own context.
     case compaction
+    /// The plan limit the harness recorded alongside its own token accounting.
+    ///
+    /// Read off disk like everything else here — nothing in this package asks
+    /// a network what a quota is. Codex's `rate_limits` block is the only one
+    /// of these stores that writes one down.
+    case quota(usedPercent: Double, resetsAt: Date?, plan: String?)
     /// The session ended, according to the source.
     case sessionEnded(reason: SessionEndReason)
     /// A liveness verdict from a process probe rather than from a log. Only

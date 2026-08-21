@@ -139,6 +139,21 @@ public struct SessionSnapshot: Hashable, Codable, Sendable {
     public var tokensOut: Int
     /// Sum of `usage` cached tokens.
     public var tokensCached: Int
+    /// How full the context window was when the model was last called, or
+    /// `nil` when the store records nothing that answers it.
+    ///
+    /// Not a total, unlike the three counters above it: the newest reading
+    /// replaces the one before. See ``ContextUsage``.
+    public var contextUsage: ContextUsage?
+    /// How many times the session compacted its own context.
+    ///
+    /// A count rather than a flag because it is the shape of a long session:
+    /// one compaction is normal, four in an afternoon is a session that keeps
+    /// forgetting what it was told.
+    public var compactions: Int
+    /// The plan limit the harness last reported, or `nil` when its store
+    /// records none. Codex only, today. See ``SessionQuota``.
+    public var quota: SessionQuota?
     /// Every child ever spawned, in the order they were spawned. Cumulative:
     /// finished children stay, so a UI can show the whole tree of a turn.
     /// The children still *running* are ``PendingSet/openChildren``.
@@ -167,7 +182,10 @@ public struct SessionSnapshot: Hashable, Codable, Sendable {
         tokensOut: Int = 0,
         tokensCached: Int = 0,
         children: [SessionKey] = [],
-        brief: SessionBrief = SessionBrief()
+        brief: SessionBrief = SessionBrief(),
+        contextUsage: ContextUsage? = nil,
+        compactions: Int = 0,
+        quota: SessionQuota? = nil
     ) {
         self.identity = identity
         self.state = state
@@ -184,6 +202,9 @@ public struct SessionSnapshot: Hashable, Codable, Sendable {
         self.tokensCached = tokensCached
         self.children = children
         self.brief = brief
+        self.contextUsage = contextUsage
+        self.compactions = compactions
+        self.quota = quota
     }
 
     /// The session's key, for convenience.

@@ -44,7 +44,11 @@ struct EventCodableTests {
         .turnEnded(reason: .unknown),
         .usage(model: "claude-opus-5", inputTokens: 1_200, outputTokens: 340, cachedTokens: 8_000),
         .usage(model: nil, inputTokens: 0, outputTokens: 0, cachedTokens: 0),
+        .contextUsage(used: 898_800, window: 1_000_000, cached: 880_000, source: .derived),
+        .contextUsage(used: 12_000, window: nil, cached: nil, source: .measured),
         .compaction,
+        .quota(usedPercent: 43, resetsAt: epoch.addingTimeInterval(7_800), plan: "pro"),
+        .quota(usedPercent: 0, resetsAt: nil, plan: nil),
         .sessionEnded(reason: .exited),
         .sessionEnded(reason: .killed),
         .sessionEnded(reason: .processGone),
@@ -103,14 +107,16 @@ struct EventCodableTests {
             case .subagentFinished: seen.insert("subagentFinished")
             case .turnEnded: seen.insert("turnEnded")
             case .usage: seen.insert("usage")
+            case .contextUsage: seen.insert("contextUsage")
             case .compaction: seen.insert("compaction")
+            case .quota: seen.insert("quota")
             case .sessionEnded: seen.insert("sessionEnded")
             case .liveness: seen.insert("liveness")
             case .note: seen.insert("note")
             case .textBody: seen.insert("textBody")
             }
         }
-        #expect(seen.count == 19)
+        #expect(seen.count == 21)
     }
 
     @Test("a whole event round-trips, id included")

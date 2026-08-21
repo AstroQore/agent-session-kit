@@ -104,6 +104,8 @@ private func label(_ kind: AgentEventKind) -> String {
     case .subagentFinished: "subagentFinished"
     case .turnEnded(let reason): "turnEnded.\(reason.rawValue)"
     case .usage: "usage"
+    case .contextUsage: "contextUsage"
+    case .quota: "quota"
     case .compaction: "compaction"
     case .sessionEnded: "sessionEnded"
     case .liveness: "liveness"

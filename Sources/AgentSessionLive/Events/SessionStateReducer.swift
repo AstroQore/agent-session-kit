@@ -26,7 +26,10 @@ import Foundation
 /// | `subagentFinished` | drop the child, re-derive the state |
 /// | `turnEnded` | close the turn, stamp the brief's `lastTurnEndedAt`, drop orphaned tool calls, keep children |
 /// | `usage` | add the token deltas |
-/// | `compaction`, `note`, `textBody` | heartbeat only |
+/// | `contextUsage` | replace `contextUsage`, unless the reading is older than the one on record |
+/// | `compaction` | `compactions += 1` |
+/// | `quota` | replace `quota`, unless the reading is older than the one on record |
+/// | `note`, `textBody` | heartbeat only |
 /// | `sessionEnded` | `state = .ended(reason)`, `isAlive = false`, `endedAt = ts`, pending cleared |
 /// | `liveness(false)` | `isAlive = false`; an un-ended session becomes `.ended(.processGone)` |
 /// | `liveness(true)` | `isAlive = true`; `.ended(.processGone)` becomes `.idle` again |
@@ -63,6 +66,23 @@ import Foundation
 /// - **A denied permission changes nothing but the pending set.** The state
 ///   is re-derived exactly as for an allow; the harness reports the refusal
 ///   as a failed tool call of its own, and pre-empting that would double-count.
+/// - **`contextUsage` and `quota` replace, `usage` accumulates.** The first two
+///   are levels — how full the window is, how much of a plan window is spent —
+///   and summing a level would run a gauge to several hundred per cent over an
+///   afternoon. Token counts are deltas and are summed. That is the whole
+///   reason there are two cases and not one.
+/// - **A reading stamped before the one on record is dropped.** Everything else
+///   here is monotonic under out-of-order delivery — a counter does not care
+///   which order it counts in — but a level does, and a Grok session reads its
+///   level out of a file whose mtime can land behind the log lines it is merged
+///   with. Dropping the older reading is what keeps a gauge from flickering
+///   backwards. Equal timestamps still overwrite: a harness that flushes a
+///   whole turn under one clock is reporting the newest of them last.
+/// - **A compaction does not reset `contextUsage`.** The window really did just
+///   empty, but by how much is not on disk, and the next step's own reading
+///   says so within one model call. Zeroing it in the meantime would show a
+///   session as empty at the exact moment it is least able to remember
+///   anything.
 /// - **`usage` does not fill in `identity.model`.** The token record names a
 ///   model, but identity changes travel in `identityUpdated` patches so that
 ///   there is one path for them; an adapter that wants the model recorded
@@ -232,7 +252,32 @@ public struct SessionStateReducer: Sendable {
             next.tokensOut += outputTokens
             next.tokensCached += cachedTokens
 
-        case .compaction, .note, .textBody:
+        case .contextUsage(let used, let window, let cached, let source):
+            // A record that did not repeat the window keeps the one this
+            // session already reported: the window is a property of the model,
+            // not of the step, and a gauge that lost its denominator mid-tail
+            // would render as a bare number.
+            if isFresh(ts, than: next.contextUsage?.at) {
+                next.contextUsage = ContextUsage(
+                    used: used,
+                    window: window ?? next.contextUsage?.window,
+                    cached: cached,
+                    at: ts,
+                    source: source
+                )
+            }
+
+        case .compaction:
+            next.compactions += 1
+
+        case .quota(let usedPercent, let resetsAt, let plan):
+            if isFresh(ts, than: next.quota?.at) {
+                next.quota = SessionQuota(
+                    usedPercent: usedPercent, resetsAt: resetsAt, plan: plan, at: ts
+                )
+            }
+
+        case .note, .textBody:
             break
 
         case .sessionEnded(let reason):
@@ -347,6 +392,13 @@ public struct SessionStateReducer: Sendable {
         merged.model = incoming.model ?? existing.model
         merged.entrypoint = incoming.entrypoint ?? existing.entrypoint
         return merged
+    }
+
+    /// Whether a level stamped `ts` supersedes one stamped `existing`.
+    /// Equal stamps supersede; see the type's discussion.
+    private func isFresh(_ ts: Date, than existing: Date?) -> Bool {
+        guard let existing else { return true }
+        return ts >= existing
     }
 
     private func maxDate(_ lhs: Date?, _ rhs: Date) -> Date {
