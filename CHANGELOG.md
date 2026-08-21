@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`AntigravityGenMetadataReader.modelNames(blob:)`** — the model a
+  `gen_metadata` record names, without the rest of the turn having to decode.
+  `decodeTurn(blob:)` answers `nil` for a record with no wall-clock timestamp,
+  which is right for a cost scanner: a usage row that cannot be placed in a day
+  cannot be billed to one. AntiGravity builds from 2026-08 write exactly that
+  record — field `1.9` carries no `4` — while `1.19` and `1.20["model_enum"]`
+  name the model as they always did, so every recent conversation on the corpus
+  this was found on answered "no model" to a question its store could answer.
+  `ModelNames.display` orders the three names for a reader — label, router
+  alias, internal enum — rather than for a price list, which is `Turn.model`'s
+  order and is unchanged.
+
 ### Changed
 - **The live layer names an Auto Review run the same way the index does.**
   `CodexLiveAdapter` seeds a guardian rollout's `SessionIdentity.variant` with

@@ -150,13 +150,10 @@ public enum AntigravityGenMetadataReader {
         // absent, an internal model enum in the repeated field-20 metadata.
         // Prefer those values so cost ranking and pricing reflect the model
         // that actually served the turn instead of the router alias.
-        let routedModel = normalized(extractString(bytes: outer, fieldNumber: 19))
-        let modelEnum = normalized(extractMetadataValue(
-            bytes: outer,
-            fieldNumber: 20,
-            key: "model_enum"
-        ))
-        let modelLabel = normalized(extractString(bytes: outer, fieldNumber: 21))
+        let names = modelNames(outer: outer)
+        let routedModel = names.routed
+        let modelEnum = names.modelEnum
+        let modelLabel = names.label
         let model = modelLabel ?? modelEnum ?? routedModel
 
         let date: Date
@@ -177,6 +174,56 @@ public enum AntigravityGenMetadataReader {
             requestId: requestId,
             model: model,
             routedModel: modelLabel == nil && modelEnum != nil ? routedModel : nil
+        )
+    }
+
+    // MARK: - The model, on its own
+
+    /// The three names a turn can carry for the model that served it.
+    public struct ModelNames: Sendable, Equatable {
+        /// Field 21 — the label a person reads, e.g. `Gemini 3.5 Flash (High)`.
+        public let label: String?
+        /// Field 20's `model_enum` — precise, internal, e.g.
+        /// `MODEL_PLACEHOLDER_M298`.
+        public let modelEnum: String?
+        /// Field 19 — the router alias, e.g. `gemini-3.7-flash`.
+        public let routed: String?
+
+        /// The most human-readable of the three: the label, else the router
+        /// alias, else the internal enum.
+        ///
+        /// Deliberately not ``Turn/model``'s order. That one is a pricing
+        /// answer and prefers the enum, because the enum names exactly one
+        /// model where an alias names whatever the router picked. This one is
+        /// what a session list puts on a row, and `MODEL_PLACEHOLDER_M298`
+        /// tells a reader less than `gemini-3.7-flash` does.
+        public var display: String? { label ?? routed ?? modelEnum }
+    }
+
+    /// The model a `gen_metadata` blob names, without needing the rest of the
+    /// turn to decode.
+    ///
+    /// ``decodeTurn(blob:)`` answers `nil` for a record with no wall-clock
+    /// timestamp, which is correct for a cost scanner — a usage row that
+    /// cannot be placed in a day cannot be billed to one. AntiGravity builds
+    /// from 2026-08 write exactly that record: field `1.9` carries no `4`,
+    /// while `1.19` and `1.20["model_enum"]` name the model as they always
+    /// did. A caller that wants to say what a session is running on should
+    /// ask this, not a turn.
+    public static func modelNames(blob: Data) -> ModelNames {
+        let bytes = [UInt8](blob)
+        guard let outer = extractLengthDelimited(bytes: bytes, fieldNumber: 1) else {
+            return ModelNames(label: nil, modelEnum: nil, routed: nil)
+        }
+        return modelNames(outer: outer)
+    }
+
+    static func modelNames(outer: [UInt8]) -> ModelNames {
+        ModelNames(
+            label: normalized(extractString(bytes: outer, fieldNumber: 21)),
+            modelEnum: normalized(extractMetadataValue(
+                bytes: outer, fieldNumber: 20, key: "model_enum")),
+            routed: normalized(extractString(bytes: outer, fieldNumber: 19))
         )
     }
 
