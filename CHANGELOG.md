@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-21
+
+AntiGravity sessions arrive with a workspace and a model again, and a Codex
+Auto Review names the thread it reviewed in its live identity.
+
 ### Added
 - **`AntigravityGenMetadataReader.modelNames(blob:)`** — the model a
   `gen_metadata` record names, without the rest of the turn having to decode.
