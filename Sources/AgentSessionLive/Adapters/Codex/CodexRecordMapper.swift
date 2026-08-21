@@ -308,7 +308,7 @@ public enum CodexRecordMapper: Sendable {
             let message = payload["message"]?.string ?? "unspecified"
             emitter.add(.note("error: \(EventText.preview(message, max: 160))"))
         case "token_count":
-            usage(payload, into: &emitter)
+            tokenCount(payload, into: &emitter)
         case "guardian_assessment":
             guardian(payload, into: &emitter)
         case "sub_agent_activity":
@@ -368,7 +368,18 @@ public enum CodexRecordMapper: Sendable {
         }
     }
 
-    /// Token accounting for one billed step.
+    /// A `token_count` event: the step's token accounting, how full the
+    /// context window is, and whatever the response's rate-limit headers said.
+    ///
+    /// The three are independent. Codex emits a `token_count` carrying only
+    /// `rate_limits` when a request was refused before it billed anything, so
+    /// each half is read on its own rather than behind the other's guard.
+    private static func tokenCount(_ payload: CodexJSON, into emitter: inout Emitter) {
+        if let info = payload["info"] { tokens(info, into: &emitter) }
+        rateLimits(payload, into: &emitter)
+    }
+
+    /// Token accounting for one billed step, and the window it filled.
     ///
     /// `last_token_usage` is the delta for the step just billed and
     /// `total_token_usage` the running sum; the reducer sums what it is given,
@@ -380,8 +391,15 @@ public enum CodexRecordMapper: Sendable {
     /// `input_tokens` is reported as Codex reports it, cached tokens included.
     /// Splitting it would be an accounting opinion, and the cached count
     /// travels alongside for a caller that holds a different one.
-    private static func usage(_ payload: CodexJSON, into emitter: inout Emitter) {
-        guard let last = payload["info"]?["last_token_usage"] else { return }
+    ///
+    /// That same `input_tokens` is the context level, for exactly the reason it
+    /// is not split: it is the whole prompt the model was handed, which is what
+    /// occupies the window. `output_tokens` is deliberately not added — it
+    /// lands in the *next* call's input. The denominator is
+    /// `info.model_context_window`, which Codex writes down itself, so the
+    /// reading is ``ContextUsage/Source/measured`` and needs no model table.
+    private static func tokens(_ info: CodexJSON, into emitter: inout Emitter) {
+        guard let last = info["last_token_usage"] else { return }
         let input = last["input_tokens"]?.int ?? 0
         let output = last["output_tokens"]?.int ?? 0
         let cached = last["cached_input_tokens"]?.int ?? 0
@@ -389,6 +407,51 @@ public enum CodexRecordMapper: Sendable {
         emitter.add(
             .usage(model: nil, inputTokens: input, outputTokens: output, cachedTokens: cached)
         )
+        guard input > 0 else { return }
+        emitter.add(
+            .contextUsage(
+                used: input,
+                window: info["model_context_window"]?.int,
+                cached: cached,
+                source: .measured
+            )
+        )
+    }
+
+    /// The plan window the request was billed against.
+    ///
+    /// Only `primary` becomes an event. Codex reports a `secondary` window too
+    /// — the weekly allowance beside the five-hourly one — and a row that shows
+    /// two percentages without room to say which is which is worse than one
+    /// that shows the limit a person is about to hit.
+    ///
+    /// `resets_at` is an instant on current Codex and `resets_in_seconds` a
+    /// duration on older ones; both are accepted, and the duration is resolved
+    /// against the *record's* timestamp rather than the clock, so a rollout
+    /// replayed at cold start does not claim its limits reset an hour from now.
+    private static func rateLimits(_ payload: CodexJSON, into emitter: inout Emitter) {
+        guard let limits = payload["rate_limits"] ?? payload["info"]?["rate_limits"],
+              let primary = limits["primary"],
+              let usedPercent = primary["used_percent"]?.double
+        else { return }
+        emitter.add(
+            .quota(
+                usedPercent: usedPercent,
+                resetsAt: resetDate(primary, recordedAt: emitter.timestamp),
+                plan: limits.firstString("plan_type", "plan")
+                    ?? payload.firstString("plan_type", "plan")
+            )
+        )
+    }
+
+    private static func resetDate(_ window: CodexJSON, recordedAt: Date) -> Date? {
+        if let text = window["resets_at"]?.string, let date = SessionParsing.parseISO(text) {
+            return date
+        }
+        if let seconds = window["resets_in_seconds"]?.int {
+            return recordedAt.addingTimeInterval(TimeInterval(seconds))
+        }
+        return nil
     }
 
     /// Codex's approval channel.

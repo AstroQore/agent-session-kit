@@ -103,6 +103,10 @@ struct CodexRolloutMapperTests {
         #expect(counts["textBody.assistant"] == 2)
         #expect(counts["turnEnded.complete"] == 2)
         #expect(counts["usage"] == 3)
+        // The same three `token_count` records, read as a level.
+        #expect(counts["contextUsage"] == 3)
+        // Two of the three carry `rate_limits`; the third carries none.
+        #expect(counts["quota"] == 2)
         // `context_compacted` and the top-level `compacted` envelope.
         #expect(counts["compaction"] == 2)
         // Four `response_item` calls, plus the four `*_end` events whose work
@@ -115,6 +119,72 @@ struct CodexRolloutMapperTests {
         #expect(counts["subagentStarted"] == nil)
         #expect(counts["note"] == nil)
         #expect(counts["sessionStarted"] == nil)
+    }
+
+    @Test("a token_count is a level as well as a delta, and the window is measured")
+    func contextLevel() throws {
+        let readings = try mapped("rollout.jsonl").compactMap { event -> (Int, Int?, Int?, ContextUsage.Source)? in
+            guard case let .contextUsage(used, window, cached, source) = event.kind else { return nil }
+            return (used, window, cached, source)
+        }
+        // `last_token_usage.input_tokens`, cached share included — not the
+        // running total, and not with `output_tokens` added on.
+        #expect(readings.map(\.0) == [1_200, 1_800, 1_400])
+        #expect(readings.map(\.2) == [400, 700, 500])
+        // Codex writes the window down, so nothing is looked up.
+        #expect(readings.allSatisfy { $0.1 == 258_400 })
+        #expect(readings.allSatisfy { $0.3 == .measured })
+    }
+
+    @Test("the primary rate-limit window becomes the session's quota")
+    func quota() throws {
+        let quotas = try mapped("rollout.jsonl").compactMap { event -> (Double, Date?, String?)? in
+            guard case let .quota(usedPercent, resetsAt, plan) = event.kind else { return nil }
+            return (usedPercent, resetsAt, plan)
+        }
+        #expect(quotas.count == 2)
+        // A bare `used_percent` is enough; the rest is optional.
+        #expect(quotas[0].0 == 3.5)
+        #expect(quotas[0].1 == nil)
+        #expect(quotas[0].2 == nil)
+        // The full block: primary only, its own reset instant, the plan name.
+        // `secondary` is deliberately not a second event.
+        #expect(quotas[1].0 == 43.2)
+        #expect(quotas[1].1 == SessionParsing.parseISO("2026-08-20T11:10:00Z"))
+        #expect(quotas[1].2 == "pro")
+    }
+
+    @Test("an older rollout's reset countdown is resolved against the record")
+    func resetCountdown() throws {
+        let line = Data("""
+            {"timestamp":"2026-08-20T09:00:00.000Z","type":"event_msg","payload":\
+            {"type":"token_count","rate_limits":{"primary":{"used_percent":50.0,\
+            "resets_in_seconds":3600},"plan_type":"team"}}}
+            """.utf8)
+        let events = CodexRecordMapper.events(from: line, session: rolloutSession, now: observed)
+        guard case let .quota(usedPercent, resetsAt, plan) = try #require(events.first).kind else {
+            Issue.record("expected a quota event")
+            return
+        }
+        #expect(usedPercent == 50)
+        #expect(plan == "team")
+        // The record's own clock plus an hour, not the observation clock's.
+        #expect(resetsAt == SessionParsing.parseISO("2026-08-20T10:00:00.000Z"))
+    }
+
+    @Test("a token_count with limits but no tokens still reports the limits")
+    func rateLimitsWithoutTokens() throws {
+        let line = Data("""
+            {"timestamp":"2026-08-20T09:00:00.000Z","type":"event_msg","payload":\
+            {"type":"token_count","info":null,"rate_limits":{"primary":\
+            {"used_percent":99.9}}}}
+            """.utf8)
+        let events = CodexRecordMapper.events(from: line, session: rolloutSession, now: observed)
+        #expect(events.count == 1)
+        #expect(events.compactMap { event -> Double? in
+            guard case let .quota(usedPercent, _, _) = event.kind else { return nil }
+            return usedPercent
+        } == [99.9])
     }
 
     @Test("a desktop exec script becomes a shell call with the command it ran")

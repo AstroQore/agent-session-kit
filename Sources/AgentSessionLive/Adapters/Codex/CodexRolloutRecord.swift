@@ -80,6 +80,20 @@ public enum CodexJSON: Sendable, Hashable, Decodable {
         }
     }
 
+    /// The value as a `Double`, accepting a numeric string as well. Codex
+    /// writes `used_percent` as a fraction of a percent, so the decimal half
+    /// is the interesting half.
+    public var double: Double? {
+        switch self {
+        case let .number(value):
+            return value.isFinite ? value : nil
+        case let .string(value):
+            return Double(value)
+        default:
+            return nil
+        }
+    }
+
     /// The boolean value, or `nil` when this is not a boolean.
     public var bool: Bool? {
         guard case let .bool(value) = self else { return nil }
