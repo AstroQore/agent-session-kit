@@ -6,6 +6,53 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Per-session context-window usage — the `/context` gauge.**
+  `SessionSnapshot.contextUsage` is a `ContextUsage`: `used`, `window`,
+  `cached`, the timestamp it was read at, and whether the window was
+  `measured` or `derived`. One definition of `used` across every harness —
+  the tokens that were in the model's context when it was last called, cached
+  prefix included, the reply just generated excluded, because that lands in
+  the next call's input. Folded by `SessionStateReducer` from a new
+  `AgentEventKind.contextUsage(used:window:cached:source:)`, which is a
+  *level* and never summed; `usage` remains the delta it always was. A reading
+  stamped before the one on record is dropped, so a gauge cannot flicker
+  backwards when a file-mtime-stamped reading is merged behind a log line.
+- **`SessionSnapshot.compactions`**, folded from `AgentEventKind.compaction`.
+  One compaction is normal; four in an afternoon is the shape of a session
+  that keeps forgetting what it was told. A compaction does not zero
+  `contextUsage` — the window really did empty, but by how much is not on
+  disk, and the next model call says so within a step.
+- **`ModelContextWindows`**, the model-id → window lookup for the stores that
+  record the token counts but not the size of the window they filled. Prefixes,
+  a marker rule for the long-context variants (`claude-…[1m]`), a documented
+  default of 200,000 for the Claude family, and `nil` — not a plausible guess —
+  for a model nothing matches. Hosts pass their own with
+  `ModelContextWindows.standard.overriding(…)`, accepted by `ClaudeLiveAdapter`
+  and `ClaudeCoworkLiveAdapter`.
+- **`SessionSnapshot.quota`** and `AgentEventKind.quota(usedPercent:resetsAt:plan:)`,
+  from Codex's `rate_limits`. Read off the rollout; nothing here asks a network
+  what a limit is. Only the `primary` window becomes an event — a row with two
+  percentages and no room to label them is worse than one showing the limit a
+  person is about to hit — and `resets_in_seconds`, which older rollouts write
+  instead of `resets_at`, is resolved against the *record's* clock so a
+  replayed rollout does not claim its limits reset an hour from now.
+- **`GrokSignalsReader`**, which turns `signals.json`'s `contextTokensUsed` and
+  `contextWindowTokens` into a measured reading. Not a tailer: the file is
+  rewritten in place, so there is no cursor to advance and no history to
+  replay. It stats on every poll and parses only when the stamp moved, and
+  rides along inside `GrokSessionTailer` rather than earning a watch of its
+  own — `signals.json` stays out of `mightBeSessionFile` and out of the
+  source's auxiliary paths, because Grok rewrites it many times a minute and a
+  host waking on each rewrite is the storm that rule exists to prevent.
+- **`CodexJSON.double`**, for the fractional percentages Codex writes.
+
+### Changed
+- **`AgentSessionLive.eventSchemaVersion` is 3.** Two cases were added to
+  `AgentEventKind` and three fields to `SessionSnapshot`, both of which are
+  encoded structurally, so a host that persisted rows re-seeds rather than
+  decoding a model it no longer speaks.
+
 ## [0.5.0] - 2026-08-21
 
 AntiGravity sessions arrive with a workspace and a model again, and a Codex

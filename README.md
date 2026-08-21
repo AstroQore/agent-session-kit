@@ -213,15 +213,52 @@ snapshot.isStale          // working, alive, and silent for too long
 `AgentEventKind` is the whole vocabulary: `sessionStarted`, `identityUpdated`,
 `userPrompt`, `turnStarted`, `thinking`, `assistantText`, `toolCallStarted` /
 `toolCallFinished`, `permissionRequested` / `permissionResolved`,
-`subagentStarted` / `subagentFinished`, `turnEnded`, `usage`, `compaction`,
-`sessionEnded`, `liveness`, and `note`. A case exists only where a real store
-records the fact.
+`subagentStarted` / `subagentFinished`, `turnEnded`, `usage`, `contextUsage`,
+`compaction`, `quota`, `sessionEnded`, `liveness`, and `note`. A case exists
+only where a real store records the fact.
 
 `SessionSnapshot` carries the derived `SessionState`, the `PendingSet` of what
-is still open, turn and tool counters, token totals, the child sessions a turn
-spawned, and a `SessionBrief`. The reducer is pure and takes its clock as a
-parameter, so every transition — including staleness, and a process that dies
-and comes back — is testable without waiting.
+is still open, turn and tool counters, token totals, how full the context
+window is, the child sessions a turn spawned, and a `SessionBrief`. The reducer
+is pure and takes its clock as a parameter, so every transition — including
+staleness, and a process that dies and comes back — is testable without
+waiting.
+
+### The context gauge
+
+`SessionSnapshot.contextUsage` is the `/context` panel, not the bill: a level
+rather than a total, and the same level on every row. `used` is **the tokens
+that were in the model's context when it was last called** — the whole prompt,
+cached prefix included, and the reply the model just generated excluded,
+because that lands in the *next* call's input.
+
+```swift
+snapshot.contextUsage?.used      // 898_800
+snapshot.contextUsage?.window    // 1_000_000
+snapshot.contextUsage?.fraction  // 0.8988 — never clamped; overfull reads overfull
+snapshot.contextUsage?.source    // .derived — say so in the UI
+snapshot.compactions             // 2
+snapshot.quota?.usedPercent      // 43.2, from Codex's own rate_limits
+```
+
+| Harness | Read from | `source` |
+| ------- | --------- | -------- |
+| Claude Code, Claude Cowork | `message.usage` input + both cache counters; the window from `ModelContextWindows` | `derived` |
+| Codex, ChatGPT Work | `token_count`: `last_token_usage.input_tokens` and `info.model_context_window` | `measured` |
+| Grok Build | `signals.json`: `contextTokensUsed` and `contextWindowTokens` | `measured` |
+| Cursor, AntiGravity, Grok Bot, Gemini CLI | nothing on disk answers it | `nil` |
+
+Claude Code computes both its window size *and* its category breakdown
+(messages, system tools, skills, MCP tools, memory files) in-process and writes
+neither to disk, so the fill is real and the denominator is a lookup —
+`ModelContextWindows`, which a host can extend and which answers `nil` rather
+than guessing for a model it has not heard of. That is what `source` is for. A
+model the table misses still reports a fill with no window: "421k used" is
+worth showing, a wrong denominator is not.
+
+`SessionQuota` is the other half of what Codex writes beside its token counts —
+`used_percent`, when the window resets, the plan name. Read off the rollout;
+nothing here asks a network what a limit is.
 
 `SessionBrief` is the other half of a board row: what the session was *asked*
 to do (`firstPrompt`), what was asked last, the last thing the model said in

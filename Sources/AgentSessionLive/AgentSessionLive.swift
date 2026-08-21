@@ -44,9 +44,11 @@ import Foundation
 ///   own id, since ids collide across trees.
 /// - ``AgentEvent`` is one observed fact. Its ``AgentEventKind`` is the whole
 ///   vocabulary — prompts, turns, tool calls, permissions, subagents, usage,
-///   liveness — and a case exists only where a real store records the fact.
+///   context fill, liveness — and a case exists only where a real store
+///   records the fact.
 /// - ``SessionStateReducer`` folds events into a ``SessionSnapshot``: derived
-///   state, what is still open, counters, tokens, children, and the
+///   state, what is still open, counters, tokens, how full the context window
+///   is (``ContextUsage``), children, and the
 ///   ``SessionBrief`` that answers what the session was asked to do and what
 ///   it last said back. Pure, total, and the only thing in the target that
 ///   decides what a session "is doing".
@@ -99,5 +101,5 @@ public enum AgentSessionLive {
     /// no longer speaks. Bumped whenever a case is added to
     /// ``AgentEventKind`` or a field to ``SessionSnapshot``, because both are
     /// encoded structurally.
-    public static let eventSchemaVersion = 2
+    public static let eventSchemaVersion = 3
 }
