@@ -28,3 +28,11 @@ final class HumanPromptTextTests: XCTestCase {
         )
     }
 }
+
+extension HumanPromptTextTests {
+    func testTaskNotificationIsNotAnInstruction() {
+        let text = "<task-notification>\n<task-id>ab97cd8d</task-id>\n<tool-use-id>toolu_x</tool-use-id>\n<output-file>/Users/example/t.out</output-file>\n<status>completed</status>\n<summary>Agent finished</summary>\n<result>Done.</result>\n</task-notification>"
+        XCTAssertNil(HumanPromptText.instruction(text))
+        XCTAssertEqual(HumanPromptText.instruction(text + "\nPlease summarise the result."), "Please summarise the result.")
+    }
+}

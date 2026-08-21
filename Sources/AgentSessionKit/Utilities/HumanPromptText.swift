@@ -11,6 +11,11 @@ public enum HumanPromptText {
         "user_instructions", "app-context", "recommended_plugins",
         "skills_instructions", "permissions", "collaboration_mode",
         "apps_instructions", "plugins_instructions", "instructions",
+        // Claude Code's background-task machinery: a subagent's completion is
+        // delivered as a user turn wrapped in these, with the tool-use id and
+        // the output file — never something the person typed.
+        "task-notification", "task-id", "tool-use-id", "output-file", "status",
+        "summary", "result", "note", "cross-session-message",
     ]
 
     public static let metaTagPrefixes = ["local-command-"]

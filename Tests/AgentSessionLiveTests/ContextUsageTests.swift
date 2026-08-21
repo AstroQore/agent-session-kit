@@ -150,3 +150,17 @@ struct ContextUsageTests {
         #expect(harness.snapshot.lastEventAt == harness.clock)
     }
 }
+
+@Suite("Model windows — the Claude 5 family")
+struct ClaudeFiveWindowTests {
+    @Test("a Claude 5 model is a million-token window without a marker")
+    func claudeFive() {
+        let table = ModelContextWindows.standard
+        #expect(table.window(for: "claude-fable-5") == 1_000_000)
+        #expect(table.window(for: "claude-mythos-5") == 1_000_000)
+        #expect(table.window(for: "claude-opus-5-20260514") == 200_000)
+        #expect(table.window(for: "claude-opus-5-20260514[1m]") == 1_000_000)
+        #expect(table.window(for: "claude-opus-4-1-20250805") == 200_000)
+        #expect(table.window(for: "claude-haiku-4-5-20251001") == 200_000)
+    }
+}

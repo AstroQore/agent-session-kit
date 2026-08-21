@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-21
+
+A task notification is not an instruction, and Fable 5 has a million-token
+window.
+
+### Fixed
+- **`HumanPromptText` strips Claude Code's background-task envelopes.** A
+  subagent's completion arrives as a user turn wrapped in `<task-notification>`
+  (`<task-id>`, `<tool-use-id>`, `<output-file>`, `<status>`, `<summary>`,
+  `<result>`) and a peer message in `<cross-session-message>`; a session whose
+  first "prompt" was one of those showed the XML as its assignment.
+- **`ModelContextWindows.standard` knows `claude-fable-5` and `claude-mythos-5`
+  are 1M-token models** without a `[1m]` marker — Claude Code's own `/context`
+  panel reports them so. A derived fill that read 425 % was this.
+
 ## [0.6.0] - 2026-08-21
 
 Every session can now say how full its context window is — measured where

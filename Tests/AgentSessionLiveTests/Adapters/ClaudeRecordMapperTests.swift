@@ -358,7 +358,8 @@ struct ClaudeRecordMapperTests {
         let reading = contextUsage(events)
         // 4,000 fresh + 876,000 read + 18,800 written = 898,800.
         #expect(reading?.0 == 898_800)
-        #expect(reading?.1 == 200_000)
+        // The fixture model is claude-fable-5: a million-token window.
+        #expect(reading?.1 == 1_000_000)
         #expect(reading?.2 == 894_800)
         #expect(reading?.3 == .derived)
     }

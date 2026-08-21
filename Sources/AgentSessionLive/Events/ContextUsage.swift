@@ -141,7 +141,16 @@ public struct ModelContextWindows: Sendable, Hashable {
 
     /// What this package knows, and nothing more.
     public static let standard = ModelContextWindows(
-        prefixes: ["claude-": defaultWindow],
+        prefixes: [
+            "claude-": defaultWindow,
+            // Observed, not assumed: Claude Code's own `/context` panel reports
+            // `claude-fable-5` against a 1M window with no `[1m]` suffix, and
+            // Mythos 5 is the same model under a different gate. The other
+            // Claude 5 models stay on the default until a store says otherwise;
+            // longest prefix wins, so these outrank the bare `claude-` row.
+            "claude-fable-5": millionTokenWindow,
+            "claude-mythos-5": millionTokenWindow,
+        ],
         markers: [millionTokenMarker: millionTokenWindow],
         fallback: nil
     )
