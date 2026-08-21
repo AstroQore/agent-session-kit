@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-21
+
+Every session can now say how full its context window is — measured where
+the harness records it (Codex, Grok Build), derived from usage where it
+does not (Claude Code) — plus Codex's rate limits as a quota, and a
+compaction count. `eventSchemaVersion` is 3: hosts re-seed stored snapshots.
+
 ### Added
 - **Per-session context-window usage — the `/context` gauge.**
   `SessionSnapshot.contextUsage` is a `ContextUsage`: `used`, `window`,
