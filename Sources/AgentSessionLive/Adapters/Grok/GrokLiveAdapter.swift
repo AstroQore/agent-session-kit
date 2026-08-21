@@ -595,7 +595,11 @@ public final class GrokSessionTailer: SessionTailer {
         .composite(Dictionary(uniqueKeysWithValues: tailers.map { ($0.path, $0.cursor) }))
     }
 
-    /// The files being read, in merge order.
+    /// The tailed files, in merge order.
+    ///
+    /// `signals.json` is not among them: it is polled by stamp rather than
+    /// tailed by offset, so it has no cursor entry and nothing to resume from.
+    /// See ``GrokSignalsReader``.
     public var paths: [String] { tailers.map(\.path) }
 
     public func poll() throws -> [AgentEvent] {
