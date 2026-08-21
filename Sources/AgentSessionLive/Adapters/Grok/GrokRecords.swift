@@ -394,10 +394,16 @@ public struct GrokSummary: Sendable, Hashable {
 
 /// `signals.json` — the counters the harness keeps for its own telemetry.
 ///
-/// Read at discovery for diagnostics only. Nothing here becomes an
-/// ``AgentEvent``: every field is a running total, and the reducer's own
-/// counters are built from the events it saw, so folding a total in would
-/// double what it already counted.
+/// Almost all of it is a running total, and none of *those* becomes an
+/// ``AgentEvent``: the reducer's counters are built from the events it saw, so
+/// folding a total in beside them would double what was already counted.
+///
+/// The two context fields are the exception, and the reason this type is read
+/// at all rather than only at discovery. ``contextTokensUsed`` over
+/// ``contextWindowTokens`` is a *level* — how full the window is right now —
+/// which no event in either log records and which nothing else on disk can
+/// derive. ``GrokSignalsReader`` turns them into
+/// ``AgentEventKind/contextUsage(used:window:cached:source:)``.
 public struct GrokSignals: Sendable, Hashable {
     /// `turnCount`.
     public let turnCount: Int?

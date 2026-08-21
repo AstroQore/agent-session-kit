@@ -87,6 +87,20 @@ private func starts(_ events: [AgentEvent]) -> [ToolStart] {
     }
 }
 
+private struct ContextReading {
+    let used: Int
+    let window: Int?
+    let cached: Int?
+    let source: ContextUsage.Source
+}
+
+private func contextReadings(_ events: [AgentEvent]) -> [ContextReading] {
+    events.compactMap {
+        guard case let .contextUsage(used, window, cached, source) = $0.kind else { return nil }
+        return ContextReading(used: used, window: window, cached: cached, source: source)
+    }
+}
+
 private func notes(_ events: [AgentEvent]) -> [String] {
     events.compactMap {
         guard case let .note(text) = $0.kind else { return nil }
@@ -500,7 +514,7 @@ private struct GrokHome {
     func session(
         id: String = grokSession.sessionID,
         cwd: String = grokCwd,
-        files: [String] = ["events.jsonl", "updates.jsonl", "chat_history.jsonl", "summary.json"],
+        files: [String] = GrokHome.tailedFiles,
         modified: Date? = nil
     ) throws -> URL {
         let encoded = try #require(GrokSessionsPath.encode(cwd: cwd))
@@ -520,6 +534,25 @@ private struct GrokHome {
             }
         }
         return directory
+    }
+
+    /// What a session directory holds unless a test asks for more.
+    ///
+    /// `signals.json` is deliberately not in it: it is rewritten in place many
+    /// times a minute, so a test that is about the *logs* should not have a
+    /// context reading appearing in the middle of its expectations.
+    static let tailedFiles = ["events.jsonl", "updates.jsonl", "chat_history.jsonl", "summary.json"]
+
+    /// Everything a real session directory holds.
+    static let everyFile = tailedFiles + ["signals.json"]
+
+    /// Rewrites `signals.json` in place, the way the harness does, and moves
+    /// its mtime forward so the change is visible to a stamp comparison.
+    func writeSignals(in directory: URL, _ json: String) throws {
+        let target = directory.appendingPathComponent("signals.json")
+        try Data(json.utf8).write(to: target)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date()], ofItemAtPath: target.path)
     }
 
     /// Writes `active_sessions.json`.
@@ -743,6 +776,59 @@ struct GrokSessionTailerTests {
         let counts = histogram(try tailer.poll())
         #expect(counts["userPrompt"] == 1)
         #expect(counts["assistantText"] == 2)
+    }
+
+    @Test("signals.json becomes a context reading, once per rewrite")
+    func contextLevel() throws {
+        let home = GrokHome(tree: TemporaryTree())
+        let directory = try home.session(files: GrokHome.everyFile)
+        let tailer = tailer(home, directory: directory)
+
+        let readings = contextReadings(try tailer.poll())
+        #expect(readings.count == 1)
+        // `contextTokensUsed` out of `contextWindowTokens`, as the harness
+        // computed them. Nothing derived, and no cached share on offer.
+        #expect(readings.first?.used == 12_900)
+        #expect(readings.first?.window == 500_000)
+        #expect(readings.first?.cached == nil)
+        #expect(readings.first?.source == .measured)
+
+        // The file is rewritten in place, so an unchanged one is not a second
+        // reading — a poll that changes nothing costs one stat and says
+        // nothing.
+        #expect(contextReadings(try tailer.poll()).isEmpty)
+
+        try home.writeSignals(
+            in: directory,
+            #"{"contextTokensUsed":410000,"contextWindowTokens":500000,"compactionCount":2}"#
+        )
+        let after = contextReadings(try tailer.poll())
+        #expect(after.map(\.used) == [410_000])
+    }
+
+    @Test("a session with no signals.json tails exactly as it did before")
+    func withoutSignals() throws {
+        let home = GrokHome(tree: TemporaryTree())
+        let directory = try home.session()
+        #expect(contextReadings(try tailer(home, directory: directory).poll()).isEmpty)
+    }
+
+    @Test("signals.json with no context counters in it says nothing")
+    func signalsWithoutContext() throws {
+        let home = GrokHome(tree: TemporaryTree())
+        let directory = try home.session()
+        try home.writeSignals(in: directory, #"{"turnCount":3,"toolCallCount":9}"#)
+        #expect(contextReadings(try tailer(home, directory: directory).poll()).isEmpty)
+    }
+
+    @Test("a cold-start seed carries the level too")
+    func seedCarriesTheLevel() throws {
+        let home = GrokHome(tree: TemporaryTree())
+        let directory = try home.session(files: GrokHome.everyFile)
+        let tailer = tailer(home, directory: directory)
+        #expect(contextReadings(try tailer.seedFromTail(maxBytes: 64 * 1024)).count == 1)
+        // And the seed consumed it, so the poll behind it does not repeat it.
+        #expect(contextReadings(try tailer.poll()).isEmpty)
     }
 
     @Test("a session whose files are not there yet polls empty rather than throwing")

@@ -35,6 +35,11 @@ import Synchronization
 /// every fact in it is in `updates.jsonl` too, stamped, and in a shape that has
 /// not changed between releases. ``GrokRecordMapper`` has the table.
 ///
+/// `signals.json` is read too, by ``GrokSignalsReader``, for the one thing in
+/// it that neither log records: how full the context window is. It is neither
+/// tailed nor watched — it is rewritten in place many times a minute — and it
+/// costs one `stat(2)` per poll of a session that is being polled anyway.
+///
 /// ## Liveness
 ///
 /// Unusually among these harnesses, Grok says so explicitly:
@@ -544,6 +549,10 @@ public final class GrokSessionTailer: SessionTailer {
 
     /// The per-file tailers, in the order that breaks ties at equal timestamps.
     private let tailers: [JSONLTailer]
+    /// `signals.json`, which is a value rather than a log. See
+    /// ``GrokSignalsReader``.
+    private let signals: GrokSignalsReader
+    private let clock: @Sendable () -> Date
     private let sequence: Mutex<Int64>
 
     /// Creates a tailer over the session's files.
@@ -566,9 +575,11 @@ public final class GrokSessionTailer: SessionTailer {
     ) {
         self.source = source
         self.sequence = Mutex(0)
+        self.clock = clock
 
         let key = source.key
         let directory = GrokLiveAdapter.sessionDirectory(sourcePath: source.primaryPath)
+        self.signals = GrokSignalsReader(directory: directory, session: key)
         tailers = files.map { file in
             let path = directory.appendingPathComponent(file.fileName).path
             return JSONLTailer(source: source, path: path, cursor: cursor) { data, _ in
@@ -604,12 +615,20 @@ public final class GrokSessionTailer: SessionTailer {
     }
 
     /// Reads every file, merges by timestamp, and re-stamps the sequence.
+    ///
+    /// `signals.json` joins the merge last, so a context reading stamped with
+    /// the same mtime as a log line written beside it sorts after that line —
+    /// which is the order the harness wrote them in, and the order that leaves
+    /// the newest level on the snapshot.
     private func merge(_ read: (JSONLTailer) throws -> [AgentEvent]) rethrows -> [AgentEvent] {
         var collected: [(file: Int, position: Int, event: AgentEvent)] = []
         for (file, tailer) in tailers.enumerated() {
             for (position, event) in try read(tailer).enumerated() {
                 collected.append((file, position, event))
             }
+        }
+        for (position, event) in signals.poll(now: clock()).enumerated() {
+            collected.append((tailers.count, position, event))
         }
         guard !collected.isEmpty else { return [] }
 
