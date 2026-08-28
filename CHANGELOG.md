@@ -6,6 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-08-28
+
+An AntiGravity turn gets its clock back. agy CLI ~1.1.18 (2026-08) stopped
+writing the per-turn wall time, and every cost scanner reading these stores
+went dark from that day; the offset it writes instead is now resolved
+against the trajectory's own start time, so a host that bumps its pin
+recovers dated usage for the affected conversations with no API change.
+
+### Fixed
+- **`AntigravityGenMetadataReader` dates the relative-clock records agy
+  ~1.1.18 writes.** Those builds replace the wall clock at `1.9.4` with a
+  `UInt64.max` sentinel at `1.9.2` and an elapsed-milliseconds offset at
+  `1.9.10.1`, measured from the trajectory's start. The reader now reads
+  that base from the store's own `trajectory_metadata_blob` table (path
+  `2.1`, exposed as `trajectoryBaseDate(at:)`) and resolves each turn as
+  base + offset — `readGenMetadata(at:)` callers get dated turns again
+  without code changes. A store with neither clock still yields nothing:
+  an undatable usage row cannot be billed to a day, and `decodeTurn(blob:)`
+  keeps that contract (`decodeTurn(blob:baseDate:)` is the new
+  offset-aware entry point). The live session paths (`metadataSummary`,
+  transcript turn cards) resolve the same way, so first/last activity and
+  turn cards return for the affected conversations too.
+
 ## [0.6.1] - 2026-08-21
 
 A task notification is not an instruction, and Fable 5 has a million-token
