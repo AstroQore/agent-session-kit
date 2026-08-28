@@ -21,7 +21,14 @@ import SQLite3
 ///   - `1.4.11` — the upstream request id (string), useful as a
 ///     dedupe key in the scan cache
 ///   - `1.9.4.1` / `1.9.4.2` — seconds + nanoseconds of the wall
-///     clock when the turn started
+///     clock when the turn started. agy CLI builds from ~1.1.18
+///     (2026-08) stopped writing this block: `1.9.2` becomes a
+///     `UInt64.max` sentinel and the turn's clock moves to `1.9.10`
+///   - `1.9.10.1` — milliseconds elapsed since the conversation's own
+///     start, monotonically increasing within a trajectory. The
+///     absolute base lives in the same store: table
+///     `trajectory_metadata_blob`, protobuf path `2.1` (epoch
+///     seconds), read by ``trajectoryBaseDate(at:)``
 ///   - `1.19` — routed model alias, e.g. `gemini-default`
 ///   - `1.20["model_enum"]` — internal model id, e.g.
 ///     `MODEL_PLACEHOLDER_M84`
@@ -100,6 +107,12 @@ public enum AntigravityGenMetadataReader {
         }
         defer { sqlite3_close_v2(db) }
 
+        // Turns written by agy >= ~1.1.18 carry only an elapsed offset; the
+        // wall clock they are relative to sits in a sibling table. Read it
+        // once so those rows decode with real dates. `nil` (older store, or
+        // the table is missing) simply keeps the strict absolute-only path.
+        let baseDate = trajectoryBaseDate(db: db)
+
         var statement: OpaquePointer? = nil
         let sql = "SELECT idx, data FROM gen_metadata ORDER BY idx"
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
@@ -115,7 +128,7 @@ public enum AntigravityGenMetadataReader {
                 let length = Int(sqlite3_column_bytes(statement, 1))
                 if length > 0 {
                     let blob = Data(bytes: raw, count: length)
-                    if let turn = decodeTurn(blob: blob) {
+                    if let turn = decodeTurn(blob: blob, baseDate: baseDate) {
                         turns.append(turn)
                     }
                 }
@@ -128,9 +141,72 @@ public enum AntigravityGenMetadataReader {
         return .success(turns)
     }
 
+    // MARK: - The trajectory's own clock
+
+    /// The conversation's start time, from the store's
+    /// `trajectory_metadata_blob` table (protobuf path `2.1`, epoch
+    /// seconds). This is the base the relative per-turn offsets that
+    /// agy >= ~1.1.18 writes are measured from. `nil` when the table,
+    /// the row, or the field is absent.
+    public static func trajectoryBaseDate(at file: URL) -> Date? {
+        let path = file.path
+        var db: OpaquePointer? = nil
+        let openFlags = SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_URI
+        let uri = "file:\(path)?immutable=1"
+        guard sqlite3_open_v2(uri, &db, openFlags, nil) == SQLITE_OK, let db else {
+            if db != nil { sqlite3_close_v2(db) }
+            return nil
+        }
+        defer { sqlite3_close_v2(db) }
+        return trajectoryBaseDate(db: db)
+    }
+
+    /// Same lookup over a connection the caller already holds. Total: any
+    /// missing table, row, or field answers `nil` rather than failing the
+    /// read that asked.
+    static func trajectoryBaseDate(db: OpaquePointer) -> Date? {
+        var statement: OpaquePointer? = nil
+        let sql = "SELECT data FROM trajectory_metadata_blob ORDER BY id LIMIT 1"
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            if statement != nil { sqlite3_finalize(statement) }
+            return nil
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW,
+              let raw = sqlite3_column_blob(statement, 0)
+        else { return nil }
+        let length = Int(sqlite3_column_bytes(statement, 0))
+        guard length > 0 else { return nil }
+        return decodeTrajectoryBase(blob: Data(bytes: raw, count: length))
+    }
+
+    /// `trajectory_metadata_blob.data` → the Timestamp at path `2`.
+    static func decodeTrajectoryBase(blob: Data) -> Date? {
+        let bytes = [UInt8](blob)
+        guard let timeBlock = extractLengthDelimited(bytes: bytes, fieldNumber: 2),
+              let seconds = extractVarint(bytes: timeBlock, fieldNumber: 1),
+              seconds > 0
+        else { return nil }
+        let nanos = extractVarint(bytes: timeBlock, fieldNumber: 2) ?? 0
+        return Date(timeIntervalSince1970: TimeInterval(seconds) + TimeInterval(nanos) / 1_000_000_000)
+    }
+
     // MARK: - Blob decoding
 
+    /// Decode a turn whose date must be written *in* the blob. A record with
+    /// only a relative offset (agy >= ~1.1.18) answers `nil` here — without
+    /// the trajectory's base clock the offset cannot be placed in a day.
+    /// Callers holding the store should prefer ``decodeTurn(blob:baseDate:)``
+    /// with ``trajectoryBaseDate(at:)``.
     public static func decodeTurn(blob: Data) -> Turn? {
+        decodeTurn(blob: blob, baseDate: nil)
+    }
+
+    /// Decode a turn, resolving its clock in order: the absolute wall time at
+    /// `1.9.4` when present, else `baseDate` plus the elapsed-milliseconds
+    /// offset at `1.9.10.1`. Still `nil` when neither resolves — an undatable
+    /// usage row cannot be billed to a day.
+    public static func decodeTurn(blob: Data, baseDate: Date?) -> Turn? {
         let bytes = [UInt8](blob)
         guard let outer = extractLengthDelimited(bytes: bytes, fieldNumber: 1) else { return nil }
 
@@ -160,6 +236,12 @@ public enum AntigravityGenMetadataReader {
         if let seconds = extractVarint(bytes: timeBlock, fieldNumber: 1) {
             let nanos = extractVarint(bytes: timeBlock, fieldNumber: 2) ?? 0
             date = Date(timeIntervalSince1970: TimeInterval(seconds) + TimeInterval(nanos) / 1_000_000_000)
+        } else if let baseDate,
+                  let relative = extractLengthDelimited(bytes: system, fieldNumber: 10) {
+            // proto3 elides a zero, so a present relative block whose field 1
+            // is missing is the trajectory's first instant, not a gap.
+            let elapsedMilliseconds = extractVarint(bytes: relative, fieldNumber: 1) ?? 0
+            date = baseDate.addingTimeInterval(TimeInterval(elapsedMilliseconds) / 1_000)
         } else {
             return nil
         }
@@ -203,13 +285,13 @@ public enum AntigravityGenMetadataReader {
     /// The model a `gen_metadata` blob names, without needing the rest of the
     /// turn to decode.
     ///
-    /// ``decodeTurn(blob:)`` answers `nil` for a record with no wall-clock
-    /// timestamp, which is correct for a cost scanner — a usage row that
-    /// cannot be placed in a day cannot be billed to one. AntiGravity builds
-    /// from 2026-08 write exactly that record: field `1.9` carries no `4`,
-    /// while `1.19` and `1.20["model_enum"]` name the model as they always
-    /// did. A caller that wants to say what a session is running on should
-    /// ask this, not a turn.
+    /// ``decodeTurn(blob:)`` answers `nil` for a record it cannot place on a
+    /// wall clock. AntiGravity builds from 2026-08 (agy ~1.1.18) moved the
+    /// per-turn clock to a relative offset — ``decodeTurn(blob:baseDate:)``
+    /// with ``trajectoryBaseDate(at:)`` recovers those — but `1.19` and
+    /// `1.20["model_enum"]` name the model either way. A caller that only
+    /// wants to say what a session is running on should ask this, not a
+    /// turn.
     public static func modelNames(blob: Data) -> ModelNames {
         let bytes = [UInt8](blob)
         guard let outer = extractLengthDelimited(bytes: bytes, fieldNumber: 1) else {

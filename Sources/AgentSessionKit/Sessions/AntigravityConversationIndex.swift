@@ -74,15 +74,18 @@ enum AntigravityLiveSQLite {
             }
 
             let limit = max(1, min(edgeLimit, LiveSQLiteReader.maxRows))
+            let baseDate = AntigravityGenMetadataReader.trajectoryBaseDate(db: database)
             let first = try decodedTurns(
                 database: database,
                 order: "ASC",
-                limit: limit
+                limit: limit,
+                baseDate: baseDate
             )
             let recent = try decodedTurns(
                 database: database,
                 order: "DESC",
-                limit: limit
+                limit: limit,
+                baseDate: baseDate
             )
             return MetadataSummary(
                 firstDate: first.first?.date,
@@ -96,7 +99,8 @@ enum AntigravityLiveSQLite {
     private static func decodedTurns(
         database: OpaquePointer,
         order: String,
-        limit: Int
+        limit: Int,
+        baseDate: Date?
     ) throws -> [AntigravityGenMetadataReader.Turn] {
         let statement = try LiveSQLiteReader.prepare(
             database,
@@ -107,7 +111,7 @@ enum AntigravityLiveSQLite {
         var result = sqlite3_step(statement)
         while result == SQLITE_ROW {
             if let data = LiveSQLiteReader.blob(statement, 0),
-               let turn = AntigravityGenMetadataReader.decodeTurn(blob: data) {
+               let turn = AntigravityGenMetadataReader.decodeTurn(blob: data, baseDate: baseDate) {
                 out.append(turn)
             }
             result = sqlite3_step(statement)
@@ -123,6 +127,7 @@ enum AntigravityLiveSQLite {
     /// database), so only its blob decoder is reused here.
     static func turns(at url: URL) -> [(idx: Int, turn: AntigravityGenMetadataReader.Turn)]? {
         LiveSQLiteReader.read(at: url) { database in
+            let baseDate = AntigravityGenMetadataReader.trajectoryBaseDate(db: database)
             let statement = try LiveSQLiteReader.prepare(
                 database,
                 "SELECT idx, data FROM gen_metadata ORDER BY idx"
@@ -132,7 +137,7 @@ enum AntigravityLiveSQLite {
             var result = sqlite3_step(statement)
             while result == SQLITE_ROW, out.count < LiveSQLiteReader.maxRows {
                 if let data = LiveSQLiteReader.blob(statement, 1),
-                   let turn = AntigravityGenMetadataReader.decodeTurn(blob: data) {
+                   let turn = AntigravityGenMetadataReader.decodeTurn(blob: data, baseDate: baseDate) {
                     out.append((Int(sqlite3_column_int64(statement, 0)), turn))
                 }
                 result = sqlite3_step(statement)

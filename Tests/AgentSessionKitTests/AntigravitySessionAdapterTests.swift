@@ -57,6 +57,37 @@ enum AntigravityProtoFixture {
         "toolSummary"
     ]
 
+    /// `gen_metadata.data` as agy >= ~1.1.18 writes it: no wall clock at
+    /// 9.4 — instead a `UInt64.max` sentinel at 9.2 and the elapsed
+    /// offset (milliseconds since the trajectory started) at 9.10.1,
+    /// beside the constant 9.10.4 those builds also write.
+    static func relativeTurnBlob(
+        elapsedMilliseconds: UInt64?,
+        input: UInt64,
+        output: UInt64,
+        model: String? = "gemini-3-flash-a"
+    ) -> Data {
+        var usage = varintField(1, 1132)
+        usage += varintField(2, input)
+        usage += varintField(3, output)
+        usage += string(11, "req-fixture")
+        var relative: [UInt8] = []
+        if let elapsedMilliseconds {
+            relative += varintField(1, elapsedMilliseconds)
+        }
+        relative += varintField(4, 256_000)
+        let system = varintField(2, UInt64.max) + message(10, relative)
+        var outer = message(4, usage) + message(9, system)
+        if let model { outer += string(19, model) }
+        return Data(message(1, outer))
+    }
+
+    /// `trajectory_metadata_blob.data`: the trajectory's own start clock
+    /// as a Timestamp at path 2.
+    static func trajectoryBaseBlob(seconds: UInt64) -> Data {
+        Data(message(2, varintField(1, seconds) + varintField(2, 0)))
+    }
+
     /// `gen_metadata.data`: outer message 1, per-turn usage under 4,
     /// wall clock under 9.4, routed model under 19.
     static func turnBlob(
@@ -95,6 +126,7 @@ enum AntigravityDBFixture {
         at url: URL,
         steps: [Step],
         turns: [Turn] = [],
+        trajectoryBase: Data? = nil,
         walMode: Bool = false,
         keepOpen: Bool = false
     ) throws -> OpaquePointer? {
@@ -118,6 +150,7 @@ enum AntigravityDBFixture {
             CREATE TABLE `gen_metadata` (`idx` integer, `data` blob,
                 `size` integer NOT NULL DEFAULT 0, PRIMARY KEY (`idx`));
             CREATE TABLE `trajectory_meta` (`trajectory_id` text, PRIMARY KEY (`trajectory_id`));
+            CREATE TABLE `trajectory_metadata_blob` (`id` integer, `data` blob, PRIMARY KEY (`id`));
             """
         guard sqlite3_exec(db, schema, nil, nil, nil) == SQLITE_OK else {
             sqlite3_close_v2(db)
@@ -162,6 +195,25 @@ enum AntigravityDBFixture {
                                   unsafeBitCast(-1, to: sqlite3_destructor_type.self))
             }
             sqlite3_bind_int64(statement, 3, sqlite3_int64(turn.blob.count))
+            let stepped = sqlite3_step(statement)
+            sqlite3_finalize(statement)
+            guard stepped == SQLITE_DONE else {
+                sqlite3_close_v2(db)
+                throw CocoaError(.fileWriteUnknown)
+            }
+        }
+
+        if let trajectoryBase {
+            var statement: OpaquePointer?
+            let sql = "INSERT INTO trajectory_metadata_blob(id, data) VALUES (1, ?)"
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                sqlite3_close_v2(db)
+                throw CocoaError(.fileWriteUnknown)
+            }
+            _ = trajectoryBase.withUnsafeBytes { raw in
+                sqlite3_bind_blob(statement, 1, raw.baseAddress, Int32(trajectoryBase.count),
+                                  unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            }
             let stepped = sqlite3_step(statement)
             sqlite3_finalize(statement)
             guard stepped == SQLITE_DONE else {
