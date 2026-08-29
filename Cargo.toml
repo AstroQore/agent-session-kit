@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["crates/agent-session-core"]
+
+# Rust implementation lane of agent-session-kit. The Swift package rooted at
+# Package.swift and this Cargo workspace are peer implementations of the same
+# session-reading semantics; contracts and fixtures are shared. The Swift
+# sources are untouched by this workspace.

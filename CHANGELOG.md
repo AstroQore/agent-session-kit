@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`crates/agent-session-core` — the Rust implementation lane.** A new
+  Cargo workspace rooted at `Cargo.toml` carries `agent-session-core`
+  (v0.1.0), a dependency-light Rust crate mirroring the session-reading
+  semantics cross-platform hosts need without the Swift runtime: read-only
+  `session_index.sqlite3` access (schema v5; any other version is refused,
+  never rebuilt), lightweight Codex/Claude Code filesystem discovery,
+  tolerant JSONL transcript paging, and a byte-compatible mirror of
+  `SessionResumeCommandBuilder`. The Swift package is untouched; the two
+  lanes are peer implementations and this repository is the shared source
+  of truth. First consumer: `vibe-bar-desktop`.
+
 ## [0.6.2] - 2026-08-28
 
 An AntiGravity turn gets its clock back. agy CLI ~1.1.18 (2026-08) stopped

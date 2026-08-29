@@ -18,3 +18,8 @@ dist/
 # Python bytecode from helper scripts
 __pycache__/
 *.pyc
+
+# Rust lane build artifacts; like Package.resolved, the lockfile is
+# resolved fresh from the exact pins consumers declare.
+target/
+Cargo.lock
