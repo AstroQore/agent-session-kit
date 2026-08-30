@@ -177,12 +177,12 @@ pub fn open_regular_file(path: &Path) -> std::io::Result<File> {
 /// past `MAX_LINE_BYTES` and to consume beyond `budget`. A caller that runs
 /// out of budget receives `hit_budget` rather than draining an unterminated
 /// oversized line to EOF.
-struct LineRead {
-    consumed: usize,
-    hit_budget: bool,
+pub(crate) struct LineRead {
+    pub(crate) consumed: usize,
+    pub(crate) hit_budget: bool,
 }
 
-fn read_limited_line<R: BufRead>(
+pub(crate) fn read_limited_line<R: BufRead>(
     reader: &mut R,
     buf: &mut Vec<u8>,
     budget: usize,

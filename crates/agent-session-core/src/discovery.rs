@@ -17,6 +17,9 @@ use crate::provider::SessionProvider;
 #[derive(Debug, Clone, Serialize)]
 pub struct DiscoveredSession {
     pub provider: SessionProvider,
+    /// Raw harness key when discovery can distinguish the producing surface.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
     pub session_id: String,
     pub title: Option<String>,
     pub project_dir: Option<String>,
@@ -58,11 +61,8 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                 if line_type == Some("session_meta") {
                     if let Some(payload) = line.get("payload") {
                         if session_id.is_none() {
-                            session_id = payload
-                                .get("id")
-                                .or_else(|| payload.get("thread_id"))
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string);
+                            session_id = nonempty_json_string(payload.get("id"))
+                                .or_else(|| nonempty_json_string(payload.get("thread_id")));
                         }
                         if cwd.is_none() {
                             cwd = payload
@@ -95,9 +95,10 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                     (line.get("type").and_then(|v| v.as_str()) == Some("session_meta"))
                         .then(|| line.get("payload"))
                         .flatten()
-                        .and_then(|payload| payload.get("thread_id"))
-                        .and_then(|value| value.as_str())
-                        .map(str::to_string)
+                        .and_then(|payload| {
+                            nonempty_json_string(payload.get("id"))
+                                .or_else(|| nonempty_json_string(payload.get("thread_id")))
+                        })
                 });
             }
             // Fall back to the rollout filename's trailing uuid when the
@@ -109,8 +110,28 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
             {
                 return None;
             }
+            let harness = head
+                .iter()
+                .chain(tail.iter())
+                .find_map(|line| {
+                    (line.get("type").and_then(|value| value.as_str()) == Some("session_meta"))
+                        .then(|| line.get("payload"))
+                        .flatten()
+                        .and_then(|payload| payload.get("originator"))
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                })
+                .map_or("codex", |originator| {
+                    if originator == "codex_work_desktop" {
+                        "chatgptWork"
+                    } else {
+                        "codex"
+                    }
+                });
             Some(DiscoveredSession {
                 provider: SessionProvider::Codex,
+                harness: Some(harness.to_string()),
                 session_id,
                 title,
                 project_dir: cwd,
@@ -212,6 +233,7 @@ pub fn discover_claude(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
             }
             Some(DiscoveredSession {
                 provider: SessionProvider::Claude,
+                harness: Some("claudeCode".to_string()),
                 session_id,
                 title,
                 project_dir: cwd,
@@ -301,6 +323,14 @@ fn looks_like_uuid(value: &str) -> bool {
             8 | 13 | 18 | 23 => c == '-',
             _ => c.is_ascii_hexdigit(),
         })
+}
+
+fn nonempty_json_string(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 /// Flatten the same bounded display shapes the Swift adapters accept for a
@@ -516,12 +546,14 @@ mod tests {
         let codex = discover_codex(home, 10);
         assert_eq!(codex.len(), 1);
         assert_eq!(codex[0].session_id, "0199aaaa-1111-2222-3333-444455556666");
+        assert_eq!(codex[0].harness.as_deref(), Some("codex"));
         assert_eq!(codex[0].title.as_deref(), Some("fix the tray bug"));
         assert_eq!(codex[0].project_dir.as_deref(), Some("/Users/example/proj"));
 
         let claude = discover_claude(home, 10);
         assert_eq!(claude.len(), 1);
         assert_eq!(claude[0].session_id, "aaaabbbb-cccc-dddd-eeee-ffff00001111");
+        assert_eq!(claude[0].harness.as_deref(), Some("claudeCode"));
         assert_eq!(claude[0].title.as_deref(), Some("refactor storage"));
     }
 
@@ -542,6 +574,51 @@ mod tests {
         assert_eq!(
             sessions[0].session_id,
             "0199aaaa-1111-2222-3333-444455556666"
+        );
+    }
+
+    #[test]
+    fn blank_codex_metadata_ids_fall_back_to_filename_uuid() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("rollout-a-0199aaaa-1111-2222-3333-444455556666.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"   \"}}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sessions.join("rollout-b-0199bbbb-1111-2222-3333-444455556666.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"thread_id\":\" \\t \"}}\n",
+        )
+        .unwrap();
+        let mut ids = discover_codex(dir.path(), 10)
+            .into_iter()
+            .map(|session| session.session_id)
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(
+            ids,
+            [
+                "0199aaaa-1111-2222-3333-444455556666",
+                "0199bbbb-1111-2222-3333-444455556666",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_work_originator_sets_chatgpt_work_harness() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("rollout-x-0199aaaa-1111-2222-3333-444455556666.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"0199aaaa-1111-2222-3333-444455556666\",\"originator\":\"codex_work_desktop\"}}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            discover_codex(dir.path(), 1)[0].harness.as_deref(),
+            Some("chatgptWork")
         );
     }
 

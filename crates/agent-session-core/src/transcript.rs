@@ -5,10 +5,10 @@
 //! newer schema.
 
 use std::fs::File;
-use std::io::BufRead;
+use std::io::{BufRead, Seek, SeekFrom};
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::jsonl;
@@ -42,6 +42,14 @@ pub struct TranscriptMessage {
     pub timestamp: Option<String>,
 }
 
+/// Bounded continuation point inside one already-authorized transcript file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptCursor {
+    pub byte_offset: u64,
+    pub message_offset: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptPage {
@@ -53,6 +61,8 @@ pub struct TranscriptPage {
     pub offset: usize,
     /// True when the reader reached a scan byte/message safety cap.
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<TranscriptCursor>,
 }
 
 /// Parse a transcript page from a session log. Only Codex and Claude Code are
@@ -81,11 +91,32 @@ pub fn read_page_from_file(
     offset: usize,
     limit: usize,
 ) -> std::io::Result<TranscriptPage> {
-    read_page_from_reader(
+    read_page_from_file_with_cursor(provider, file, offset, limit, None)
+}
+
+/// Continue a bounded transcript scan from a cursor previously returned for
+/// this same authorized file. Invalid or forward-of-request cursors fall back
+/// to the legacy offset-only scan from the beginning.
+pub fn read_page_from_file_with_cursor(
+    provider: SessionProvider,
+    mut file: File,
+    offset: usize,
+    limit: usize,
+    cursor: Option<TranscriptCursor>,
+) -> std::io::Result<TranscriptPage> {
+    let file_len = file.metadata()?.len();
+    let cursor =
+        cursor.filter(|cursor| cursor.byte_offset <= file_len && cursor.message_offset <= offset);
+    let byte_offset = cursor.map_or(0, |cursor| cursor.byte_offset);
+    let message_offset = cursor.map_or(0, |cursor| cursor.message_offset);
+    file.seek(SeekFrom::Start(byte_offset))?;
+    read_page_from_reader_at(
         provider,
         std::io::BufReader::with_capacity(256 * 1024, file),
         offset,
         limit,
+        byte_offset,
+        message_offset,
     )
 }
 
@@ -96,22 +127,50 @@ pub fn read_page_from_reader<R: BufRead>(
     offset: usize,
     limit: usize,
 ) -> std::io::Result<TranscriptPage> {
+    read_page_from_reader_at(provider, reader, offset, limit, 0, 0)
+}
+
+fn read_page_from_reader_at<R: BufRead>(
+    provider: SessionProvider,
+    reader: R,
+    offset: usize,
+    limit: usize,
+    byte_offset: u64,
+    message_offset: usize,
+) -> std::io::Result<TranscriptPage> {
     match provider {
-        SessionProvider::Codex => read_page_with_reader(reader, offset, limit, codex_message),
-        SessionProvider::Claude => read_page_with_reader(reader, offset, limit, claude_message),
+        SessionProvider::Codex => read_page_with_reader_at(
+            reader,
+            offset,
+            limit,
+            byte_offset,
+            message_offset,
+            codex_message,
+        ),
+        SessionProvider::Claude => read_page_with_reader_at(
+            reader,
+            offset,
+            limit,
+            byte_offset,
+            message_offset,
+            claude_message,
+        ),
         _ => Ok(TranscriptPage {
             messages: Vec::new(),
             total_messages: Some(0),
             offset,
             truncated: false,
+            next_cursor: None,
         }),
     }
 }
 
-fn read_page_with_reader<R: BufRead>(
+fn read_page_with_reader_at<R: BufRead>(
     reader: R,
     offset: usize,
     limit: usize,
+    byte_offset: u64,
+    message_offset: usize,
     parse: fn(&Value) -> Option<TranscriptMessage>,
 ) -> std::io::Result<TranscriptPage> {
     read_page_with_reader_bounded(
@@ -120,6 +179,10 @@ fn read_page_with_reader<R: BufRead>(
         limit,
         MAX_TRANSCRIPT_SCAN_BYTES,
         MAX_TRANSCRIPT_SCAN_MESSAGES,
+        TranscriptCursor {
+            byte_offset,
+            message_offset,
+        },
         parse,
     )
 }
@@ -130,33 +193,69 @@ fn read_page_with_reader_bounded<R: BufRead>(
     limit: usize,
     max_scan_bytes: u64,
     max_scan_messages: usize,
+    start: TranscriptCursor,
     parse: fn(&Value) -> Option<TranscriptMessage>,
 ) -> std::io::Result<TranscriptPage> {
+    let mut reader = reader;
     let page_limit = limit.clamp(1, MAX_PAGE_MESSAGES);
     let mut messages: Vec<TranscriptMessage> = Vec::with_capacity(page_limit);
-    let mut total_messages = 0usize;
-    let mut hit_message_cap = false;
-    let mut accept = |message: Option<TranscriptMessage>| {
-        let Some(message) = message else { return true };
-        if total_messages >= max_scan_messages {
-            hit_message_cap = true;
-            return false;
+    let mut scanned_messages = 0usize;
+    let mut bytes_read = 0u64;
+    let mut resume_offset = 0u64;
+    let mut truncated = false;
+    let cap = max_scan_bytes.max(1);
+    let mut buf = Vec::new();
+
+    loop {
+        if bytes_read >= cap {
+            truncated = true;
+            resume_offset = bytes_read;
+            break;
         }
-        if total_messages >= offset && messages.len() < page_limit {
+        let line_start = bytes_read;
+        buf.clear();
+        let remaining = usize::try_from(cap - bytes_read).unwrap_or(usize::MAX);
+        let line = jsonl::read_limited_line(&mut reader, &mut buf, remaining)?;
+        if line.consumed == 0 {
+            break;
+        }
+        bytes_read = bytes_read.saturating_add(line.consumed as u64);
+        if line.hit_budget {
+            truncated = true;
+            resume_offset = line_start;
+            break;
+        }
+        if buf.len() >= jsonl::MAX_LINE_BYTES {
+            continue;
+        }
+        let Ok(value) = serde_json::from_slice::<Value>(&buf) else {
+            continue;
+        };
+        let Some(message) = parse(&value) else {
+            continue;
+        };
+        if scanned_messages >= max_scan_messages {
+            truncated = true;
+            resume_offset = line_start;
+            break;
+        }
+        let absolute_offset = start.message_offset.saturating_add(scanned_messages);
+        if absolute_offset >= offset && messages.len() < page_limit {
             messages.push(clip_message(message));
         }
-        total_messages += 1;
-        true
-    };
-    let stats = jsonl::for_each_json_line_bounded_reader(reader, max_scan_bytes, |line| {
-        accept(parse(&line))
-    })?;
-    let truncated = stats.truncated || hit_message_cap;
+        scanned_messages += 1;
+    }
+
+    let scanned_to = start.message_offset.saturating_add(scanned_messages);
     Ok(TranscriptPage {
         messages,
-        total_messages: (!truncated).then_some(total_messages),
+        total_messages: (!truncated).then_some(scanned_to),
         offset,
         truncated,
+        next_cursor: truncated.then_some(TranscriptCursor {
+            byte_offset: start.byte_offset.saturating_add(resume_offset),
+            message_offset: scanned_to,
+        }),
     })
 }
 
@@ -612,6 +711,65 @@ mod tests {
     }
 
     #[test]
+    fn cursor_reaches_messages_beyond_each_bounded_scan_window() {
+        use std::io::Cursor;
+
+        let input = (0..4)
+            .map(|index| {
+                format!(
+                    "{}\n",
+                    serde_json::json!({
+                        "type": "response_item",
+                        "payload": {"type": "message", "role": "user",
+                                    "content": [{"text": format!("message {index}")}]}
+                    })
+                )
+            })
+            .collect::<String>()
+            .into_bytes();
+        let first = read_page_with_reader_bounded(
+            Cursor::new(input.clone()),
+            0,
+            2,
+            1024 * 1024,
+            2,
+            TranscriptCursor {
+                byte_offset: 0,
+                message_offset: 0,
+            },
+            codex_message,
+        )
+        .unwrap();
+        assert_eq!(
+            first
+                .messages
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            ["message 0", "message 1"]
+        );
+        let cursor = first.next_cursor.expect("bounded scan continuation");
+        assert_eq!(cursor.message_offset, 2);
+
+        let mut reader = Cursor::new(input);
+        reader.set_position(cursor.byte_offset);
+        let second =
+            read_page_with_reader_bounded(reader, 2, 2, 1024 * 1024, 2, cursor, codex_message)
+                .unwrap();
+        assert_eq!(
+            second
+                .messages
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            ["message 2", "message 3"]
+        );
+        assert_eq!(second.total_messages, Some(4));
+        assert!(!second.truncated);
+        assert!(second.next_cursor.is_none());
+    }
+
+    #[test]
     fn clips_message_text() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("c.jsonl");
@@ -662,11 +820,16 @@ mod tests {
             1,
             1024,
             MAX_TRANSCRIPT_SCAN_MESSAGES,
+            TranscriptCursor {
+                byte_offset: 0,
+                message_offset: 0,
+            },
             codex_message,
         )
         .unwrap();
         assert!(page.messages.is_empty());
         assert_eq!(page.total_messages, None);
         assert!(page.truncated);
+        assert_eq!(page.next_cursor.unwrap().byte_offset, 0);
     }
 }
