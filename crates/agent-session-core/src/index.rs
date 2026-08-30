@@ -24,7 +24,7 @@ use serde::Serialize;
 
 use crate::error::SessionCoreError;
 use crate::provider::SessionProvider;
-use crate::transcript::{self, TranscriptPage};
+use crate::transcript::{self, TranscriptCursor, TranscriptPage};
 
 pub const SUPPORTED_SCHEMA_VERSION: i64 = 5;
 /// Matches the Swift store's public page/search cap.
@@ -501,16 +501,29 @@ impl SessionIndexReader {
 
     /// Backend convenience for a known index row.
     ///
-    /// This resolves the stored source path and uses the path convenience
-    /// reader, so it is best-effort against same-user path replacement. A
-    /// security-sensitive host should resolve its own random UI token to a
-    /// backend row, safely open the resulting file, then call
-    /// [`transcript::read_page_from_file`].
+    /// This resolves the stored source path and rejects a symlink or
+    /// non-regular leaf before opening it, but remains best-effort against a
+    /// same-user path replacement race. A security-sensitive host should
+    /// resolve its own random UI token to a backend row, safely open the file,
+    /// then call [`transcript::read_page_from_file`].
     pub fn read_transcript_page(
         &self,
         session: SessionRef,
         offset: usize,
         limit: usize,
+    ) -> Result<TranscriptPage, SessionCoreError> {
+        self.read_transcript_page_with_cursor(session, offset, limit, None)
+    }
+
+    /// Backend convenience for continuing a bounded scan of a known index row.
+    /// The cursor must have come from this same session file; invalid cursors
+    /// safely fall back to the legacy offset-only scan.
+    pub fn read_transcript_page_with_cursor(
+        &self,
+        session: SessionRef,
+        offset: usize,
+        limit: usize,
+        cursor: Option<TranscriptCursor>,
     ) -> Result<TranscriptPage, SessionCoreError> {
         let (raw_provider, source_path): (String, String) = self
             .conn
@@ -527,11 +540,9 @@ impl SessionIndexReader {
             })?;
         let provider = SessionProvider::from_raw(&raw_provider)
             .ok_or(SessionCoreError::UnknownProvider(raw_provider))?;
-        Ok(transcript::read_page(
-            provider,
-            Path::new(&source_path),
-            offset,
-            limit,
+        let file = crate::jsonl::open_regular_file(Path::new(&source_path))?;
+        Ok(transcript::read_page_from_file_with_cursor(
+            provider, file, offset, limit, cursor,
         )?)
     }
 
@@ -1424,10 +1435,67 @@ mod tests {
         let reader = SessionIndexReader::open(&path).unwrap();
         let page = reader.read_transcript_page(SessionRef(1), 0, 10).unwrap();
         assert_eq!(page.messages[0].text, "hello");
+        let cursor_page = reader
+            .read_transcript_page_with_cursor(SessionRef(1), 0, 10, None)
+            .unwrap();
+        assert_eq!(cursor_page.messages[0].text, "hello");
+        assert_eq!(cursor_page.next_cursor, page.next_cursor);
         assert!(matches!(
             reader.read_transcript_page(SessionRef(99), 0, 1),
             Err(SessionCoreError::SessionNotFound(99))
         ));
+    }
+
+    #[test]
+    fn indexed_transcript_cursor_reaches_past_the_bounded_scan() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let transcript_path = dir.path().join("large-session.jsonl");
+        let mut transcript =
+            std::io::BufWriter::new(std::fs::File::create(&transcript_path).unwrap());
+        for index in 0..=transcript::MAX_TRANSCRIPT_SCAN_MESSAGES {
+            writeln!(
+                transcript,
+                "{}",
+                serde_json::json!({
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"text": format!("message {index}")}]
+                    }
+                })
+            )
+            .unwrap();
+        }
+        drop(transcript);
+
+        let path = fixture_index(dir.path());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE sessions SET source_path = ? WHERE id = 1",
+            [transcript_path.to_string_lossy().into_owned()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let reader = SessionIndexReader::open(&path).unwrap();
+        let offset = transcript::MAX_TRANSCRIPT_SCAN_MESSAGES;
+        let first = reader
+            .read_transcript_page_with_cursor(SessionRef(1), offset, 1, None)
+            .unwrap();
+        assert!(first.messages.is_empty());
+        assert!(first.truncated);
+        let cursor = first.next_cursor.expect("bounded continuation cursor");
+        assert_eq!(cursor.message_offset, offset);
+        assert!(cursor.byte_offset > 0);
+
+        let continued = reader
+            .read_transcript_page_with_cursor(SessionRef(1), offset, 1, Some(cursor))
+            .unwrap();
+        assert_eq!(continued.messages[0].text, format!("message {offset}"));
+        assert!(!continued.truncated);
     }
 
     #[cfg(unix)]
