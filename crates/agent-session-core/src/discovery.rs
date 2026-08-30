@@ -7,7 +7,7 @@
 //! Full indexing (FTS, every harness) stays with the index writer.
 
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
@@ -31,7 +31,7 @@ pub struct DiscoveredSession {
 /// Enumerate Codex sessions under `<home>/.codex/sessions` (and
 /// `archived_sessions`), newest first, capped at `limit`.
 pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
-    let mut files: Vec<(PathBuf, i64, u64)> = Vec::new();
+    let mut files: Vec<(PathBuf, SystemTime, u64)> = Vec::new();
     if let Some(root) = safe_root(home, &[".codex", "sessions"]) {
         collect_jsonl_files(&root, &mut files, 4);
     }
@@ -115,7 +115,7 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                 title,
                 project_dir: cwd,
                 source_path: path.to_string_lossy().into_owned(),
-                modified_at: mtime,
+                modified_at: unix_seconds(mtime),
                 size_bytes: size,
             })
         })
@@ -126,7 +126,7 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
 /// Enumerate Claude Code sessions under `<home>/.claude/projects` and
 /// `<home>/.config/claude/projects`, newest first, capped at `limit`.
 pub fn discover_claude(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
-    let mut files: Vec<(PathBuf, i64, u64)> = Vec::new();
+    let mut files: Vec<(PathBuf, SystemTime, u64)> = Vec::new();
     if let Some(root) = safe_root(home, &[".claude", "projects"]) {
         collect_jsonl_files(&root, &mut files, 3);
     }
@@ -216,7 +216,7 @@ pub fn discover_claude(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                 title,
                 project_dir: cwd,
                 source_path: path.to_string_lossy().into_owned(),
-                modified_at: mtime,
+                modified_at: unix_seconds(mtime),
                 size_bytes: size,
             })
         })
@@ -240,7 +240,7 @@ fn safe_root(home: &Path, components: &[&str]) -> Option<PathBuf> {
     Some(path)
 }
 
-fn collect_jsonl_files(root: &Path, out: &mut Vec<(PathBuf, i64, u64)>, max_depth: usize) {
+fn collect_jsonl_files(root: &Path, out: &mut Vec<(PathBuf, SystemTime, u64)>, max_depth: usize) {
     if max_depth == 0 {
         return;
     }
@@ -260,12 +260,7 @@ fn collect_jsonl_files(root: &Path, out: &mut Vec<(PathBuf, i64, u64)>, max_dept
             collect_jsonl_files(&path, out, max_depth - 1);
         } else if file_type.is_file() && path.extension().is_some_and(|e| e == "jsonl") {
             let Ok(meta) = entry.metadata() else { continue };
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
+            let mtime = meta.modified().unwrap_or(UNIX_EPOCH);
             out.push((path, mtime, meta.len()));
         }
     }
@@ -273,8 +268,13 @@ fn collect_jsonl_files(root: &Path, out: &mut Vec<(PathBuf, i64, u64)>, max_dept
 
 /// A deterministic source-path tiebreak keeps discovery order stable when
 /// multiple files have the same filesystem timestamp.
-fn sort_files(files: &mut [(PathBuf, i64, u64)]) {
+fn sort_files(files: &mut [(PathBuf, SystemTime, u64)]) {
     files.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+}
+
+fn unix_seconds(time: SystemTime) -> i64 {
+    time.duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs() as i64)
 }
 
 /// `rollout-2026-08-30T04-55-08-<uuid>.jsonl` → the trailing uuid.
@@ -756,6 +756,35 @@ mod tests {
     }
 
     #[test]
+    fn subsecond_mtime_orders_before_path_tiebreak_and_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join(".codex/sessions");
+        std::fs::create_dir_all(&codex).unwrap();
+        let older = codex.join("rollout-a-0199aaaa-1111-2222-3333-444455556666.jsonl");
+        let newer = codex.join("rollout-z-0199bbbb-1111-2222-3333-444455556666.jsonl");
+        std::fs::write(
+            &older,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"0199aaaa-1111-2222-3333-444455556666\"}}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &newer,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"0199bbbb-1111-2222-3333-444455556666\"}}\n",
+        )
+        .unwrap();
+        set_modified_precise(&older, 100, 100_000_000);
+        set_modified_precise(&newer, 100, 900_000_000);
+
+        let sessions = discover_codex(dir.path(), 1);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].session_id,
+            "0199bbbb-1111-2222-3333-444455556666"
+        );
+        assert_eq!(sessions[0].modified_at, 100);
+    }
+
+    #[test]
     fn claude_non_uuid_files_use_recorded_session_id_and_merge_title_blocks() {
         let dir = tempfile::tempdir().unwrap();
         let claude = dir.path().join(".claude/projects/p");
@@ -796,9 +825,13 @@ mod tests {
     }
 
     fn set_modified(path: &Path, seconds: u64) {
+        set_modified_precise(path, seconds, 0);
+    }
+
+    fn set_modified_precise(path: &Path, seconds: u64, nanos: u32) {
         let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
         let times = std::fs::FileTimes::new()
-            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds));
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::new(seconds, nanos));
         file.set_times(times).unwrap();
     }
 }
