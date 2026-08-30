@@ -38,7 +38,6 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
         collect_jsonl_files(&root, &mut files, 4);
     }
     files.sort_by_key(|f| std::cmp::Reverse(f.1));
-    files.truncate(limit);
 
     files
         .into_iter()
@@ -74,9 +73,13 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                     }
                 }
             }
+            let filename_id = session_id_from_rollout_name(&path);
+            if session_id.is_some() && filename_id.is_some() && session_id != filename_id {
+                return None;
+            }
             // Fall back to the rollout filename's trailing uuid when the meta
             // line is missing.
-            let session_id = session_id.or_else(|| session_id_from_rollout_name(&path))?;
+            let session_id = session_id.or(filename_id)?;
             Some(DiscoveredSession {
                 provider: SessionProvider::Codex,
                 session_id,
@@ -87,6 +90,7 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                 size_bytes: size,
             })
         })
+        .take(limit)
         .collect()
 }
 
@@ -101,7 +105,6 @@ pub fn discover_claude(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
         collect_jsonl_files(&root, &mut files, 3);
     }
     files.sort_by_key(|f| std::cmp::Reverse(f.1));
-    files.truncate(limit);
 
     files
         .into_iter()
@@ -114,6 +117,9 @@ pub fn discover_claude(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
             let mut cwd = None;
             let mut title = None;
             for line in &head {
+                if line.get("isMeta").and_then(|value| value.as_bool()) == Some(true) {
+                    continue;
+                }
                 if cwd.is_none() {
                     cwd = line.get("cwd").and_then(|v| v.as_str()).map(str::to_string);
                 }
@@ -140,6 +146,7 @@ pub fn discover_claude(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                 size_bytes: size,
             })
         })
+        .take(limit)
         .collect()
 }
 
@@ -341,5 +348,51 @@ mod tests {
         std::fs::create_dir_all(&codex).unwrap();
         symlink(&target, codex.join("sessions")).unwrap();
         assert!(discover_codex(middle.path(), 10).is_empty());
+    }
+
+    #[test]
+    fn parses_past_invalid_newest_candidates_and_skips_conflicting_codex_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join(".codex/sessions");
+        std::fs::create_dir_all(&codex).unwrap();
+        let bad_codex = codex.join("bad.jsonl");
+        std::fs::write(&bad_codex, "{}\n").unwrap();
+        let valid_codex = codex.join("rollout-x-0199aaaa-1111-2222-3333-444455556666.jsonl");
+        std::fs::write(
+            &valid_codex,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"0199aaaa-1111-2222-3333-444455556666\"}}\n",
+        )
+        .unwrap();
+        set_modified(&bad_codex, 200);
+        set_modified(&valid_codex, 100);
+        assert_eq!(discover_codex(dir.path(), 1).len(), 1);
+        std::fs::write(
+            codex.join("rollout-x-0199bbbb-1111-2222-3333-444455556666.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"0199cccc-1111-2222-3333-444455556666\"}}\n",
+        ).unwrap();
+        assert_eq!(discover_codex(dir.path(), 10).len(), 1);
+
+        let claude = dir.path().join(".claude/projects/p");
+        std::fs::create_dir_all(&claude).unwrap();
+        let invalid_claude = claude.join("invalid.jsonl");
+        std::fs::write(&invalid_claude, "{}\n").unwrap();
+        let valid_claude = claude.join("aaaabbbb-cccc-dddd-eeee-ffff00001111.jsonl");
+        std::fs::write(
+            &valid_claude,
+            "{\"type\":\"user\",\"isMeta\":true,\"message\":{\"content\":\"meta\"}}\n{\"type\":\"user\",\"message\":{\"content\":\"real prompt\"}}\n",
+        )
+        .unwrap();
+        set_modified(&invalid_claude, 200);
+        set_modified(&valid_claude, 100);
+        let sessions = discover_claude(dir.path(), 1);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].title.as_deref(), Some("real prompt"));
+    }
+
+    fn set_modified(path: &Path, seconds: u64) {
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        let times = std::fs::FileTimes::new()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds));
+        file.set_times(times).unwrap();
     }
 }

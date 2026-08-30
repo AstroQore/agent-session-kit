@@ -202,7 +202,7 @@ fn codex_message(line: &Value) -> Option<TranscriptMessage> {
                         .unwrap_or("tool");
                     Some(TranscriptMessage {
                         role: TranscriptRole::Tool,
-                        text: format!("[tool call] {name}"),
+                        text: tool_call_text(name, payload.get("arguments")),
                         timestamp,
                     })
                 }
@@ -259,7 +259,7 @@ fn claude_message(line: &Value) -> Option<TranscriptMessage> {
                         }
                         Some("tool_use") => {
                             let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
-                            parts.push(format!("[tool call] {name}"));
+                            parts.push(tool_call_text(name, block.get("input")));
                             only_tool_results = false;
                         }
                         Some("tool_result") => parts.push(
@@ -316,6 +316,23 @@ fn recorded_text(value: Option<&Value>) -> Option<String> {
         .or_else(|| value.get("content"))
         .or_else(|| value.get("output"))
         .and_then(|nested| recorded_text(Some(nested)))
+}
+
+fn tool_call_text(name: &str, input: Option<&Value>) -> String {
+    let Some(input) = input else {
+        return format!("[tool call] {name}");
+    };
+    let rendered = match input {
+        Value::String(text) => serde_json::from_str::<Value>(text)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|_| text.trim().to_string()),
+        value => value.to_string(),
+    };
+    if rendered.is_empty() || rendered == "null" || rendered == "{}" {
+        format!("[tool call] {name}")
+    } else {
+        format!("[tool call] {name} {rendered}")
+    }
 }
 
 fn joined_block_text(content: &Value) -> Option<String> {
@@ -461,6 +478,27 @@ mod tests {
         .unwrap();
         let page = read_page(SessionProvider::Codex, &path, 0, 10).unwrap();
         assert_eq!(page.messages[0].text, "actual Codex output");
+    }
+
+    #[test]
+    fn keeps_stable_recorded_tool_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"Bash\",\"arguments\":\"{\\\"b\\\":2,\\\"a\\\":1}\"}}\n",
+                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"name\":\"Read\",\"input\":{\"b\":2,\"a\":1}}]}}\n"
+            ),
+        )
+        .unwrap();
+        let codex = read_page(SessionProvider::Codex, &path, 0, 10).unwrap();
+        assert_eq!(codex.messages[0].text, "[tool call] Bash {\"a\":1,\"b\":2}");
+        let claude = read_page(SessionProvider::Claude, &path, 0, 10).unwrap();
+        assert_eq!(
+            claude.messages[0].text,
+            "[tool call] Read {\"a\":1,\"b\":2}"
+        );
     }
 
     #[test]
