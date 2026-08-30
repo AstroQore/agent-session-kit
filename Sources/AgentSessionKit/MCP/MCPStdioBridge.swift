@@ -258,6 +258,7 @@ public struct MCPStdioBridge: Sendable {
         address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        if fd >= 0 { MCPSocketServer.setNoSIGPIPE(fd) }
         guard fd >= 0 else { return nil }
         let result = withUnsafePointer(to: &address) { pointer in
             pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in

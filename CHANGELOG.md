@@ -44,6 +44,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lanes are peer implementations and this repository is the shared source
   of truth. First consumer: `vibe-bar-desktop`.
 
+## [0.6.3] - 2026-08-30
+
+### Fixed
+
+- MCP sockets set `SO_NOSIGPIPE` on the server's listening and accepted
+  file descriptors and on the stdio bridge's connect descriptor. A peer
+  vanishing between poll and write used to raise SIGPIPE, killing the
+  host process with no crash report — observed as a menu bar host's
+  recurring silent exits. Writes to a gone peer now fail with `EPIPE`
+  and run the ordinary teardown path. Hosts should still ignore
+  SIGPIPE process-wide; this is defense in depth.
+
 ## [0.6.2] - 2026-08-28
 
 An AntiGravity turn gets its clock back. agy CLI ~1.1.18 (2026-08) stopped
