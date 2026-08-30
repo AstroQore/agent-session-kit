@@ -48,6 +48,14 @@ pub struct TranscriptMessage {
 pub struct TranscriptCursor {
     pub byte_offset: u64,
     pub message_offset: usize,
+    /// This cursor sits inside an already-oversized line. Discard through its
+    /// newline before attempting to parse another JSONL record.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub skip_to_newline: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,18 +113,20 @@ pub fn read_page_from_file_with_cursor(
     cursor: Option<TranscriptCursor>,
 ) -> std::io::Result<TranscriptPage> {
     let file_len = file.metadata()?.len();
-    let cursor =
-        cursor.filter(|cursor| cursor.byte_offset <= file_len && cursor.message_offset <= offset);
-    let byte_offset = cursor.map_or(0, |cursor| cursor.byte_offset);
-    let message_offset = cursor.map_or(0, |cursor| cursor.message_offset);
-    file.seek(SeekFrom::Start(byte_offset))?;
+    let start = cursor
+        .filter(|cursor| cursor.byte_offset <= file_len && cursor.message_offset <= offset)
+        .unwrap_or(TranscriptCursor {
+            byte_offset: 0,
+            message_offset: 0,
+            skip_to_newline: false,
+        });
+    file.seek(SeekFrom::Start(start.byte_offset))?;
     read_page_from_reader_at(
         provider,
         std::io::BufReader::with_capacity(256 * 1024, file),
         offset,
         limit,
-        byte_offset,
-        message_offset,
+        start,
     )
 }
 
@@ -127,7 +137,17 @@ pub fn read_page_from_reader<R: BufRead>(
     offset: usize,
     limit: usize,
 ) -> std::io::Result<TranscriptPage> {
-    read_page_from_reader_at(provider, reader, offset, limit, 0, 0)
+    read_page_from_reader_at(
+        provider,
+        reader,
+        offset,
+        limit,
+        TranscriptCursor {
+            byte_offset: 0,
+            message_offset: 0,
+            skip_to_newline: false,
+        },
+    )
 }
 
 fn read_page_from_reader_at<R: BufRead>(
@@ -135,26 +155,15 @@ fn read_page_from_reader_at<R: BufRead>(
     reader: R,
     offset: usize,
     limit: usize,
-    byte_offset: u64,
-    message_offset: usize,
+    start: TranscriptCursor,
 ) -> std::io::Result<TranscriptPage> {
     match provider {
-        SessionProvider::Codex => read_page_with_reader_at(
-            reader,
-            offset,
-            limit,
-            byte_offset,
-            message_offset,
-            codex_message,
-        ),
-        SessionProvider::Claude => read_page_with_reader_at(
-            reader,
-            offset,
-            limit,
-            byte_offset,
-            message_offset,
-            claude_message,
-        ),
+        SessionProvider::Codex => {
+            read_page_with_reader_at(reader, offset, limit, start, codex_message)
+        }
+        SessionProvider::Claude => {
+            read_page_with_reader_at(reader, offset, limit, start, claude_message)
+        }
         _ => Ok(TranscriptPage {
             messages: Vec::new(),
             total_messages: Some(0),
@@ -169,8 +178,7 @@ fn read_page_with_reader_at<R: BufRead>(
     reader: R,
     offset: usize,
     limit: usize,
-    byte_offset: u64,
-    message_offset: usize,
+    start: TranscriptCursor,
     parse: fn(&Value) -> Option<TranscriptMessage>,
 ) -> std::io::Result<TranscriptPage> {
     read_page_with_reader_bounded(
@@ -179,10 +187,7 @@ fn read_page_with_reader_at<R: BufRead>(
         limit,
         MAX_TRANSCRIPT_SCAN_BYTES,
         MAX_TRANSCRIPT_SCAN_MESSAGES,
-        TranscriptCursor {
-            byte_offset,
-            message_offset,
-        },
+        start,
         parse,
     )
 }
@@ -203,6 +208,8 @@ fn read_page_with_reader_bounded<R: BufRead>(
     let mut bytes_read = 0u64;
     let mut resume_offset = 0u64;
     let mut truncated = false;
+    let mut discarding_oversized_line = start.skip_to_newline;
+    let mut next_skip_to_newline = false;
     let cap = max_scan_bytes.max(1);
     let mut buf = Vec::new();
 
@@ -222,8 +229,14 @@ fn read_page_with_reader_bounded<R: BufRead>(
         bytes_read = bytes_read.saturating_add(line.consumed as u64);
         if line.hit_budget {
             truncated = true;
-            resume_offset = line_start;
+            let oversized = discarding_oversized_line || buf.len() >= jsonl::MAX_LINE_BYTES;
+            resume_offset = if oversized { bytes_read } else { line_start };
+            next_skip_to_newline = oversized;
             break;
+        }
+        if discarding_oversized_line {
+            discarding_oversized_line = false;
+            continue;
         }
         if buf.len() >= jsonl::MAX_LINE_BYTES {
             continue;
@@ -255,6 +268,7 @@ fn read_page_with_reader_bounded<R: BufRead>(
         next_cursor: truncated.then_some(TranscriptCursor {
             byte_offset: start.byte_offset.saturating_add(resume_offset),
             message_offset: scanned_to,
+            skip_to_newline: next_skip_to_newline,
         }),
     })
 }
@@ -736,6 +750,7 @@ mod tests {
             TranscriptCursor {
                 byte_offset: 0,
                 message_offset: 0,
+                skip_to_newline: false,
             },
             codex_message,
         )
@@ -823,6 +838,7 @@ mod tests {
             TranscriptCursor {
                 byte_offset: 0,
                 message_offset: 0,
+                skip_to_newline: false,
             },
             codex_message,
         )
@@ -831,5 +847,54 @@ mod tests {
         assert_eq!(page.total_messages, None);
         assert!(page.truncated);
         assert_eq!(page.next_cursor.unwrap().byte_offset, 0);
+    }
+
+    #[test]
+    fn oversized_line_cursor_advances_until_a_later_message_is_reachable() {
+        use std::io::Cursor;
+
+        let budget = jsonl::MAX_LINE_BYTES as u64 + 1024;
+        let oversized = usize::try_from(budget * 2 + 512).unwrap();
+        let mut input = vec![b'x'; oversized];
+        input.push(b'\n');
+        input.extend_from_slice(
+            b"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"text\":\"after oversized\"}]}}\n",
+        );
+        let scan = |start: TranscriptCursor| {
+            let mut reader = Cursor::new(input.as_slice());
+            reader.set_position(start.byte_offset);
+            read_page_with_reader_bounded(
+                reader,
+                0,
+                1,
+                budget,
+                MAX_TRANSCRIPT_SCAN_MESSAGES,
+                start,
+                codex_message,
+            )
+            .unwrap()
+        };
+        let start = TranscriptCursor {
+            byte_offset: 0,
+            message_offset: 0,
+            skip_to_newline: false,
+        };
+        let first = scan(start);
+        let first_cursor = first.next_cursor.unwrap();
+        assert!(first_cursor.byte_offset > start.byte_offset);
+        assert!(first_cursor.byte_offset - start.byte_offset <= budget);
+        assert!(first_cursor.skip_to_newline);
+
+        let second = scan(first_cursor);
+        let second_cursor = second.next_cursor.unwrap();
+        assert!(second_cursor.byte_offset > first_cursor.byte_offset);
+        assert!(second_cursor.byte_offset - first_cursor.byte_offset <= budget);
+        assert!(second_cursor.skip_to_newline);
+
+        let third = scan(second_cursor);
+        assert_eq!(third.messages.len(), 1);
+        assert_eq!(third.messages[0].text, "after oversized");
+        assert!(!third.truncated);
+        assert!(third.next_cursor.is_none());
     }
 }
