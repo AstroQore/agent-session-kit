@@ -587,7 +587,10 @@ impl SessionIndexReader {
                 sql.push_str(" AND 0");
             } else {
                 let marks = vec!["?"; harnesses.len()].join(",");
-                sql.push_str(&format!(" AND s.harness IN ({marks})"));
+                sql.push_str(&format!(
+                    " AND {} IN ({marks})",
+                    Self::effective_harness_sql()
+                ));
                 for h in harnesses {
                     params.push(Box::new(h.clone()));
                 }
@@ -631,7 +634,10 @@ impl SessionIndexReader {
                 sql.push_str(" AND 0");
             } else {
                 let marks = vec!["?"; harnesses.len()].join(",");
-                sql.push_str(&format!(" AND s.harness IN ({marks})"));
+                sql.push_str(&format!(
+                    " AND {} IN ({marks})",
+                    Self::effective_harness_sql()
+                ));
                 for harness in harnesses {
                     params.push(Box::new(harness));
                 }
@@ -728,6 +734,18 @@ impl SessionIndexReader {
             "Grok Bot" => "grokBot",
             raw => raw,
         }
+    }
+
+    fn effective_harness_sql() -> &'static str {
+        "COALESCE(s.harness, CASE s.provider \
+         WHEN 'claude' THEN 'claudeCode' \
+         WHEN 'claudeCowork' THEN 'claudeCowork' \
+         WHEN 'codex' THEN 'codex' \
+         WHEN 'grok' THEN 'grokBuild' \
+         WHEN 'cursor' THEN 'cursor' \
+         WHEN 'gemini' THEN 'geminiCLI' \
+         WHEN 'antigravity' THEN 'antigravity' \
+         WHEN 'grokBot' THEN 'grokBot' END)"
     }
 
     fn dedup_nonempty_strings(
@@ -960,6 +978,48 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].harness.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn null_harness_uses_provider_default_before_filtering_and_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_index(dir.path());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "UPDATE sessions SET harness = NULL WHERE id IN (1, 2); \
+             INSERT INTO sessions(id, provider, session_id, harness, title, created_at, last_active_at, source_path) \
+             VALUES(4, 'codex', 'newer-codex', NULL, 'newer', 1700003000, 1700003000, '/Users/example/newer.jsonl'); \
+             INSERT INTO session_messages(id, session_row, seq, role, excerpt) \
+             VALUES(16, 2, 1, 'user', 'claude also says tray');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let reader = SessionIndexReader::open(&path).unwrap();
+        let page = reader
+            .list(&SessionListFilter {
+                harnesses: Some(vec!["codex".to_string()]),
+                offset: 1,
+                limit: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].session_id, "aaaa1111-0000-0000-0000-000000000001");
+        assert!(page[0].harness.is_none());
+
+        let hits = reader
+            .search(
+                "tray",
+                &SessionListFilter {
+                    harnesses: Some(vec!["codex".to_string()]),
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session.provider, SessionProvider::Codex);
     }
 
     #[test]
