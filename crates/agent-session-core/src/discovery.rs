@@ -65,10 +65,7 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                                 .or_else(|| nonempty_json_string(payload.get("thread_id")));
                         }
                         if cwd.is_none() {
-                            cwd = payload
-                                .get("cwd")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string);
+                            cwd = nonempty_json_string(payload.get("cwd"));
                         }
                     }
                 } else if line_type == Some("response_item") && title.is_none() {
@@ -405,25 +402,27 @@ fn project_basename(project_dir: &str) -> Option<&str> {
 }
 
 fn human_title_text(text: &str) -> Option<String> {
-    let mut body = text.to_string();
-    while let Some((start, open_end, name)) = first_machine_context_opening(&body) {
-        let close_end = {
-            tags_from(&body, open_end)
-                .find(|(_, _, candidate, closing)| *closing && candidate == &name)
-                .map(|(_, close_end, _, _)| close_end)
-        };
+    let mut body = String::with_capacity(text.len());
+    let mut cursor = 0;
+    while let Some((start, open_end, name)) = first_machine_context_opening(text, cursor) {
+        body.push_str(&text[cursor..start]);
+        let close_end = tags_from(text, open_end)
+            .find(|(_, _, candidate, closing)| *closing && candidate == &name)
+            .map(|(_, close_end, _, _)| close_end);
         if let Some(close_end) = close_end {
-            body.replace_range(start..close_end, "");
+            cursor = close_end;
         } else {
-            body.truncate(start);
+            cursor = text.len();
+            break;
         }
     }
+    body.push_str(&text[cursor..]);
     let body = body.trim();
     (!body.is_empty()).then(|| body.to_string())
 }
 
-fn first_machine_context_opening(text: &str) -> Option<(usize, usize, String)> {
-    tags_from(text, 0).find_map(|(start, end, name, closing)| {
+fn first_machine_context_opening(text: &str, cursor: usize) -> Option<(usize, usize, String)> {
+    tags_from(text, cursor).find_map(|(start, end, name, closing)| {
         (!closing && is_machine_context_tag(&name)).then_some((start, end, name))
     })
 }
@@ -621,6 +620,23 @@ mod tests {
     }
 
     #[test]
+    fn codex_cwd_ignores_blank_metadata_and_trims_later_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("rollout-x-0199aaaa-1111-2222-3333-444455556666.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"0199aaaa-1111-2222-3333-444455556666\",\"cwd\":\"   \"}}\n\
+             {\"type\":\"session_meta\",\"payload\":{\"cwd\":\" /Users/example/project/ \"}}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            discover_codex(dir.path(), 1)[0].project_dir.as_deref(),
+            Some("/Users/example/project/")
+        );
+    }
+
+    #[test]
     fn codex_tail_id_must_still_match_the_filename_uuid() {
         let dir = tempfile::tempdir().unwrap();
         let sessions = dir.path().join(".codex/sessions");
@@ -705,6 +721,34 @@ mod tests {
         assert_eq!(
             discover_codex(dir.path(), 1)[0].title.as_deref(),
             Some("Refactor parser")
+        );
+    }
+
+    #[test]
+    fn machine_context_stripping_is_linear_across_many_blocks() {
+        let block = "<environment_context>x</environment_context>";
+        let count = (jsonl::MAX_LINE_BYTES - 32) / block.len();
+        let text = format!("{}real prompt", block.repeat(count));
+        assert_eq!(human_title_text(&text).as_deref(), Some("real prompt"));
+    }
+
+    #[test]
+    fn machine_context_stripping_handles_adjacent_and_unclosed_blocks() {
+        let adjacent = "<user_instructions>a</user_instructions><environment_context>b</environment_context>real";
+        assert_eq!(human_title_text(adjacent).as_deref(), Some("real"));
+        assert_eq!(
+            human_title_text("keep<environment_context>unfinished").as_deref(),
+            Some("keep")
+        );
+        assert_eq!(human_title_text("<environment_context>unfinished"), None);
+    }
+
+    #[test]
+    fn machine_context_stripping_preserves_mixed_human_markup() {
+        let text = "before<div>human</div><system-reminder>drop</system-reminder>after";
+        assert_eq!(
+            human_title_text(text).as_deref(),
+            Some("before<div>human</div>after")
         );
     }
 
