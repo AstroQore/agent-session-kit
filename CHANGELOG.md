@@ -6,6 +6,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Rust discovery/search/transcript parity.** The first Rust session-core
+  slice now mirrors Swift's default title/user/assistant search scopes,
+  explicit system/tool opt-in, project include/exclude filtering, and title
+  metadata branch. Codex and Claude transcript shapes are flattened more
+  tolerantly, and discovery validates bounded head/tail JSON, regular files,
+  tail metadata, stable ordering, and normalized 80-character titles.
+  **Intentional first-slice limitation:** filesystem discovery still exposes
+  only file `modified_at`; it does not yet expose parsed `createdAt` or
+  `lastActiveAt`, and must not be presented as full timestamp parity. Index
+  rows retain their stored `created_at` / `last_active_at` fields.
+- **Rust session core hardening.** Transcript pages now stream into a bounded
+  result, report an explicit truncated state instead of a partial total, and
+  cap scan bytes/messages, page size, and rendered message text. Index list,
+  search, and excerpt queries clamp untrusted page arguments before SQLite
+  binding; short `LIKE` searches use the Swift store's 200-row cap.
+- **Rust session core parity and IPC safety.** Index search now includes
+  title/session-id metadata and deduplicates body and metadata results.
+  Unknown providers are reported through an explicit compatibility status;
+  opaque row references can resolve a transcript without treating a raw path
+  supplied by a UI as authority. Direct readers reject symlink and
+  non-regular leaves (while documenting the remaining same-user TOCTOU
+  limitation).
+- **Rust reproducibility.** The workspace now commits `Cargo.lock`, pins the
+  toolchain to Rust 1.98.0, and runs CI with `--locked`.
+
+### Added
+- **`crates/agent-session-core` — the Rust implementation lane.** A new
+  Cargo workspace rooted at `Cargo.toml` carries `agent-session-core`
+  (v0.1.0), a dependency-light Rust crate mirroring the session-reading
+  semantics cross-platform hosts need without the Swift runtime: read-only
+  `session_index.sqlite3` access (schema v5; any other version is refused,
+  never rebuilt), lightweight Codex/Claude Code filesystem discovery,
+  tolerant JSONL transcript paging, and a byte-compatible mirror of
+  `SessionResumeCommandBuilder`. The Swift package is untouched; the two
+  lanes are peer implementations and this repository is the shared source
+  of truth. First consumer: `vibe-bar-desktop`.
+
 ## [0.6.3] - 2026-08-30
 
 ### Fixed
