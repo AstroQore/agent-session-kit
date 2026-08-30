@@ -85,18 +85,27 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
             }
             let filename_id = session_id_from_rollout_name(&path);
             // Older Codex headers call the resume id `thread_id`; the tail
-            // is also a bounded fallback for a header pushed beyond the head
+            // is also a bounded fallback for metadata pushed beyond the head
             // window by a newer writer.
-            if session_id.is_none() {
-                session_id = head.iter().chain(tail.iter()).find_map(|line| {
-                    (line.get("type").and_then(|v| v.as_str()) == Some("session_meta"))
-                        .then(|| line.get("payload"))
-                        .flatten()
-                        .and_then(|payload| {
-                            nonempty_json_string(payload.get("id"))
-                                .or_else(|| nonempty_json_string(payload.get("thread_id")))
-                        })
-                });
+            if session_id.is_none() || cwd.is_none() {
+                for line in head.iter().chain(tail.iter()) {
+                    if line.get("type").and_then(|value| value.as_str()) != Some("session_meta") {
+                        continue;
+                    }
+                    let Some(payload) = line.get("payload") else {
+                        continue;
+                    };
+                    if session_id.is_none() {
+                        session_id = nonempty_json_string(payload.get("id"))
+                            .or_else(|| nonempty_json_string(payload.get("thread_id")));
+                    }
+                    if cwd.is_none() {
+                        cwd = nonempty_json_string(payload.get("cwd"));
+                    }
+                    if session_id.is_some() && cwd.is_some() {
+                        break;
+                    }
+                }
             }
             // Fall back to the rollout filename's trailing uuid when the
             // session meta line is missing.
@@ -808,16 +817,21 @@ mod tests {
         std::fs::create_dir_all(&codex).unwrap();
         let codex_file = codex.join("rollout-tail.jsonl");
         let mut codex_lines = String::new();
-        for _ in 0..9 {
-            codex_lines.push_str("not json\n");
+        for _ in 0..10 {
+            codex_lines.push_str("{\"type\":\"event_msg\"}\n");
         }
         codex_lines.push_str(
-            "{\"type\":\"session_meta\",\"payload\":{\"thread_id\":\"thread-from-tail\"}}\n",
+            "{\"type\":\"session_meta\",\"payload\":{\"thread_id\":\" \",\"cwd\":\"  \"}}\n",
+        );
+        codex_lines.push_str(
+            "{\"type\":\"session_meta\",\"payload\":{\"thread_id\":\" thread-from-tail \",\"cwd\":\" /Users/example/tail-project/ \"}}\n",
         );
         std::fs::write(&codex_file, codex_lines).unwrap();
+        let discovered_codex = discover_codex(dir.path(), 10);
+        assert_eq!(discovered_codex[0].session_id, "thread-from-tail");
         assert_eq!(
-            discover_codex(dir.path(), 10)[0].session_id,
-            "thread-from-tail"
+            discovered_codex[0].project_dir.as_deref(),
+            Some("/Users/example/tail-project/")
         );
 
         let claude = dir.path().join(".claude/projects/p");
