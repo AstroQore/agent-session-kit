@@ -14,8 +14,9 @@ needs to render sessions without depending on the Swift implementation:
   prunes, or rebuilds — index mutation stays with the index owner.
 - **`discovery`** — lightweight filesystem discovery for Codex
   (`~/.codex/sessions`, `~/.codex/archived_sessions`) and Claude Code
-  (`~/.claude/projects`, `~/.config/claude/projects`) session logs: head
-  lines only, symlinks never followed, newest first.
+  (`~/.claude/projects`, `~/.config/claude/projects`) session logs: bounded
+  head/tail metadata, regular files only, symlinks never followed, newest
+  first with a stable path tiebreak.
 - **`transcript`** — tolerant JSONL transcript paging for Codex and Claude
   Code. Malformed or unknown lines are skipped, never fatal.
 - **`resume`** — mirror of the Swift `SessionResumeCommandBuilder`: same
@@ -28,6 +29,14 @@ needs to render sessions without depending on the Swift implementation:
 
 Like the Swift package, this crate takes every path explicitly, opens no
 sockets, spawns no processes, and writes nothing.
+
+### Intentional first-slice limitation
+
+Filesystem discovery currently exposes only the file modification time as
+`modified_at`. It intentionally does **not** yet expose Swift's separately
+parsed `createdAt` and `lastActiveAt` metadata, so consumers must not treat
+`modified_at` as either field or as full timestamp parity. The read-only index
+continues to return its stored `created_at` and `last_active_at` columns.
 
 ```rust
 use agent_session_core::index::{SessionIndexReader, SessionListFilter};

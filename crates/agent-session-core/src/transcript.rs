@@ -31,7 +31,7 @@ pub enum TranscriptRole {
     Assistant,
     System,
     Tool,
-    Note,
+    Other,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -186,9 +186,9 @@ fn codex_message(line: &Value) -> Option<TranscriptMessage> {
                         "user" => TranscriptRole::User,
                         "assistant" => TranscriptRole::Assistant,
                         "system" | "developer" => TranscriptRole::System,
-                        _ => TranscriptRole::Note,
+                        _ => TranscriptRole::Other,
                     };
-                    let text = joined_block_text(payload.get("content")?)?;
+                    let text = recorded_text(payload.get("content"))?;
                     Some(TranscriptMessage {
                         role,
                         text,
@@ -206,13 +206,16 @@ fn codex_message(line: &Value) -> Option<TranscriptMessage> {
                         timestamp,
                     })
                 }
-                "function_call_output" => Some(TranscriptMessage {
-                    role: TranscriptRole::Tool,
-                    text: recorded_text(payload.get("output"))
-                        .or_else(|| recorded_text(payload.get("content")))
-                        .unwrap_or_else(|| "[tool result]".to_string()),
-                    timestamp,
-                }),
+                // An empty result is not a transcript message. In particular,
+                // do not invent a visible placeholder for Codex's empty
+                // `function_call_output` records.
+                "function_call_output" => recorded_text(payload.get("output"))
+                    .or_else(|| recorded_text(payload.get("content")))
+                    .map(|text| TranscriptMessage {
+                        role: TranscriptRole::Tool,
+                        text,
+                        timestamp,
+                    }),
                 "reasoning" => None,
                 _ => None,
             }
@@ -229,72 +232,80 @@ fn claude_message(line: &Value) -> Option<TranscriptMessage> {
         .get("timestamp")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let line_type = line.get("type").and_then(|v| v.as_str())?;
-    match line_type {
-        "user" | "assistant" => {
-            let message = line.get("message")?;
-            let role = match message.get("role").and_then(|v| v.as_str()) {
-                Some("user") => TranscriptRole::User,
-                Some("assistant") => TranscriptRole::Assistant,
-                _ => TranscriptRole::Note,
-            };
-            let content = message.get("content")?;
-            let mut parts: Vec<String> = Vec::new();
-            let mut only_tool_results = true;
-            if let Some(text) = content.as_str() {
-                if !text.trim().is_empty() {
-                    parts.push(text.trim().to_string());
+    // Claude evolves its outer `type` frequently. The durable contract is a
+    // non-meta record containing `message`; `message.role` wins, and the line
+    // type is only its fallback.
+    let message = line.get("message")?;
+    let role = claude_role(
+        message
+            .get("role")
+            .and_then(|value| value.as_str())
+            .or_else(|| line.get("type").and_then(|value| value.as_str())),
+    );
+    let content = message.get("content")?;
+    let mut parts: Vec<String> = Vec::new();
+    let mut only_tool_results = true;
+    if let Some(text) = content.as_str() {
+        let text = text.trim();
+        if !text.is_empty() {
+            parts.push(text.to_string());
+            only_tool_results = false;
+        }
+    } else if let Some(blocks) = content.as_array() {
+        for block in blocks {
+            match block.get("type").and_then(|v| v.as_str()) {
+                Some("text") => {
+                    if let Some(text) = recorded_text(block.get("text")) {
+                        parts.push(text);
+                        only_tool_results = false;
+                    }
+                }
+                Some("tool_use") => {
+                    let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+                    parts.push(tool_call_text(name, block.get("input")));
                     only_tool_results = false;
                 }
-            } else if let Some(blocks) = content.as_array() {
-                for block in blocks {
-                    match block.get("type").and_then(|v| v.as_str()) {
-                        Some("text") => {
-                            if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-                                if !text.trim().is_empty() {
-                                    parts.push(text.trim().to_string());
-                                    only_tool_results = false;
-                                }
-                            }
-                        }
-                        Some("tool_use") => {
-                            let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
-                            parts.push(tool_call_text(name, block.get("input")));
-                            only_tool_results = false;
-                        }
-                        Some("tool_result") => parts.push(
-                            recorded_text(block.get("content"))
-                                .unwrap_or_else(|| "[tool result]".to_string()),
-                        ),
-                        Some("thinking") => {}
-                        _ => {}
+                Some("tool_result") => {
+                    if let Some(text) = recorded_text(block.get("content")) {
+                        parts.push(text);
+                    }
+                }
+                Some("thinking") => {}
+                _ => {
+                    if let Some(text) = recorded_text(Some(block)) {
+                        parts.push(text);
+                        only_tool_results = false;
                     }
                 }
             }
-            if parts.is_empty() {
-                return None;
-            }
-            // A user line whose only content is tool results renders as Tool.
-            let role = if only_tool_results {
-                TranscriptRole::Tool
-            } else {
-                role
-            };
-            Some(TranscriptMessage {
-                role,
-                text: parts.join("\n\n"),
-                timestamp,
-            })
         }
-        "summary" => {
-            let text = line.get("summary").and_then(|v| v.as_str())?;
-            Some(TranscriptMessage {
-                role: TranscriptRole::Note,
-                text: format!("[summary] {text}"),
-                timestamp,
-            })
-        }
-        _ => None,
+    } else if let Some(text) = recorded_text(Some(content)) {
+        parts.push(text);
+        only_tool_results = false;
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    // A user line whose only content is tool results renders as Tool.
+    let role = if only_tool_results && role == TranscriptRole::User {
+        TranscriptRole::Tool
+    } else {
+        role
+    };
+    Some(TranscriptMessage {
+        role,
+        text: parts.join("\n\n"),
+        timestamp,
+    })
+}
+
+fn claude_role(raw: Option<&str>) -> TranscriptRole {
+    match raw {
+        Some("user") => TranscriptRole::User,
+        Some("assistant") => TranscriptRole::Assistant,
+        Some("tool") => TranscriptRole::Tool,
+        Some("system") | Some("developer") => TranscriptRole::System,
+        _ => TranscriptRole::Other,
     }
 }
 
@@ -307,15 +318,26 @@ fn recorded_text(value: Option<&Value>) -> Option<String> {
     if let Some(array) = value.as_array() {
         let parts: Vec<String> = array
             .iter()
-            .filter_map(|entry| recorded_text(entry.get("text").or(Some(entry))))
+            .filter_map(|entry| recorded_text(Some(entry)))
             .collect();
         return (!parts.is_empty()).then(|| parts.join("\n\n"));
     }
-    value
-        .get("text")
-        .or_else(|| value.get("content"))
-        .or_else(|| value.get("output"))
-        .and_then(|nested| recorded_text(Some(nested)))
+    match value.get("type").and_then(Value::as_str) {
+        Some("tool_use") => {
+            let name = value.get("name").and_then(Value::as_str).unwrap_or("tool");
+            return Some(tool_call_text(name, value.get("input")));
+        }
+        Some("tool_result") => return recorded_text(value.get("content")),
+        Some("thinking") => return None,
+        _ => {}
+    }
+    ["text", "input_text", "output_text", "content", "output"]
+        .iter()
+        .find_map(|key| {
+            value
+                .get(*key)
+                .and_then(|nested| recorded_text(Some(nested)))
+        })
 }
 
 fn tool_call_text(name: &str, input: Option<&Value>) -> String {
@@ -332,21 +354,6 @@ fn tool_call_text(name: &str, input: Option<&Value>) -> String {
         format!("[tool call] {name}")
     } else {
         format!("[tool call] {name} {rendered}")
-    }
-}
-
-fn joined_block_text(content: &Value) -> Option<String> {
-    let blocks = content.as_array()?;
-    let parts: Vec<String> = blocks
-        .iter()
-        .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-        .collect();
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("\n\n"))
     }
 }
 
@@ -439,6 +446,12 @@ mod tests {
             })
         )
         .unwrap();
+        writeln!(
+            f,
+            "{}",
+            serde_json::json!({"type": "summary", "summary": "ignore"})
+        )
+        .unwrap();
         writeln!(f, "{}", serde_json::json!({"type": "queue-operation"})).unwrap();
         drop(f);
 
@@ -481,6 +494,62 @@ mod tests {
     }
 
     #[test]
+    fn recursively_flattens_codex_text_shapes_and_skips_empty_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":{\"content\":[{\"input_text\":\"nested input\"},{\"text\":\"nested text\"}]}}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"output_text\":\"nested output\"}]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"output\":[]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"output\":{\"content\":[{\"text\":\"tool payload\"}]}}}\n"
+            ),
+        )
+        .unwrap();
+        let page = read_page(SessionProvider::Codex, &path, 0, 10).unwrap();
+        assert_eq!(page.total_messages, Some(3));
+        assert_eq!(page.messages[0].text, "nested input\n\nnested text");
+        assert_eq!(page.messages[1].text, "nested output");
+        assert_eq!(page.messages[2].text, "tool payload");
+    }
+
+    #[test]
+    fn accepts_any_claude_message_record_and_maps_all_roles() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"future-user-shape\",\"message\":{\"role\":\"user\",\"content\":\"u\"}}\n",
+                "{\"type\":\"future-assistant-shape\",\"message\":{\"role\":\"assistant\",\"content\":\"a\"}}\n",
+                "{\"type\":\"tool\",\"message\":{\"content\":\"t\"}}\n",
+                "{\"type\":\"system\",\"message\":{\"content\":\"s\"}}\n",
+                "{\"type\":\"developer\",\"message\":{\"content\":\"d\"}}\n",
+                "{\"type\":\"future\",\"message\":{\"content\":\"o\"}}\n",
+                "{\"type\":\"user\",\"isMeta\":true,\"message\":{\"content\":\"ignore\"}}\n"
+            ),
+        )
+        .unwrap();
+        let page = read_page(SessionProvider::Claude, &path, 0, 10).unwrap();
+        assert_eq!(page.total_messages, Some(6));
+        assert_eq!(
+            page.messages
+                .iter()
+                .map(|message| message.role)
+                .collect::<Vec<_>>(),
+            vec![
+                TranscriptRole::User,
+                TranscriptRole::Assistant,
+                TranscriptRole::Tool,
+                TranscriptRole::System,
+                TranscriptRole::System,
+                TranscriptRole::Other,
+            ]
+        );
+    }
+
+    #[test]
     fn keeps_stable_recorded_tool_inputs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("c.jsonl");
@@ -498,6 +567,24 @@ mod tests {
         assert_eq!(
             claude.messages[0].text,
             "[tool call] Read {\"a\":1,\"b\":2}"
+        );
+    }
+
+    #[test]
+    fn codex_message_content_keeps_embedded_tool_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"name\":\"Read\",\"input\":{\"path\":\"/Users/example/file\"}}]}}\n",
+        )
+        .unwrap();
+        let page = read_page(SessionProvider::Codex, &path, 0, 10).unwrap();
+        assert_eq!(page.total_messages, Some(1));
+        assert_eq!(page.messages[0].role, TranscriptRole::Assistant);
+        assert_eq!(
+            page.messages[0].text,
+            "[tool call] Read {\"path\":\"/Users/example/file\"}"
         );
     }
 

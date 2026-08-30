@@ -2,7 +2,8 @@
 //!
 //! This is the standalone fallback for a host that has no shared session
 //! index yet: it enumerates session files with their metadata cheaply (head
-//! lines only, never whole files) so a UI can render a recent-sessions list.
+//! lines plus a bounded tail, never whole files) so a UI can render a recent-
+//! sessions list.
 //! Full indexing (FTS, every harness) stays with the index writer.
 
 use std::path::{Path, PathBuf};
@@ -37,12 +38,18 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
     if let Some(root) = safe_root(home, &[".codex", "archived_sessions"]) {
         collect_jsonl_files(&root, &mut files, 4);
     }
-    files.sort_by_key(|f| std::cmp::Reverse(f.1));
+    sort_files(&mut files);
 
     files
         .into_iter()
         .filter_map(|(path, mtime, size)| {
-            let head = jsonl::head_json_lines(&path, 8).ok()?;
+            let head = jsonl::head_json_lines(&path, 10).ok().unwrap_or_default();
+            let tail = jsonl::tail_json_lines(&path, jsonl::MAX_TAIL_BYTES)
+                .ok()
+                .unwrap_or_default();
+            if head.is_empty() && tail.is_empty() {
+                return None;
+            }
             let mut session_id = None;
             let mut cwd = None;
             let mut title = None;
@@ -53,6 +60,7 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                         if session_id.is_none() {
                             session_id = payload
                                 .get("id")
+                                .or_else(|| payload.get("thread_id"))
                                 .and_then(|v| v.as_str())
                                 .map(str::to_string);
                         }
@@ -68,7 +76,9 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                         if payload.get("type").and_then(|v| v.as_str()) == Some("message")
                             && payload.get("role").and_then(|v| v.as_str()) == Some("user")
                         {
-                            title = first_text(payload.get("content"))
+                            title = payload
+                                .get("content")
+                                .and_then(message_content_text)
                                 .map(|text| strip_codex_ide_envelope(&text))
                                 .filter(|text| !text.is_empty())
                                 .map(|text| truncate_title(&text));
@@ -77,11 +87,30 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                 }
             }
             let filename_id = session_id_from_rollout_name(&path);
-            if session_id.is_some() && filename_id.is_some() && session_id != filename_id {
+            if session_id.is_some()
+                && filename_id.is_some()
+                && !session_id
+                    .as_deref()
+                    .unwrap_or_default()
+                    .eq_ignore_ascii_case(filename_id.as_deref().unwrap_or_default())
+            {
                 return None;
             }
-            // Fall back to the rollout filename's trailing uuid when the meta
-            // line is missing.
+            // Older Codex headers call the resume id `thread_id`; the tail
+            // is also a bounded fallback for a header pushed beyond the head
+            // window by a newer writer.
+            if session_id.is_none() {
+                session_id = head.iter().chain(tail.iter()).find_map(|line| {
+                    (line.get("type").and_then(|v| v.as_str()) == Some("session_meta"))
+                        .then(|| line.get("payload"))
+                        .flatten()
+                        .and_then(|payload| payload.get("thread_id"))
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                });
+            }
+            // Fall back to the rollout filename's trailing uuid when the
+            // session meta line is missing.
             let session_id = session_id.or(filename_id)?;
             Some(DiscoveredSession {
                 provider: SessionProvider::Codex,
@@ -107,18 +136,48 @@ pub fn discover_claude(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
     if let Some(root) = safe_root(home, &[".config", "claude", "projects"]) {
         collect_jsonl_files(&root, &mut files, 3);
     }
-    files.sort_by_key(|f| std::cmp::Reverse(f.1));
+    sort_files(&mut files);
 
     files
         .into_iter()
         .filter_map(|(path, mtime, size)| {
             let stem = path.file_stem()?.to_string_lossy().into_owned();
-            if !looks_like_uuid(&stem) {
+            if stem.starts_with("agent-") {
                 return None;
             }
             let head = jsonl::head_json_lines(&path, 12).ok().unwrap_or_default();
+            let tail = jsonl::tail_json_lines(&path, jsonl::MAX_TAIL_BYTES)
+                .ok()
+                .unwrap_or_default();
+            if head.is_empty() && tail.is_empty() {
+                return None;
+            }
+            let session_id = if looks_like_uuid(&stem) {
+                stem.clone()
+            } else {
+                tail.iter()
+                    .rev()
+                    .find_map(|line| line.get("sessionId").and_then(|value| value.as_str()))
+                    .or_else(|| {
+                        head.iter()
+                            .find_map(|line| line.get("sessionId").and_then(|value| value.as_str()))
+                    })
+                    .unwrap_or(&stem)
+                    .to_string()
+            };
             let mut cwd = None;
             let mut title = None;
+            for line in tail.iter().rev() {
+                if line.get("type").and_then(|v| v.as_str()) == Some("custom-title") {
+                    if let Some(value) = line.get("customTitle").and_then(|v| v.as_str()) {
+                        let value = value.trim();
+                        if !value.is_empty() {
+                            title = Some(truncate_title(value));
+                            break;
+                        }
+                    }
+                }
+            }
             for line in &head {
                 if line.get("isMeta").and_then(|value| value.as_bool()) == Some(true) {
                     continue;
@@ -141,9 +200,22 @@ pub fn discover_claude(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                     break;
                 }
             }
+            if cwd.is_none() {
+                cwd = tail
+                    .iter()
+                    .rev()
+                    .find_map(|line| line.get("cwd").and_then(|value| value.as_str()))
+                    .map(str::to_string);
+            }
+            if title.is_none() {
+                title = cwd
+                    .as_deref()
+                    .and_then(project_basename)
+                    .map(truncate_title);
+            }
             Some(DiscoveredSession {
                 provider: SessionProvider::Claude,
-                session_id: stem,
+                session_id,
                 title,
                 project_dir: cwd,
                 source_path: path.to_string_lossy().into_owned(),
@@ -189,7 +261,7 @@ fn collect_jsonl_files(root: &Path, out: &mut Vec<(PathBuf, i64, u64)>, max_dept
         }
         if file_type.is_dir() {
             collect_jsonl_files(&path, out, max_depth - 1);
-        } else if path.extension().is_some_and(|e| e == "jsonl") {
+        } else if file_type.is_file() && path.extension().is_some_and(|e| e == "jsonl") {
             let Ok(meta) = entry.metadata() else { continue };
             let mtime = meta
                 .modified()
@@ -200,6 +272,12 @@ fn collect_jsonl_files(root: &Path, out: &mut Vec<(PathBuf, i64, u64)>, max_dept
             out.push((path, mtime, meta.len()));
         }
     }
+}
+
+/// A deterministic source-path tiebreak keeps discovery order stable when
+/// multiple files have the same filesystem timestamp.
+fn sort_files(files: &mut [(PathBuf, i64, u64)]) {
+    files.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
 }
 
 /// `rollout-2026-08-30T04-55-08-<uuid>.jsonl` → the trailing uuid.
@@ -228,35 +306,77 @@ fn looks_like_uuid(value: &str) -> bool {
         })
 }
 
-fn first_text(content: Option<&serde_json::Value>) -> Option<String> {
-    let array = content?.as_array()?;
-    for block in array {
-        if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-            let trimmed = text.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    None
+/// Flatten the same bounded display shapes the Swift adapters accept for a
+/// discovery title. Arrays join every renderable block instead of silently
+/// taking only the first one.
+fn message_content_text(content: &serde_json::Value) -> Option<String> {
+    message_content_text_at_depth(content, 0)
 }
 
-/// Claude `message.content` is either a plain string or an array of blocks.
-fn message_content_text(content: &serde_json::Value) -> Option<String> {
+fn message_content_text_at_depth(content: &serde_json::Value, depth: usize) -> Option<String> {
+    if depth >= 8 {
+        return None;
+    }
     if let Some(text) = content.as_str() {
         let trimmed = text.trim();
         return (!trimmed.is_empty()).then(|| trimmed.to_string());
     }
-    first_text(Some(content))
+    if let Some(array) = content.as_array() {
+        let parts: Vec<_> = array
+            .iter()
+            .filter_map(|value| message_content_text_at_depth(value, depth + 1))
+            .collect();
+        return (!parts.is_empty()).then(|| parts.join("\n"));
+    }
+    match content.get("type").and_then(|value| value.as_str()) {
+        Some("tool_use") => {
+            let name = content
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("tool");
+            let input = content
+                .get("input")
+                .filter(|value| !value.is_null())
+                .map(|value| value.to_string());
+            return Some(match input {
+                Some(input) if !input.is_empty() && input != "{}" => {
+                    format!("[Tool: {name}]\n{input}")
+                }
+                _ => format!("[Tool: {name}]"),
+            });
+        }
+        Some("tool_result") => {
+            return content
+                .get("content")
+                .and_then(|value| message_content_text_at_depth(value, depth + 1));
+        }
+        Some("thinking") => return None,
+        _ => {}
+    }
+    ["text", "input_text", "output_text", "content"]
+        .iter()
+        .find_map(|key| {
+            content
+                .get(*key)
+                .and_then(|value| message_content_text_at_depth(value, depth + 1))
+        })
 }
 
 fn truncate_title(text: &str) -> String {
-    let single_line = text.lines().next().unwrap_or("").trim();
-    let mut out: String = single_line.chars().take(120).collect();
-    if single_line.chars().count() > 120 {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out: String = collapsed.chars().take(80).collect();
+    if collapsed.chars().count() > 80 {
         out.push('…');
     }
     out
+}
+
+fn project_basename(project_dir: &str) -> Option<&str> {
+    project_dir
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
 }
 
 fn is_claude_envelope_text(text: &str) -> bool {
@@ -402,7 +522,7 @@ mod tests {
         let claude = dir.path().join(".claude/projects/p");
         std::fs::create_dir_all(&claude).unwrap();
         let invalid_claude = claude.join("invalid.jsonl");
-        std::fs::write(&invalid_claude, "{}\n").unwrap();
+        std::fs::write(&invalid_claude, "not json\n").unwrap();
         let valid_claude = claude.join("aaaabbbb-cccc-dddd-eeee-ffff00001111.jsonl");
         std::fs::write(
             &valid_claude,
@@ -426,6 +546,118 @@ mod tests {
             discover_codex(dir.path(), 1)[0].title.as_deref(),
             Some("Refactor parser")
         );
+    }
+
+    #[test]
+    fn accepts_case_only_codex_id_difference_and_prefers_latest_claude_custom_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join(".codex/sessions");
+        std::fs::create_dir_all(&codex).unwrap();
+        std::fs::write(codex.join("rollout-x-0199AAAA-1111-2222-3333-444455556666.jsonl"), "{\"type\":\"session_meta\",\"payload\":{\"id\":\"0199aaaa-1111-2222-3333-444455556666\"}}\n").unwrap();
+        assert_eq!(discover_codex(dir.path(), 10).len(), 1);
+
+        let claude = dir.path().join(".claude/projects/p");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::write(claude.join("aaaabbbb-cccc-dddd-eeee-ffff00001111.jsonl"), "{\"type\":\"user\",\"message\":{\"content\":\"initial\"}}\n{\"type\":\"custom-title\",\"customTitle\":\"old title\"}\n{\"type\":\"custom-title\",\"customTitle\":\"latest title\"}\n").unwrap();
+        assert_eq!(
+            discover_claude(dir.path(), 10)[0].title.as_deref(),
+            Some("latest title")
+        );
+    }
+
+    #[test]
+    fn uses_valid_tail_metadata_and_normalizes_fallback_titles() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join(".codex/sessions");
+        std::fs::create_dir_all(&codex).unwrap();
+        let codex_file = codex.join("rollout-tail.jsonl");
+        let mut codex_lines = String::new();
+        for _ in 0..9 {
+            codex_lines.push_str("not json\n");
+        }
+        codex_lines.push_str(
+            "{\"type\":\"session_meta\",\"payload\":{\"thread_id\":\"thread-from-tail\"}}\n",
+        );
+        std::fs::write(&codex_file, codex_lines).unwrap();
+        assert_eq!(
+            discover_codex(dir.path(), 10)[0].session_id,
+            "thread-from-tail"
+        );
+
+        let claude = dir.path().join(".claude/projects/p");
+        std::fs::create_dir_all(&claude).unwrap();
+        let claude_file = claude.join("aaaabbbb-cccc-dddd-eeee-ffff00001111.jsonl");
+        let mut claude_lines = String::new();
+        for _ in 0..13 {
+            claude_lines.push_str("not json\n");
+        }
+        claude_lines.push_str("{\"type\":\"assistant\",\"cwd\":\"/Users/example/my-project/\",\"message\":{\"content\":\"tail only\"}}\n");
+        std::fs::write(&claude_file, claude_lines).unwrap();
+        let discovered = discover_claude(dir.path(), 10);
+        assert_eq!(
+            discovered[0].project_dir.as_deref(),
+            Some("/Users/example/my-project/")
+        );
+        assert_eq!(discovered[0].title.as_deref(), Some("my-project"));
+
+        assert_eq!(
+            truncate_title("  first\n\tsecond   third  "),
+            "first second third"
+        );
+        assert_eq!(truncate_title(&"x ".repeat(100)).chars().count(), 81);
+    }
+
+    #[test]
+    fn rejects_jsonl_leaves_without_valid_head_or_tail_and_orders_ties_stably() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join(".codex/sessions");
+        std::fs::create_dir_all(&codex).unwrap();
+        std::fs::write(codex.join("rollout-bad.jsonl"), "not json\n").unwrap();
+        let first = codex.join("rollout-a-0199aaaa-1111-2222-3333-444455556666.jsonl");
+        let second = codex.join("rollout-b-0199bbbb-1111-2222-3333-444455556666.jsonl");
+        std::fs::write(&first, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"0199aaaa-1111-2222-3333-444455556666\"}}\n").unwrap();
+        std::fs::write(&second, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"0199bbbb-1111-2222-3333-444455556666\"}}\n").unwrap();
+        set_modified(&first, 100);
+        set_modified(&second, 100);
+        let sessions = discover_codex(dir.path(), 10);
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions[0].source_path < sessions[1].source_path);
+
+        let claude = dir.path().join(".claude/projects/p");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::write(
+            claude.join("aaaabbbb-cccc-dddd-eeee-ffff00001111.jsonl"),
+            "",
+        )
+        .unwrap();
+        std::fs::write(
+            claude.join("aaaabbbb-cccc-dddd-eeee-ffff00002222.jsonl"),
+            "not json\n",
+        )
+        .unwrap();
+        assert!(discover_claude(dir.path(), 10).is_empty());
+    }
+
+    #[test]
+    fn claude_non_uuid_files_use_recorded_session_id_and_merge_title_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join(".claude/projects/p");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::write(
+            claude.join("legacy-session.jsonl"),
+            "{\"type\":\"user\",\"sessionId\":\"recorded-session\",\"message\":{\"content\":[{\"text\":\"first\"},{\"text\":\"second\"}]}}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            claude.join("agent-child.jsonl"),
+            "{\"type\":\"user\",\"sessionId\":\"child\",\"message\":{\"content\":\"skip\"}}\n",
+        )
+        .unwrap();
+
+        let sessions = discover_claude(dir.path(), 10);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "recorded-session");
+        assert_eq!(sessions[0].title.as_deref(), Some("first second"));
     }
 
     fn set_modified(path: &Path, seconds: u64) {

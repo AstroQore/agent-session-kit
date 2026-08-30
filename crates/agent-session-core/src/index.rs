@@ -16,7 +16,7 @@
 //! committed to the WAL and not yet checkpointed — a stale read is the worse
 //! trade.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
@@ -102,6 +102,85 @@ pub struct SessionListFilter {
     pub since: Option<i64>,
     pub limit: usize,
     pub offset: usize,
+}
+
+/// Which indexed parts a search may match. Project paths deliberately are not
+/// a scope: callers narrow them with `project_includes` and
+/// `project_excludes`, matching the Swift store's contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionSearchScope {
+    Title,
+    User,
+    Assistant,
+    System,
+    Tool,
+}
+
+impl SessionSearchScope {
+    fn message_role(self) -> Option<&'static str> {
+        match self {
+            Self::Title => None,
+            Self::User => Some("user"),
+            Self::Assistant => Some("assistant"),
+            Self::System => Some("system"),
+            Self::Tool => Some("tool"),
+        }
+    }
+}
+
+/// Narrowing and scope selection for [`SessionIndexReader::search_with_filter`].
+///
+/// The default deliberately excludes system and tool excerpts. They can carry
+/// commands, file names, and other incidental text that should not become a
+/// surprising ordinary search hit; callers opt into them explicitly.
+#[derive(Debug, Clone)]
+pub struct SessionSearchFilter {
+    pub providers: Option<Vec<SessionProvider>>,
+    pub harnesses: Option<Vec<String>>,
+    /// Only sessions active at/after this Unix timestamp. Kept here so the
+    /// legacy `search(text, SessionListFilter)` adapter cannot silently drop
+    /// its existing `since` constraint.
+    pub since: Option<i64>,
+    /// Defaults to title, user, and assistant, mirroring Swift.
+    pub scopes: BTreeSet<SessionSearchScope>,
+    /// Substring filters over `sessions.project_dir`; any include may match.
+    pub project_includes: Vec<String>,
+    /// Substring filters over `sessions.project_dir`; every exclusion applies.
+    pub project_excludes: Vec<String>,
+    pub limit: usize,
+}
+
+impl Default for SessionSearchFilter {
+    fn default() -> Self {
+        Self {
+            providers: None,
+            harnesses: None,
+            since: None,
+            scopes: [
+                SessionSearchScope::Title,
+                SessionSearchScope::User,
+                SessionSearchScope::Assistant,
+            ]
+            .into_iter()
+            .collect(),
+            project_includes: Vec::new(),
+            project_excludes: Vec::new(),
+            limit: 50,
+        }
+    }
+}
+
+impl From<&SessionListFilter> for SessionSearchFilter {
+    fn from(filter: &SessionListFilter) -> Self {
+        Self {
+            providers: filter.providers.clone(),
+            harnesses: filter.harnesses.clone(),
+            since: filter.since,
+            limit: filter.limit,
+            ..Self::default()
+        }
+    }
 }
 
 pub struct SessionIndexReader {
@@ -230,17 +309,36 @@ impl SessionIndexReader {
         text: &str,
         filter: &SessionListFilter,
     ) -> Result<Vec<SessionSearchHit>, SessionCoreError> {
+        self.search_with_filter(text, &SessionSearchFilter::from(filter))
+    }
+
+    /// Scoped transcript and title search. This is the Rust equivalent of
+    /// Swift `SessionIndexStore.search`: title/session-id metadata only joins
+    /// when `Title` is enabled; body rows only join when their exact role is
+    /// enabled; project filters apply to both branches.
+    pub fn search_with_filter(
+        &self,
+        text: &str,
+        filter: &SessionSearchFilter,
+    ) -> Result<Vec<SessionSearchHit>, SessionCoreError> {
         let needle = text.trim();
-        if needle.is_empty() {
+        if needle.is_empty() || filter.scopes.is_empty() {
             return Ok(Vec::new());
         }
-        let (where_sql, params) = Self::filter_clause(filter)?;
+        let (where_sql, params) = Self::search_filter_clause(filter, true)?;
         let limit = Self::bounded_limit(filter.limit);
 
         let use_fts = needle.chars().count() >= 3;
-        let sql = if use_fts {
-            format!(
-                "WITH body_matches AS ( \
+        let has_message_scope = filter
+            .scopes
+            .iter()
+            .any(|scope| scope.message_role().is_some());
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        if has_message_scope {
+            let sql = if use_fts {
+                format!(
+                    "WITH body_matches AS ( \
                    SELECT {cols}, m.seq, m.excerpt, rank AS sort_key, \
                           ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY rank) AS row_rank \
                      FROM session_fts f \
@@ -249,13 +347,13 @@ impl SessionIndexReader {
                     WHERE session_fts MATCH ? AND {known}{where_sql} \
                  ) SELECT {cols_no_alias}, seq, excerpt FROM body_matches \
                    WHERE row_rank = 1 ORDER BY sort_key LIMIT ?",
-                cols = Self::cte_session_columns(),
-                cols_no_alias = Self::cte_output_columns(),
-                known = Self::known_provider_predicate(),
-            )
-        } else {
-            format!(
-                "WITH body_matches AS ( \
+                    cols = Self::cte_session_columns(),
+                    cols_no_alias = Self::cte_output_columns(),
+                    known = Self::known_provider_predicate(),
+                )
+            } else {
+                format!(
+                    "WITH body_matches AS ( \
                    SELECT {cols}, m.seq, m.excerpt, m.id AS sort_key, \
                           ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY m.id) AS row_rank \
                      FROM session_messages m \
@@ -263,52 +361,53 @@ impl SessionIndexReader {
                     WHERE m.excerpt LIKE ? ESCAPE '\\' AND {known}{where_sql} \
                  ) SELECT {cols_no_alias}, seq, excerpt FROM body_matches \
                    WHERE row_rank = 1 ORDER BY sort_key LIMIT ?",
-                cols = Self::cte_session_columns(),
-                cols_no_alias = Self::cte_output_columns(),
-                known = Self::known_provider_predicate(),
-            )
-        };
-        let needle_binding: String = if use_fts {
-            Self::fts_query(needle)
-        } else {
-            format!("%{}%", Self::like_pattern(needle))
-        };
+                    cols = Self::cte_session_columns(),
+                    cols_no_alias = Self::cte_output_columns(),
+                    known = Self::known_provider_predicate(),
+                )
+            };
+            let needle_binding: String = if use_fts {
+                Self::fts_query(needle)
+            } else {
+                format!("%{}%", Self::like_pattern(needle))
+            };
 
-        let mut stmt = self.conn.prepare(&sql)?;
-        let mut bind: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(params.len() + 2);
-        bind.push(Box::new(needle_binding));
-        bind.extend(params);
-        bind.push(Box::new(Self::bounded_search_limit(limit, use_fts)));
-        let rows = stmt.query_map(
-            rusqlite::params_from_iter(bind.iter().map(|b| b.as_ref())),
-            |row| {
-                let summary = Self::row_to_summary(row)?;
-                let seq: Option<i64> = row.get(Self::COLUMN_COUNT)?;
-                let excerpt: String = row.get(Self::COLUMN_COUNT + 1)?;
-                Ok(summary.map(|session| SessionSearchHit {
-                    session,
-                    seq,
-                    excerpt,
-                }))
-            },
-        )?;
-        let mut out = Vec::new();
-        let mut seen = HashSet::new();
-        for row in rows {
-            if let Some(hit) = row? {
-                if seen.insert(hit.session.row_id) {
-                    out.push(hit);
-                }
-                if out.len() >= limit as usize {
-                    return Ok(out);
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mut bind: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(params.len() + 2);
+            bind.push(Box::new(needle_binding));
+            bind.extend(params);
+            bind.push(Box::new(Self::bounded_search_limit(limit, use_fts)));
+            let rows = stmt.query_map(
+                rusqlite::params_from_iter(bind.iter().map(|b| b.as_ref())),
+                |row| {
+                    let summary = Self::row_to_summary(row)?;
+                    let seq: Option<i64> = row.get(Self::COLUMN_COUNT)?;
+                    let excerpt: String = row.get(Self::COLUMN_COUNT + 1)?;
+                    Ok(summary.map(|session| SessionSearchHit {
+                        session,
+                        seq,
+                        excerpt,
+                    }))
+                },
+            )?;
+            for row in rows {
+                if let Some(hit) = row? {
+                    if seen.insert(hit.session.row_id) {
+                        out.push(hit);
+                    }
+                    if out.len() >= limit as usize {
+                        return Ok(out);
+                    }
                 }
             }
         }
 
-        // Swift also searches title and session id after body matches. Keeping
-        // this as a separate query preserves FTS ranking for transcript hits
-        // while ensuring one result per session.
-        let (metadata_where_sql, metadata_params) = Self::filter_clause(filter)?;
+        // Metadata is a title scope, not a fallback which can leak a title
+        // into a role-only search. Session id shares the title branch in Swift.
+        if !filter.scopes.contains(&SessionSearchScope::Title) {
+            return Ok(out);
+        }
+        let (metadata_where_sql, metadata_params) = Self::search_filter_clause(filter, false)?;
         let metadata_sql = format!(
             "SELECT {cols}, NULL AS seq, NULL AS excerpt FROM sessions s \
              WHERE {known} AND (s.title LIKE ? ESCAPE '\\' OR s.session_id LIKE ? ESCAPE '\\'){metadata_where_sql} \
@@ -494,6 +593,70 @@ impl SessionIndexReader {
         Ok((sql, params))
     }
 
+    fn search_filter_clause(
+        filter: &SessionSearchFilter,
+        include_message_roles: bool,
+    ) -> Result<(String, Vec<Box<dyn rusqlite::ToSql>>), SessionCoreError> {
+        let mut sql = String::new();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(providers) = &filter.providers {
+            let providers = Self::dedup_providers(providers)?;
+            if providers.is_empty() {
+                sql.push_str(" AND 0");
+            } else {
+                let marks = vec!["?"; providers.len()].join(",");
+                sql.push_str(&format!(" AND s.provider IN ({marks})"));
+                for provider in providers {
+                    params.push(Box::new(provider.raw_value().to_string()));
+                }
+            }
+        }
+        if let Some(harnesses) = &filter.harnesses {
+            let harnesses = Self::dedup_harnesses(harnesses)?;
+            if harnesses.is_empty() {
+                sql.push_str(" AND 0");
+            } else {
+                let marks = vec!["?"; harnesses.len()].join(",");
+                sql.push_str(&format!(" AND s.harness IN ({marks})"));
+                for harness in harnesses {
+                    params.push(Box::new(harness));
+                }
+            }
+        }
+        if let Some(since) = filter.since {
+            sql.push_str(" AND COALESCE(s.last_active_at, s.created_at) >= ?");
+            params.push(Box::new(since));
+        }
+        if include_message_roles {
+            let roles: Vec<_> = filter
+                .scopes
+                .iter()
+                .filter_map(|scope| scope.message_role())
+                .collect();
+            if !roles.is_empty() {
+                let marks = vec!["?"; roles.len()].join(",");
+                sql.push_str(&format!(" AND m.role IN ({marks})"));
+                for role in roles {
+                    params.push(Box::new(role.to_string()));
+                }
+            }
+        }
+        let includes = Self::dedup_nonempty_strings(&filter.project_includes, "project_includes")?;
+        if !includes.is_empty() {
+            let marks = vec!["s.project_dir LIKE ? ESCAPE '\\'"; includes.len()].join(" OR ");
+            sql.push_str(&format!(" AND ({marks})"));
+            for project in includes {
+                params.push(Box::new(format!("%{}%", Self::like_pattern(&project))));
+            }
+        }
+        let excludes = Self::dedup_nonempty_strings(&filter.project_excludes, "project_excludes")?;
+        for project in excludes {
+            sql.push_str(" AND (s.project_dir IS NULL OR s.project_dir NOT LIKE ? ESCAPE '\\')");
+            params.push(Box::new(format!("%{}%", Self::like_pattern(&project))));
+        }
+        Ok((sql, params))
+    }
+
     fn dedup_providers(
         providers: &[SessionProvider],
     ) -> Result<Vec<SessionProvider>, SessionCoreError> {
@@ -526,6 +689,28 @@ impl SessionIndexReader {
                 }
                 out.push(harness.clone());
             }
+        }
+        Ok(out)
+    }
+
+    fn dedup_nonempty_strings(
+        values: &[String],
+        field: &'static str,
+    ) -> Result<Vec<String>, SessionCoreError> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for value in values {
+            let value = value.trim();
+            if value.is_empty() || !seen.insert(value) {
+                continue;
+            }
+            if out.len() == MAX_FILTER_VALUES {
+                return Err(SessionCoreError::FilterTooLarge {
+                    field,
+                    max: MAX_FILTER_VALUES,
+                });
+            }
+            out.push(value.to_string());
         }
         Ok(out)
     }
@@ -790,6 +975,97 @@ mod tests {
         assert_eq!(title_only.len(), 1);
         assert_eq!(title_only[0].session.provider, SessionProvider::Claude);
         assert_eq!(title_only[0].seq, None);
+    }
+
+    #[test]
+    fn scoped_search_defaults_to_title_user_assistant_and_filters_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_index(dir.path());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "INSERT INTO session_messages(id, session_row, seq, role, excerpt) VALUES \
+             (13, 1, 2, 'system', 'system-only needle'), \
+             (14, 1, 3, 'tool', 'tool-only needle'), \
+             (15, 2, 1, 'assistant', 'assistant project needle');",
+        )
+        .unwrap();
+        drop(conn);
+        let reader = SessionIndexReader::open(&path).unwrap();
+
+        // The default scope intentionally does not surface system or tool.
+        assert!(reader
+            .search_with_filter("system-only", &SessionSearchFilter::default())
+            .unwrap()
+            .is_empty());
+        let system = reader
+            .search_with_filter(
+                "system-only",
+                &SessionSearchFilter {
+                    scopes: [SessionSearchScope::System].into_iter().collect(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            system[0].session.session_id,
+            "aaaa1111-0000-0000-0000-000000000001"
+        );
+        let tool = reader
+            .search_with_filter(
+                "tool-only",
+                &SessionSearchFilter {
+                    scopes: [SessionSearchScope::Tool].into_iter().collect(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(tool[0].seq, Some(3));
+
+        // Title/session-id metadata joins only with Title, and projects narrow
+        // both metadata and transcript branches without becoming searchable.
+        let title_only = reader
+            .search_with_filter(
+                "bbbb2222",
+                &SessionSearchFilter {
+                    scopes: [SessionSearchScope::Title].into_iter().collect(),
+                    project_includes: vec!["proj2".to_string()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(title_only[0].seq, None);
+        assert!(reader
+            .search_with_filter(
+                "assistant project",
+                &SessionSearchFilter {
+                    project_excludes: vec!["proj2".to_string()],
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn legacy_search_preserves_since_for_fts_like_and_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_index(dir.path());
+        let reader = SessionIndexReader::open(&path).unwrap();
+        let after_every_fixture = 1_800_000_000;
+
+        for needle in ["tray", "sq", "bbbb2222"] {
+            let hits = reader
+                .search(
+                    needle,
+                    &SessionListFilter {
+                        since: Some(after_every_fixture),
+                        limit: 10,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert!(hits.is_empty(), "since was ignored for {needle:?}");
+        }
     }
 
     #[test]

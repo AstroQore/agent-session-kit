@@ -7,6 +7,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **Rust discovery/search/transcript parity.** The first Rust session-core
+  slice now mirrors Swift's default title/user/assistant search scopes,
+  explicit system/tool opt-in, project include/exclude filtering, and title
+  metadata branch. Codex and Claude transcript shapes are flattened more
+  tolerantly, and discovery validates bounded head/tail JSON, regular files,
+  tail metadata, stable ordering, and normalized 80-character titles.
+  **Intentional first-slice limitation:** filesystem discovery still exposes
+  only file `modified_at`; it does not yet expose parsed `createdAt` or
+  `lastActiveAt`, and must not be presented as full timestamp parity. Index
+  rows retain their stored `created_at` / `last_active_at` fields.
 - **Rust session core hardening.** Transcript pages now stream into a bounded
   result, report an explicit truncated state instead of a partial total, and
   cap scan bytes/messages, page size, and rendered message text. Index list,
