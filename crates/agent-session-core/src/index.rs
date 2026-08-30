@@ -332,6 +332,10 @@ impl SessionIndexReader {
         if needle.is_empty() || filter.scopes.is_empty() {
             return Ok(Vec::new());
         }
+        // Body FTS and metadata fallback are one logical search. A deferred
+        // read transaction pins both statements to the same WAL snapshot so
+        // a writer cannot recycle row ids between the two result sets.
+        let snapshot = self.conn.unchecked_transaction()?;
         let (where_sql, params) = Self::search_filter_clause(filter, true)?;
         let limit = Self::bounded_limit(filter.limit);
 
@@ -379,7 +383,7 @@ impl SessionIndexReader {
                 format!("%{}%", Self::like_pattern(needle))
             };
 
-            let mut stmt = self.conn.prepare(&sql)?;
+            let mut stmt = snapshot.prepare(&sql)?;
             let mut bind: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(params.len() + 2);
             bind.push(Box::new(needle_binding));
             bind.extend(params);
@@ -429,7 +433,7 @@ impl SessionIndexReader {
         metadata_bind.push(Box::new(pattern));
         metadata_bind.extend(metadata_params);
         metadata_bind.push(Box::new(limit));
-        let mut metadata_stmt = self.conn.prepare(&metadata_sql)?;
+        let mut metadata_stmt = snapshot.prepare(&metadata_sql)?;
         let metadata_rows = metadata_stmt.query_map(
             rusqlite::params_from_iter(metadata_bind.iter().map(|b| b.as_ref())),
             |row| {
@@ -1140,6 +1144,38 @@ mod tests {
         assert_eq!(title_only.len(), 1);
         assert_eq!(title_only[0].session.provider, SessionProvider::Claude);
         assert_eq!(title_only[0].seq, None);
+    }
+
+    #[test]
+    fn combined_body_and_metadata_search_finishes_one_read_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_index(dir.path());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "UPDATE sessions SET title = 'snapshotneedle metadata' WHERE id = 2; \
+             INSERT INTO session_messages(id, session_row, seq, role, excerpt) \
+             VALUES(16, 1, 2, 'user', 'snapshotneedle body');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let reader = SessionIndexReader::open(&path).unwrap();
+        let hits = reader
+            .search(
+                "snapshotneedle",
+                &SessionListFilter {
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let mut row_ids = hits
+            .into_iter()
+            .map(|hit| hit.session.row_id)
+            .collect::<Vec<_>>();
+        row_ids.sort_unstable();
+        assert_eq!(row_ids, [1, 2]);
+        assert!(reader.conn.is_autocommit());
     }
 
     #[test]

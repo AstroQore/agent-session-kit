@@ -175,13 +175,12 @@ pub fn discover_claude(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
             } else {
                 tail.iter()
                     .rev()
-                    .find_map(|line| line.get("sessionId").and_then(|value| value.as_str()))
+                    .find_map(|line| nonempty_json_string(line.get("sessionId")))
                     .or_else(|| {
                         head.iter()
-                            .find_map(|line| line.get("sessionId").and_then(|value| value.as_str()))
+                            .find_map(|line| nonempty_json_string(line.get("sessionId")))
                     })
-                    .unwrap_or(&stem)
-                    .to_string()
+                    .unwrap_or_else(|| stem.clone())
             };
             let mut cwd = None;
             let mut title = None;
@@ -881,6 +880,33 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "recorded-session");
         assert_eq!(sessions[0].title.as_deref(), Some("first second"));
+    }
+
+    #[test]
+    fn claude_blank_tail_session_id_falls_back_to_nonempty_head_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join(".claude/projects/p");
+        std::fs::create_dir_all(&claude).unwrap();
+        let path = claude.join("legacy-session.jsonl");
+        let mut file = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+        writeln!(
+            file,
+            "{{\"type\":\"user\",\"sessionId\":\"head-valid\",\"message\":{{\"content\":\"head prompt\"}}}}"
+        )
+        .unwrap();
+        for _ in 0..=jsonl::MAX_TAIL_LINES {
+            writeln!(file, "{{\"type\":\"progress\"}}").unwrap();
+        }
+        writeln!(
+            file,
+            "{{\"type\":\"user\",\"sessionId\":\"   \",\"message\":{{\"content\":\"tail\"}}}}"
+        )
+        .unwrap();
+        drop(file);
+
+        let sessions = discover_claude(dir.path(), 1);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "head-valid");
     }
 
     #[test]
