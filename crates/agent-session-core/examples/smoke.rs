@@ -14,14 +14,9 @@ fn main() {
         .expect("list");
     for row in &rows {
         println!(
-            "- [{}] {} ({} msgs)",
+            "- provider={} harness={} messages={}",
             row.provider.raw_value(),
-            row.title
-                .as_deref()
-                .unwrap_or("<untitled>")
-                .chars()
-                .take(60)
-                .collect::<String>(),
+            row.harness.as_deref().unwrap_or("unknown"),
             row.message_count.unwrap_or(0)
         );
     }

@@ -476,7 +476,15 @@ fn is_machine_context_tag(name: &str) -> bool {
             | "collaboration_mode"
             | "apps_instructions"
             | "plugins_instructions"
+            | "instructions"
             | "task-notification"
+            | "task-id"
+            | "tool-use-id"
+            | "output-file"
+            | "status"
+            | "summary"
+            | "result"
+            | "note"
             | "cross-session-message"
     ) || name.starts_with("local-command-")
 }
@@ -779,6 +787,7 @@ mod tests {
         .unwrap();
         for text in [
             "<user_instructions>machine</user_instructions>\n<environment_context><cwd>/Users/example/project</cwd></environment_context>",
+            "<instructions>machine</instructions>",
             "compare <div> tags without changing them",
         ] {
             writeln!(file, "{}", serde_json::json!({
