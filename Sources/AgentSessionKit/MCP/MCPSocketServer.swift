@@ -258,6 +258,7 @@ public final class MCPSocketServer: @unchecked Sendable {
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw MCPSocketError.socketCreationFailed(errno) }
+        Self.setNoSIGPIPE(fd)
 
         // The window between `bind` (which creates the file) and `chmod` is
         // the only moment the socket could be group/other-accessible, so the
@@ -340,8 +341,20 @@ public final class MCPSocketServer: @unchecked Sendable {
                 continue
             }
             Self.setNonBlocking(clientFD)
+            Self.setNoSIGPIPE(clientFD)
             open(clientFD: clientFD)
         }
+    }
+
+    /// A peer can vanish between our poll and our write; without this, that
+    /// write raises SIGPIPE and the *host process* dies with no crash report
+    /// (observed as Vibe Bar's recurring silent exits). With it, the write
+    /// fails with EPIPE and the connection teardown path runs instead. Hosts
+    /// should still ignore SIGPIPE process-wide — this is defense in depth
+    /// for every host of this package.
+    static func setNoSIGPIPE(_ fd: Int32) {
+        var value: Int32 = 1
+        _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &value, socklen_t(MemoryLayout<Int32>.size))
     }
 
     private func currentListenFD() -> Int32 {
