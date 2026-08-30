@@ -128,10 +128,18 @@ pub fn tail_json_lines(path: &Path, tail_bytes: u64) -> std::io::Result<Vec<Valu
     let mut file = open_regular_file(path)?;
     let len = file.metadata()?.len();
     let start = len.saturating_sub(tail_bytes.min(MAX_TAIL_BYTES));
+    let starts_at_line_boundary = if start == 0 {
+        true
+    } else {
+        file.seek(SeekFrom::Start(start - 1))?;
+        let mut previous = [0u8; 1];
+        file.read_exact(&mut previous)?;
+        previous[0] == b'\n'
+    };
     file.seek(SeekFrom::Start(start))?;
     let initial_window = len - start;
     let mut reader = BufReader::with_capacity(256 * 1024, file.take(initial_window));
-    if start > 0 {
+    if !starts_at_line_boundary {
         // Drop the partial first line of the window.
         let mut scratch = Vec::new();
         read_limited_line(&mut reader, &mut scratch, usize::MAX)?;
@@ -275,6 +283,34 @@ mod tests {
             MAX_HEAD_LINES
         );
         assert!(!tail_json_lines(&path, u64::MAX).unwrap().is_empty());
+    }
+
+    #[test]
+    fn tail_window_after_newline_keeps_its_first_complete_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.jsonl");
+        let first = "{\"a\":1}\n";
+        let tail = "{\"a\":2}\n{\"a\":3}\n";
+        std::fs::write(&path, format!("{first}{tail}")).unwrap();
+
+        let rows = tail_json_lines(&path, tail.len() as u64).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["a"], 2);
+        assert_eq!(rows[1]["a"], 3);
+    }
+
+    #[test]
+    fn tail_window_inside_line_drops_the_partial_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.jsonl");
+        let data = "{\"a\":1}\n{\"a\":2222}\n{\"a\":3}\n";
+        std::fs::write(&path, data).unwrap();
+        let second_start = "{\"a\":1}\n".len();
+        let start = second_start + 4;
+
+        let rows = tail_json_lines(&path, (data.len() - start) as u64).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["a"], 3);
     }
 
     #[test]

@@ -200,7 +200,7 @@ pub fn discover_claude(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                     continue;
                 }
                 if cwd.is_none() {
-                    cwd = line.get("cwd").and_then(|v| v.as_str()).map(str::to_string);
+                    cwd = nonempty_json_string(line.get("cwd"));
                 }
                 if title.is_none() && line.get("type").and_then(|v| v.as_str()) == Some("user") {
                     let text = line
@@ -221,8 +221,7 @@ pub fn discover_claude(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                 cwd = tail
                     .iter()
                     .rev()
-                    .find_map(|line| line.get("cwd").and_then(|value| value.as_str()))
-                    .map(str::to_string);
+                    .find_map(|line| nonempty_json_string(line.get("cwd")));
             }
             if title.is_none() {
                 title = cwd
@@ -907,6 +906,49 @@ mod tests {
         let sessions = discover_claude(dir.path(), 1);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "head-valid");
+    }
+
+    #[test]
+    fn claude_cwd_ignores_blank_values_and_trims_head_and_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join(".claude/projects/p");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::write(
+            claude.join("aaaabbbb-cccc-dddd-eeee-ffff00001111.jsonl"),
+            "{\"type\":\"user\",\"cwd\":\"   \",\"message\":{\"content\":\"first\"}}\n\
+             {\"type\":\"user\",\"cwd\":\" /Users/example/head \",\"message\":{\"content\":\"second\"}}\n",
+        )
+        .unwrap();
+        let tail_path = claude.join("aaaabbbb-cccc-dddd-eeee-ffff00002222.jsonl");
+        let mut tail_file = std::io::BufWriter::new(std::fs::File::create(tail_path).unwrap());
+        writeln!(
+            tail_file,
+            "{{\"type\":\"user\",\"cwd\":\" \\t \",\"message\":{{\"content\":\"first\"}}}}"
+        )
+        .unwrap();
+        for _ in 0..12 {
+            writeln!(tail_file, "{{\"type\":\"progress\"}}").unwrap();
+        }
+        writeln!(
+            tail_file,
+            "{{\"type\":\"assistant\",\"cwd\":\" /Users/example/tail/ \",\"message\":{{\"content\":\"done\"}}}}"
+        )
+        .unwrap();
+        drop(tail_file);
+
+        let sessions = discover_claude(dir.path(), 10);
+        let cwd_by_id: std::collections::HashMap<_, _> = sessions
+            .into_iter()
+            .map(|session| (session.session_id, session.project_dir))
+            .collect();
+        assert_eq!(
+            cwd_by_id["aaaabbbb-cccc-dddd-eeee-ffff00001111"].as_deref(),
+            Some("/Users/example/head")
+        );
+        assert_eq!(
+            cwd_by_id["aaaabbbb-cccc-dddd-eeee-ffff00002222"].as_deref(),
+            Some("/Users/example/tail/")
+        );
     }
 
     #[test]
