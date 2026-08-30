@@ -114,13 +114,31 @@ fn read_page_with_reader<R: BufRead>(
     limit: usize,
     parse: fn(&Value) -> Option<TranscriptMessage>,
 ) -> std::io::Result<TranscriptPage> {
+    read_page_with_reader_bounded(
+        reader,
+        offset,
+        limit,
+        MAX_TRANSCRIPT_SCAN_BYTES,
+        MAX_TRANSCRIPT_SCAN_MESSAGES,
+        parse,
+    )
+}
+
+fn read_page_with_reader_bounded<R: BufRead>(
+    reader: R,
+    offset: usize,
+    limit: usize,
+    max_scan_bytes: u64,
+    max_scan_messages: usize,
+    parse: fn(&Value) -> Option<TranscriptMessage>,
+) -> std::io::Result<TranscriptPage> {
     let page_limit = limit.clamp(1, MAX_PAGE_MESSAGES);
     let mut messages: Vec<TranscriptMessage> = Vec::with_capacity(page_limit);
     let mut total_messages = 0usize;
     let mut hit_message_cap = false;
     let mut accept = |message: Option<TranscriptMessage>| {
         let Some(message) = message else { return true };
-        if total_messages >= MAX_TRANSCRIPT_SCAN_MESSAGES {
+        if total_messages >= max_scan_messages {
             hit_message_cap = true;
             return false;
         }
@@ -130,10 +148,9 @@ fn read_page_with_reader<R: BufRead>(
         total_messages += 1;
         true
     };
-    let stats =
-        jsonl::for_each_json_line_bounded_reader(reader, MAX_TRANSCRIPT_SCAN_BYTES, |line| {
-            accept(parse(&line))
-        })?;
+    let stats = jsonl::for_each_json_line_bounded_reader(reader, max_scan_bytes, |line| {
+        accept(parse(&line))
+    })?;
     let truncated = stats.truncated || hit_message_cap;
     Ok(TranscriptPage {
         messages,
@@ -441,5 +458,24 @@ mod tests {
         let page = read_page_from_file(SessionProvider::Codex, file, 0, 10).unwrap();
         assert_eq!(page.messages[0].text, "from handle");
         assert_eq!(page.total_messages, Some(1));
+    }
+
+    #[test]
+    fn transcript_scan_stops_at_its_byte_budget_inside_an_unterminated_line() {
+        use std::io::Cursor;
+
+        let input = vec![b'x'; 2 * 1024 * 1024];
+        let page = read_page_with_reader_bounded(
+            Cursor::new(input),
+            0,
+            1,
+            1024,
+            MAX_TRANSCRIPT_SCAN_MESSAGES,
+            codex_message,
+        )
+        .unwrap();
+        assert!(page.messages.is_empty());
+        assert_eq!(page.total_messages, None);
+        assert!(page.truncated);
     }
 }

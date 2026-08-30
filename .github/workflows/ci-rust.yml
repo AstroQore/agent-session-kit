@@ -5,12 +5,16 @@ on:
     branches: [main]
     paths:
       - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
       - "crates/**"
       - ".github/workflows/ci-rust.yml"
   pull_request:
     branches: [main]
     paths:
       - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
       - "crates/**"
       - ".github/workflows/ci-rust.yml"
 

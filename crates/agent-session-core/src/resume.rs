@@ -54,6 +54,15 @@ pub fn posix_shell_line(cwd: Option<&str>, command: &str) -> String {
     }
 }
 
+/// Backward-compatible alias for [`posix_shell_line`].
+///
+/// Deprecated because its old generic name made POSIX quoting look safe for
+/// Windows shell launchers.
+#[deprecated(note = "use posix_shell_line; Windows hosts must not reuse POSIX shell quoting")]
+pub fn shell_line(cwd: Option<&str>, command: &str) -> String {
+    posix_shell_line(cwd, command)
+}
+
 /// POSIX single-quoting: everything between the quotes is literal, and an
 /// embedded quote is spelled `'\''` — close, escape, reopen.
 pub fn posix_single_quoted(value: &str) -> String {
@@ -137,6 +146,15 @@ mod tests {
         assert_eq!(
             posix_shell_line(Some("  "), "codex resume x"),
             "codex resume x"
+        );
+    }
+
+    #[allow(deprecated)]
+    #[test]
+    fn deprecated_shell_line_alias_remains_posix_compatible() {
+        assert_eq!(
+            shell_line(Some("/tmp/it's here"), "codex resume x"),
+            posix_shell_line(Some("/tmp/it's here"), "codex resume x")
         );
     }
 }

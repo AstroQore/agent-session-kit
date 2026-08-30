@@ -25,8 +25,9 @@ pub const MAX_HEAD_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadStats {
-    /// Bytes consumed from the file. A final line may make this slightly
-    /// larger than the requested cap, but never by more than MAX_LINE_BYTES.
+    /// Bytes consumed from the supplied reader. This never exceeds the
+    /// requested cap; an already-buffered reader may have prefetched a small
+    /// implementation-defined amount beyond it.
     pub bytes_read: u64,
     /// The scan stopped because it reached the supplied byte cap.
     pub truncated: bool,
@@ -48,7 +49,10 @@ pub fn for_each_json_line_bounded(
     f: impl FnMut(Value) -> bool,
 ) -> std::io::Result<ReadStats> {
     let file = open_regular_file(path)?;
-    for_each_json_line_bounded_reader(BufReader::with_capacity(256 * 1024, file), max_bytes, f)
+    let capacity = usize::try_from(max_bytes)
+        .unwrap_or(usize::MAX)
+        .clamp(1, 256 * 1024);
+    for_each_json_line_bounded_reader(BufReader::with_capacity(capacity, file), max_bytes, f)
 }
 
 /// Iterate over parsed JSONL records from an already-open reader. This is the
@@ -63,16 +67,23 @@ pub fn for_each_json_line_bounded_reader<R: BufRead>(
     let mut bytes_read = 0u64;
     let cap = max_bytes.max(1);
     loop {
+        if bytes_read >= cap {
+            return Ok(ReadStats {
+                bytes_read,
+                truncated: true,
+            });
+        }
         buf.clear();
-        let read = read_limited_line(&mut reader, &mut buf)?;
-        if read == 0 {
+        let remaining = usize::try_from(cap - bytes_read).unwrap_or(usize::MAX);
+        let line = read_limited_line(&mut reader, &mut buf, remaining)?;
+        if line.consumed == 0 {
             return Ok(ReadStats {
                 bytes_read,
                 truncated: false,
             });
         }
-        bytes_read = bytes_read.saturating_add(read as u64);
-        if bytes_read > cap {
+        bytes_read = bytes_read.saturating_add(line.consumed as u64);
+        if line.hit_budget {
             return Ok(ReadStats {
                 bytes_read,
                 truncated: true,
@@ -122,14 +133,14 @@ pub fn tail_json_lines(path: &Path, tail_bytes: u64) -> std::io::Result<Vec<Valu
     if start > 0 {
         // Drop the partial first line of the window.
         let mut scratch = Vec::new();
-        read_limited_line(&mut reader, &mut scratch)?;
+        read_limited_line(&mut reader, &mut scratch, usize::MAX)?;
     }
     let mut out = VecDeque::with_capacity(MAX_TAIL_LINES);
     let mut buf: Vec<u8> = Vec::new();
     loop {
         buf.clear();
-        let read = read_limited_line(&mut reader, &mut buf)?;
-        if read == 0 {
+        let line = read_limited_line(&mut reader, &mut buf, usize::MAX)?;
+        if line.consumed == 0 {
             return Ok(out.into_iter().collect());
         }
         if buf.len() >= MAX_LINE_BYTES {
@@ -162,31 +173,55 @@ pub fn open_regular_file(path: &Path) -> std::io::Result<File> {
 }
 
 /// Reads one line into `buf` without the trailing newline, refusing to grow
-/// past `MAX_LINE_BYTES` (the remainder of an oversized line is drained).
-/// Returns total bytes consumed (0 at EOF).
-fn read_limited_line<R: BufRead>(reader: &mut R, buf: &mut Vec<u8>) -> std::io::Result<usize> {
+/// past `MAX_LINE_BYTES` and to consume beyond `budget`. A caller that runs
+/// out of budget receives `hit_budget` rather than draining an unterminated
+/// oversized line to EOF.
+struct LineRead {
+    consumed: usize,
+    hit_budget: bool,
+}
+
+fn read_limited_line<R: BufRead>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    budget: usize,
+) -> std::io::Result<LineRead> {
     let mut consumed = 0usize;
     loop {
+        if consumed == budget {
+            return Ok(LineRead {
+                consumed,
+                hit_budget: true,
+            });
+        }
         let available = reader.fill_buf()?;
         if available.is_empty() {
-            return Ok(consumed);
+            return Ok(LineRead {
+                consumed,
+                hit_budget: false,
+            });
         }
-        match memchr(b'\n', available) {
+        let allowed = available.len().min(budget - consumed);
+        let chunk = &available[..allowed];
+        match memchr(b'\n', chunk) {
             Some(pos) => {
-                let take = &available[..pos];
+                let take = &chunk[..pos];
                 if buf.len() < MAX_LINE_BYTES {
                     let room = MAX_LINE_BYTES - buf.len();
                     buf.extend_from_slice(&take[..take.len().min(room)]);
                 }
                 let advance = pos + 1;
                 reader.consume(advance);
-                return Ok(consumed + advance);
+                return Ok(LineRead {
+                    consumed: consumed + advance,
+                    hit_budget: false,
+                });
             }
             None => {
-                let take_len = available.len();
+                let take_len = chunk.len();
                 if buf.len() < MAX_LINE_BYTES {
                     let room = MAX_LINE_BYTES - buf.len();
-                    buf.extend_from_slice(&available[..take_len.min(room)]);
+                    buf.extend_from_slice(&chunk[..take_len.min(room)]);
                 }
                 reader.consume(take_len);
                 consumed += take_len;
@@ -274,8 +309,18 @@ mod tests {
 
         let stats = for_each_json_line_bounded(&path, 1, |_| true).unwrap();
         assert!(stats.truncated);
-        assert!(stats.bytes_read > 1);
-        assert!(stats.bytes_read <= 1 + MAX_LINE_BYTES as u64);
+        assert_eq!(stats.bytes_read, 1);
+    }
+
+    #[test]
+    fn bounded_reader_does_not_drain_a_giant_unterminated_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.jsonl");
+        std::fs::write(&path, vec![b'x'; 2 * 1024 * 1024]).unwrap();
+
+        let stats = for_each_json_line_bounded(&path, 1024, |_| true).unwrap();
+        assert!(stats.truncated);
+        assert_eq!(stats.bytes_read, 1024);
     }
 
     #[cfg(unix)]
