@@ -516,7 +516,12 @@ fn human_title_text(text: &str) -> Option<String> {
     body.push_str(&text[cursor..]);
     let body = strip_boilerplate_lines(&body);
     let body = body.trim();
-    (!body.is_empty()).then(|| body.to_string())
+    (!body.is_empty() && !is_bare_slash_command(body)).then(|| body.to_string())
+}
+
+fn is_bare_slash_command(text: &str) -> bool {
+    text.strip_prefix('/')
+        .is_some_and(|command| !command.chars().any(char::is_whitespace))
 }
 
 fn strip_boilerplate_lines(text: &str) -> String {
@@ -1048,6 +1053,24 @@ mod tests {
     }
 
     #[test]
+    fn bare_slash_commands_do_not_become_titles() {
+        assert_eq!(human_title_text("/clear"), None);
+        assert_eq!(human_title_text("/compact"), None);
+        assert_eq!(
+            human_title_text("/model opus").as_deref(),
+            Some("/model opus")
+        );
+        assert_eq!(
+            human_title_text("/model\topus").as_deref(),
+            Some("/model\topus")
+        );
+        assert_eq!(
+            human_title_text("please run /clear").as_deref(),
+            Some("please run /clear")
+        );
+    }
+
+    #[test]
     fn codex_title_skips_machine_context_and_keeps_later_human_prompt() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(".codex/sessions");
@@ -1066,6 +1089,8 @@ mod tests {
         for text in [
             "<user_instructions>machine</user_instructions>\n<environment_context><cwd>/Users/example/project</cwd></environment_context>",
             "# AGENTS.md instructions for /Users/example/project\n<instructions>machine</instructions>",
+            "/clear",
+            "/compact",
             "compare <div> tags without changing them",
         ] {
             writeln!(file, "{}", serde_json::json!({
