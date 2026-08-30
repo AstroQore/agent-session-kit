@@ -100,6 +100,8 @@ pub struct SessionListFilter {
     pub harnesses: Option<Vec<String>>,
     /// Only sessions active at/after this Unix timestamp.
     pub since: Option<i64>,
+    /// Only sessions active at/before this Unix timestamp (inclusive).
+    pub until: Option<i64>,
     pub limit: usize,
     pub offset: usize,
 }
@@ -142,6 +144,8 @@ pub struct SessionSearchFilter {
     /// legacy `search(text, SessionListFilter)` adapter cannot silently drop
     /// its existing `since` constraint.
     pub since: Option<i64>,
+    /// Only sessions active at/before this Unix timestamp (inclusive).
+    pub until: Option<i64>,
     /// Defaults to title, user, and assistant, mirroring Swift.
     pub scopes: BTreeSet<SessionSearchScope>,
     /// Substring filters over `sessions.project_dir`; any include may match.
@@ -157,6 +161,7 @@ impl Default for SessionSearchFilter {
             providers: None,
             harnesses: None,
             since: None,
+            until: None,
             scopes: [
                 SessionSearchScope::Title,
                 SessionSearchScope::User,
@@ -177,6 +182,7 @@ impl From<&SessionListFilter> for SessionSearchFilter {
             providers: filter.providers.clone(),
             harnesses: filter.harnesses.clone(),
             since: filter.since,
+            until: filter.until,
             limit: filter.limit,
             ..Self::default()
         }
@@ -590,6 +596,13 @@ impl SessionIndexReader {
             sql.push_str(" AND COALESCE(s.last_active_at, s.created_at) >= ?");
             params.push(Box::new(since));
         }
+        if let Some(until) = filter.until {
+            sql.push_str(
+                " AND (COALESCE(s.last_active_at, s.created_at) IS NULL \
+                 OR COALESCE(s.last_active_at, s.created_at) <= ?)",
+            );
+            params.push(Box::new(until));
+        }
         Ok((sql, params))
     }
 
@@ -626,6 +639,13 @@ impl SessionIndexReader {
         if let Some(since) = filter.since {
             sql.push_str(" AND COALESCE(s.last_active_at, s.created_at) >= ?");
             params.push(Box::new(since));
+        }
+        if let Some(until) = filter.until {
+            sql.push_str(
+                " AND (COALESCE(s.last_active_at, s.created_at) IS NULL \
+                 OR COALESCE(s.last_active_at, s.created_at) <= ?)",
+            );
+            params.push(Box::new(until));
         }
         if include_message_roles {
             let roles: Vec<_> = filter
@@ -897,6 +917,48 @@ mod tests {
             })
             .unwrap();
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn until_filters_future_rows_before_list_offset_and_search_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_index(dir.path());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "INSERT INTO sessions(id, provider, session_id, harness, title, created_at, last_active_at, source_path) \
+             VALUES(4, 'codex', 'future', 'Codex', 'future boundedneedle', 2000000000, 2000000000, '/Users/example/future.jsonl'); \
+             INSERT INTO session_messages(id, session_row, seq, role, excerpt) VALUES \
+               (16, 1, 2, 'user', 'shared boundedneedle text'), \
+               (17, 2, 1, 'user', 'shared boundedneedle text'), \
+               (18, 4, 0, 'user', 'shared boundedneedle text');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let reader = SessionIndexReader::open(&path).unwrap();
+        let page = reader
+            .list(&SessionListFilter {
+                until: Some(1_700_002_000),
+                offset: 1,
+                limit: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].provider, SessionProvider::Codex);
+
+        let hits = reader
+            .search(
+                "boundedneedle",
+                &SessionListFilter {
+                    until: Some(1_700_002_000),
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|hit| hit.session.session_id != "future"));
     }
 
     #[test]
