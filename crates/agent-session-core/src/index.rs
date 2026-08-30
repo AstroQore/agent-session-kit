@@ -5,6 +5,16 @@
 //! database with `SQLITE_OPEN_READONLY`, checks the version, and refuses
 //! anything it does not understand — it must never trigger schema creation,
 //! migration, prune, or rebuild.
+//!
+//! One caveat worth stating plainly, because it looks like a write and isn't:
+//! opening a WAL database read-only still mmaps its `-shm` sibling, which
+//! updates that file's mtime. The database file and the `-wal` are untouched
+//! (verified byte-for-byte against a live 12.8k-session index). A host
+//! auditing "did the second client write anything?" should expect exactly
+//! this one mtime bump and nothing else. Opening with `immutable=1` would
+//! avoid even that, but at the cost of not seeing rows the writer has
+//! committed to the WAL and not yet checkpointed — a stale read is the worse
+//! trade.
 
 use std::path::{Path, PathBuf};
 
