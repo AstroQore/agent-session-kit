@@ -426,8 +426,19 @@ fn human_title_text(text: &str) -> Option<String> {
         }
     }
     body.push_str(&text[cursor..]);
+    let body = strip_boilerplate_lines(&body);
     let body = body.trim();
     (!body.is_empty()).then(|| body.to_string())
+}
+
+fn strip_boilerplate_lines(text: &str) -> String {
+    text.split('\n')
+        .filter(|line| {
+            let normalized = line.trim().to_ascii_lowercase();
+            !(normalized.starts_with('#') && normalized.contains("agents.md instructions"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn first_machine_context_opening(text: &str, cursor: usize) -> Option<(usize, usize, String)> {
@@ -767,6 +778,16 @@ mod tests {
             human_title_text(text).as_deref(),
             Some("before<div>human</div>after")
         );
+        assert_eq!(
+            human_title_text("请修改AGENTS.md").as_deref(),
+            Some("请修改AGENTS.md")
+        );
+        assert_eq!(
+            human_title_text(
+                "# AGENTS.md instructions for /Users/example/project\n<instructions>machine</instructions>"
+            ),
+            None
+        );
     }
 
     #[test]
@@ -787,7 +808,7 @@ mod tests {
         .unwrap();
         for text in [
             "<user_instructions>machine</user_instructions>\n<environment_context><cwd>/Users/example/project</cwd></environment_context>",
-            "<instructions>machine</instructions>",
+            "# AGENTS.md instructions for /Users/example/project\n<instructions>machine</instructions>",
             "compare <div> tags without changing them",
         ] {
             writeln!(file, "{}", serde_json::json!({
