@@ -112,14 +112,18 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
             }
             // Fall back to the rollout filename's trailing uuid when the
             // session meta line is missing.
-            let session_id = session_id.or_else(|| filename_id.clone())?;
+            let (session_id, session_id_from_filename) = match session_id {
+                Some(session_id) => (session_id, false),
+                None => (filename_id.clone()?, true),
+            };
             if filename_id
                 .as_deref()
                 .is_some_and(|filename_id| !session_id.eq_ignore_ascii_case(filename_id))
             {
                 return None;
             }
-            let owned_meta = codex_session_meta(&head, &tail, &session_id);
+            let owned_meta =
+                codex_session_meta(&head, &tail, &session_id, session_id_from_filename);
             let provider_variant =
                 owned_meta.and_then(|meta| codex_auto_review_provider_variant(meta, &head, &tail));
             let harness = owned_meta
@@ -367,19 +371,40 @@ fn codex_session_meta<'a>(
     head: &'a [serde_json::Value],
     tail: &'a [serde_json::Value],
     session_id: &str,
+    session_id_from_filename: bool,
 ) -> Option<&'a serde_json::Value> {
-    head.iter().chain(tail.iter()).find_map(|line| {
+    let mut idless_meta = None;
+    let mut saw_nonempty_id = false;
+    for line in head.iter().chain(tail.iter()) {
         let payload = (line.get("type").and_then(|value| value.as_str()) == Some("session_meta"))
             .then(|| line.get("payload"))
-            .flatten()?;
-        [payload.get("id"), payload.get("thread_id")]
+            .flatten();
+        let Some(payload) = payload else {
+            continue;
+        };
+        let mut has_nonempty_id = false;
+        for candidate in [payload.get("id"), payload.get("thread_id")]
             .into_iter()
             .flatten()
             .filter_map(|value| value.as_str())
             .map(str::trim)
-            .any(|value| !value.is_empty() && value.eq_ignore_ascii_case(session_id))
-            .then_some(payload)
-    })
+            .filter(|value| !value.is_empty())
+        {
+            has_nonempty_id = true;
+            saw_nonempty_id = true;
+            if candidate.eq_ignore_ascii_case(session_id) {
+                return Some(payload);
+            }
+        }
+        if !has_nonempty_id && idless_meta.is_none() {
+            idless_meta = Some(payload);
+        }
+    }
+    if session_id_from_filename && !saw_nonempty_id {
+        idless_meta
+    } else {
+        None
+    }
 }
 
 fn codex_model(lines: &[serde_json::Value]) -> Option<String> {
@@ -711,6 +736,59 @@ mod tests {
             .unwrap()
             .get("provider_variant")
             .is_none());
+    }
+
+    #[test]
+    fn codex_filename_identity_owns_only_entirely_idless_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let session_id = "0199aaaa-1111-2222-3333-444455556668";
+        let root_id = "0299aaaa-1111-2222-3333-444455556668";
+        std::fs::write(
+            sessions.join(format!("rollout-x-{session_id}.jsonl")),
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": {
+                    "session_id": root_id,
+                    "originator": "codex_work_desktop",
+                    "source": {"subagent": {"other": "guardian"}}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let session = discover_codex(dir.path(), 1).remove(0);
+        assert_eq!(session.session_id, session_id);
+        assert_eq!(session.harness.as_deref(), Some("chatgptWork"));
+        assert_eq!(
+            session.provider_variant.as_deref(),
+            Some("auto-review:0299aaaa-1111-2222-3333-444455556668")
+        );
+
+        let mut candidate_headers = vec![
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": {"originator": "codex_work_desktop"}
+            }),
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": {"id": "0399aaaa-1111-2222-3333-444455556668"}
+            }),
+        ];
+        assert!(codex_session_meta(&candidate_headers, &[], session_id, true).is_none());
+
+        candidate_headers.push(serde_json::json!({
+            "type": "session_meta",
+            "payload": {"thread_id": session_id, "originator": "codex_cli_rs"}
+        }));
+        assert_eq!(
+            codex_session_meta(&candidate_headers, &[], session_id, true)
+                .and_then(|meta| meta.get("originator"))
+                .and_then(|value| value.as_str()),
+            Some("codex_cli_rs")
+        );
     }
 
     #[test]
