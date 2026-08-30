@@ -96,7 +96,8 @@ pub struct ProviderCompatibility {
 pub struct SessionListFilter {
     /// None = all providers; empty = matches nothing (mirrors Swift).
     pub providers: Option<Vec<SessionProvider>>,
-    /// Harness display names ("Codex", "Claude Code", …).
+    /// Harness raw storage keys (`codex`, `claudeCode`, …). The documented
+    /// display names are accepted as compatibility aliases.
     pub harnesses: Option<Vec<String>>,
     /// Only sessions active at/after this Unix timestamp.
     pub since: Option<i64>,
@@ -700,17 +701,33 @@ impl SessionIndexReader {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
         for harness in harnesses {
-            if seen.insert(harness.as_str()) {
+            let harness = Self::harness_storage_key(harness);
+            if seen.insert(harness) {
                 if out.len() == MAX_FILTER_VALUES {
                     return Err(SessionCoreError::FilterTooLarge {
                         field: "harnesses",
                         max: MAX_FILTER_VALUES,
                     });
                 }
-                out.push(harness.clone());
+                out.push(harness.to_string());
             }
         }
         Ok(out)
+    }
+
+    fn harness_storage_key(harness: &str) -> &str {
+        match harness {
+            "Codex" => "codex",
+            "ChatGPT Work" => "chatgptWork",
+            "Claude Code" => "claudeCode",
+            "Claude Cowork" => "claudeCowork",
+            "Gemini CLI" => "geminiCLI",
+            "AntiGravity" => "antigravity",
+            "Grok Build" => "grokBuild",
+            "Cursor" => "cursor",
+            "Grok Bot" => "grokBot",
+            raw => raw,
+        }
     }
 
     fn dedup_nonempty_strings(
@@ -817,10 +834,10 @@ mod tests {
             INSERT INTO sessions(id, provider, session_id, harness, title, project_dir,
                                  created_at, last_active_at, source_path, message_count)
             VALUES
-              (1, 'codex', 'aaaa1111-0000-0000-0000-000000000001', 'Codex',
+              (1, 'codex', 'aaaa1111-0000-0000-0000-000000000001', 'codex',
                'Fix the tray icon', '/Users/example/proj', 1700000000, 1700000500,
                '/Users/example/.codex/sessions/a.jsonl', 4),
-              (2, 'claude', 'bbbb2222-0000-0000-0000-000000000002', 'Claude Code',
+              (2, 'claude', 'bbbb2222-0000-0000-0000-000000000002', 'claudeCode',
                'Refactor storage layer', '/Users/example/proj2', 1700001000, 1700002000,
                '/Users/example/.claude/projects/p/b.jsonl', 6),
               (3, 'unknown-future-provider', 'cccc', 'Future', 'x', '/x',
@@ -920,13 +937,39 @@ mod tests {
     }
 
     #[test]
+    fn harness_filter_binds_raw_storage_keys_and_accepts_display_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let reader = SessionIndexReader::open(&fixture_index(dir.path())).unwrap();
+        for harness in ["claudeCode", "Claude Code"] {
+            let rows = reader
+                .list(&SessionListFilter {
+                    harnesses: Some(vec![harness.to_string()]),
+                    limit: 10,
+                    ..Default::default()
+                })
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].harness.as_deref(), Some("claudeCode"));
+        }
+        let rows = reader
+            .list(&SessionListFilter {
+                harnesses: Some(vec!["Codex".to_string(), "codex".to_string()]),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].harness.as_deref(), Some("codex"));
+    }
+
+    #[test]
     fn until_filters_future_rows_before_list_offset_and_search_limit() {
         let dir = tempfile::tempdir().unwrap();
         let path = fixture_index(dir.path());
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "INSERT INTO sessions(id, provider, session_id, harness, title, created_at, last_active_at, source_path) \
-             VALUES(4, 'codex', 'future', 'Codex', 'future boundedneedle', 2000000000, 2000000000, '/Users/example/future.jsonl'); \
+             VALUES(4, 'codex', 'future', 'codex', 'future boundedneedle', 2000000000, 2000000000, '/Users/example/future.jsonl'); \
              INSERT INTO session_messages(id, session_row, seq, role, excerpt) VALUES \
                (16, 1, 2, 'user', 'shared boundedneedle text'), \
                (17, 2, 1, 'user', 'shared boundedneedle text'), \
@@ -1137,7 +1180,7 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "INSERT INTO sessions(id, provider, session_id, harness, title, created_at, source_path) \
-             VALUES(4, 'codex', 'dddd', 'Codex', 'second tray', 1700004000, '/d.jsonl'); \
+             VALUES(4, 'codex', 'dddd', 'codex', 'second tray', 1700004000, '/d.jsonl'); \
              INSERT INTO session_messages(id, session_row, seq, role, excerpt) \
              VALUES(13, 4, 0, 'user', 'another tray result');",
         )

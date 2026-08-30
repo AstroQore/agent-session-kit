@@ -80,22 +80,13 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                                 .get("content")
                                 .and_then(message_content_text)
                                 .map(|text| strip_codex_ide_envelope(&text))
-                                .filter(|text| !text.is_empty())
+                                .and_then(|text| human_title_text(&text))
                                 .map(|text| truncate_title(&text));
                         }
                     }
                 }
             }
             let filename_id = session_id_from_rollout_name(&path);
-            if session_id.is_some()
-                && filename_id.is_some()
-                && !session_id
-                    .as_deref()
-                    .unwrap_or_default()
-                    .eq_ignore_ascii_case(filename_id.as_deref().unwrap_or_default())
-            {
-                return None;
-            }
             // Older Codex headers call the resume id `thread_id`; the tail
             // is also a bounded fallback for a header pushed beyond the head
             // window by a newer writer.
@@ -111,7 +102,13 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
             }
             // Fall back to the rollout filename's trailing uuid when the
             // session meta line is missing.
-            let session_id = session_id.or(filename_id)?;
+            let session_id = session_id.or_else(|| filename_id.clone())?;
+            if filename_id
+                .as_deref()
+                .is_some_and(|filename_id| !session_id.eq_ignore_ascii_case(filename_id))
+            {
+                return None;
+            }
             Some(DiscoveredSession {
                 provider: SessionProvider::Codex,
                 session_id,
@@ -190,7 +187,7 @@ pub fn discover_claude(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                         .get("message")
                         .and_then(|m| m.get("content"))
                         .and_then(message_content_text);
-                    if let Some(text) = text {
+                    if let Some(text) = text.and_then(|text| human_title_text(&text)) {
                         if !is_claude_envelope_text(&text) {
                             title = Some(truncate_title(&text));
                         }
@@ -379,6 +376,75 @@ fn project_basename(project_dir: &str) -> Option<&str> {
         .filter(|name| !name.is_empty())
 }
 
+fn human_title_text(text: &str) -> Option<String> {
+    let mut body = text.to_string();
+    while let Some((start, open_end, name)) = first_machine_context_opening(&body) {
+        let close_end = {
+            tags_from(&body, open_end)
+                .find(|(_, _, candidate, closing)| *closing && candidate == &name)
+                .map(|(_, close_end, _, _)| close_end)
+        };
+        if let Some(close_end) = close_end {
+            body.replace_range(start..close_end, "");
+        } else {
+            body.truncate(start);
+        }
+    }
+    let body = body.trim();
+    (!body.is_empty()).then(|| body.to_string())
+}
+
+fn first_machine_context_opening(text: &str) -> Option<(usize, usize, String)> {
+    tags_from(text, 0).find_map(|(start, end, name, closing)| {
+        (!closing && is_machine_context_tag(&name)).then_some((start, end, name))
+    })
+}
+
+fn tags_from(
+    text: &str,
+    mut cursor: usize,
+) -> impl Iterator<Item = (usize, usize, String, bool)> + '_ {
+    std::iter::from_fn(move || {
+        let start = cursor + text[cursor..].find('<')?;
+        let end = start + text[start..].find('>')? + 1;
+        cursor = end;
+        let mut inner = text[start + 1..end - 1].trim_start();
+        let closing = inner.starts_with('/');
+        if closing {
+            inner = inner[1..].trim_start();
+        }
+        let name = inner
+            .chars()
+            .take_while(|character| !character.is_whitespace() && *character != '/')
+            .collect::<String>()
+            .to_ascii_lowercase();
+        Some((start, end, name, closing))
+    })
+}
+
+fn is_machine_context_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "command-name"
+            | "command-message"
+            | "command-args"
+            | "command-contents"
+            | "system-reminder"
+            | "user-prompt-submit-hook"
+            | "environment_context"
+            | "user_instructions"
+            | "app-context"
+            | "recommended_plugins"
+            | "skills_instructions"
+            | "permissions"
+            | "collaboration_mode"
+            | "apps_instructions"
+            | "plugins_instructions"
+            | "task-notification"
+            | "cross-session-message"
+    ) || name.starts_with("local-command-")
+}
+
 fn is_claude_envelope_text(text: &str) -> bool {
     [
         "<command-name>",
@@ -479,6 +545,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn codex_tail_id_must_still_match_the_filename_uuid() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let path = sessions.join("rollout-x-0199aaaa-1111-2222-3333-444455556666.jsonl");
+        let mut file = std::fs::File::create(path).unwrap();
+        for _ in 0..12 {
+            writeln!(file, "{{\"type\":\"event_msg\"}}").unwrap();
+        }
+        writeln!(
+            file,
+            "{{\"type\":\"session_meta\",\"payload\":{{\"thread_id\":\"0199bbbb-1111-2222-3333-444455556666\"}}}}"
+        )
+        .unwrap();
+        drop(file);
+        assert!(discover_codex(dir.path(), 10).is_empty());
+    }
+
     #[cfg(unix)]
     #[test]
     fn rejects_symlinked_discovery_roots_and_components() {
@@ -545,6 +630,38 @@ mod tests {
         assert_eq!(
             discover_codex(dir.path(), 1)[0].title.as_deref(),
             Some("Refactor parser")
+        );
+    }
+
+    #[test]
+    fn codex_title_skips_machine_context_and_keeps_later_human_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".codex/sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout-x-0199aaaa-1111-2222-3333-444455556666.jsonl");
+        let mut file = std::fs::File::create(path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": {"id": "0199aaaa-1111-2222-3333-444455556666"}
+            })
+        )
+        .unwrap();
+        for text in [
+            "<user_instructions>machine</user_instructions>\n<environment_context><cwd>/Users/example/project</cwd></environment_context>",
+            "compare <div> tags without changing them",
+        ] {
+            writeln!(file, "{}", serde_json::json!({
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"text": text}]}
+            })).unwrap();
+        }
+        drop(file);
+        assert_eq!(
+            discover_codex(dir.path(), 1)[0].title.as_deref(),
+            Some("compare <div> tags without changing them")
         );
     }
 
@@ -658,6 +775,24 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "recorded-session");
         assert_eq!(sessions[0].title.as_deref(), Some("first second"));
+    }
+
+    #[test]
+    fn claude_title_skips_machine_notifications_and_keeps_human_markup() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join(".claude/projects/p");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::write(
+            claude.join("aaaabbbb-cccc-dddd-eeee-ffff00001111.jsonl"),
+            "{\"type\":\"user\",\"message\":{\"content\":\"<task-notification><result>done</result></task-notification>\"}}\n\
+             {\"type\":\"user\",\"message\":{\"content\":\"<cross-session-message>worker update</cross-session-message>\"}}\n\
+             {\"type\":\"user\",\"message\":{\"content\":\"keep ordinary <span> markup\"}}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            discover_claude(dir.path(), 1)[0].title.as_deref(),
+            Some("keep ordinary <span> markup")
+        );
     }
 
     fn set_modified(path: &Path, seconds: u64) {
