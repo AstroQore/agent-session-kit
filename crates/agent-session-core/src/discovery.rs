@@ -31,8 +31,12 @@ pub struct DiscoveredSession {
 /// `archived_sessions`), newest first, capped at `limit`.
 pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
     let mut files: Vec<(PathBuf, i64, u64)> = Vec::new();
-    collect_jsonl_files(&home.join(".codex/sessions"), &mut files, 4);
-    collect_jsonl_files(&home.join(".codex/archived_sessions"), &mut files, 4);
+    if let Some(root) = safe_root(home, &[".codex", "sessions"]) {
+        collect_jsonl_files(&root, &mut files, 4);
+    }
+    if let Some(root) = safe_root(home, &[".codex", "archived_sessions"]) {
+        collect_jsonl_files(&root, &mut files, 4);
+    }
     files.sort_by_key(|f| std::cmp::Reverse(f.1));
     files.truncate(limit);
 
@@ -46,25 +50,27 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
             for line in &head {
                 let line_type = line.get("type").and_then(|v| v.as_str());
                 if line_type == Some("session_meta") {
-                    let payload = line.get("payload")?;
-                    if session_id.is_none() {
-                        session_id = payload
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string);
-                    }
-                    if cwd.is_none() {
-                        cwd = payload
-                            .get("cwd")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string);
+                    if let Some(payload) = line.get("payload") {
+                        if session_id.is_none() {
+                            session_id = payload
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
+                        }
+                        if cwd.is_none() {
+                            cwd = payload
+                                .get("cwd")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
+                        }
                     }
                 } else if line_type == Some("response_item") && title.is_none() {
-                    let payload = line.get("payload")?;
-                    if payload.get("type").and_then(|v| v.as_str()) == Some("message")
-                        && payload.get("role").and_then(|v| v.as_str()) == Some("user")
-                    {
-                        title = first_text(payload.get("content")).map(|t| truncate_title(&t));
+                    if let Some(payload) = line.get("payload") {
+                        if payload.get("type").and_then(|v| v.as_str()) == Some("message")
+                            && payload.get("role").and_then(|v| v.as_str()) == Some("user")
+                        {
+                            title = first_text(payload.get("content")).map(|t| truncate_title(&t));
+                        }
                     }
                 }
             }
@@ -88,8 +94,12 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
 /// `<home>/.config/claude/projects`, newest first, capped at `limit`.
 pub fn discover_claude(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
     let mut files: Vec<(PathBuf, i64, u64)> = Vec::new();
-    collect_jsonl_files(&home.join(".claude/projects"), &mut files, 3);
-    collect_jsonl_files(&home.join(".config/claude/projects"), &mut files, 3);
+    if let Some(root) = safe_root(home, &[".claude", "projects"]) {
+        collect_jsonl_files(&root, &mut files, 3);
+    }
+    if let Some(root) = safe_root(home, &[".config", "claude", "projects"]) {
+        collect_jsonl_files(&root, &mut files, 3);
+    }
     files.sort_by_key(|f| std::cmp::Reverse(f.1));
     files.truncate(limit);
 
@@ -131,6 +141,22 @@ pub fn discover_claude(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
             })
         })
         .collect()
+}
+
+/// Builds a discovery root only when every provider-owned component is a real
+/// directory. This prevents a configured root or an intermediate component
+/// from redirecting the walk through a symlink. Like other std-only checks it
+/// remains best-effort against a same-user replacement race after checking.
+fn safe_root(home: &Path, components: &[&str]) -> Option<PathBuf> {
+    let mut path = home.to_path_buf();
+    for component in components {
+        path.push(component);
+        let metadata = std::fs::symlink_metadata(&path).ok()?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+            return None;
+        }
+    }
+    Some(path)
 }
 
 fn collect_jsonl_files(root: &Path, out: &mut Vec<(PathBuf, i64, u64)>, max_depth: usize) {
@@ -277,5 +303,43 @@ mod tests {
         assert_eq!(claude.len(), 1);
         assert_eq!(claude[0].session_id, "aaaabbbb-cccc-dddd-eeee-ffff00001111");
         assert_eq!(claude[0].title.as_deref(), Some("refactor storage"));
+    }
+
+    #[test]
+    fn codex_bad_metadata_records_do_not_hide_filename_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let path = sessions.join("rollout-x-0199aaaa-1111-2222-3333-444455556666.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"session_meta\"}\n{\"type\":\"response_item\"}\n",
+        )
+        .unwrap();
+
+        let sessions = discover_codex(dir.path(), 10);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].session_id,
+            "0199aaaa-1111-2222-3333-444455556666"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_discovery_roots_and_components() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(target.join("sessions")).unwrap();
+        symlink(&target, dir.path().join(".codex")).unwrap();
+        assert!(discover_codex(dir.path(), 10).is_empty());
+
+        let middle = tempfile::tempdir().unwrap();
+        let codex = middle.path().join(".codex");
+        std::fs::create_dir_all(&codex).unwrap();
+        symlink(&target, codex.join("sessions")).unwrap();
+        assert!(discover_codex(middle.path(), 10).is_empty());
     }
 }

@@ -208,7 +208,9 @@ fn codex_message(line: &Value) -> Option<TranscriptMessage> {
                 }
                 "function_call_output" => Some(TranscriptMessage {
                     role: TranscriptRole::Tool,
-                    text: "[tool result]".to_string(),
+                    text: recorded_text(payload.get("output"))
+                        .or_else(|| recorded_text(payload.get("content")))
+                        .unwrap_or_else(|| "[tool result]".to_string()),
                     timestamp,
                 }),
                 "reasoning" => None,
@@ -220,6 +222,9 @@ fn codex_message(line: &Value) -> Option<TranscriptMessage> {
 }
 
 fn claude_message(line: &Value) -> Option<TranscriptMessage> {
+    if line.get("isMeta").and_then(|value| value.as_bool()) == Some(true) {
+        return None;
+    }
     let timestamp = line
         .get("timestamp")
         .and_then(|v| v.as_str())
@@ -235,9 +240,11 @@ fn claude_message(line: &Value) -> Option<TranscriptMessage> {
             };
             let content = message.get("content")?;
             let mut parts: Vec<String> = Vec::new();
+            let mut only_tool_results = true;
             if let Some(text) = content.as_str() {
                 if !text.trim().is_empty() {
                     parts.push(text.trim().to_string());
+                    only_tool_results = false;
                 }
             } else if let Some(blocks) = content.as_array() {
                 for block in blocks {
@@ -246,14 +253,19 @@ fn claude_message(line: &Value) -> Option<TranscriptMessage> {
                             if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
                                 if !text.trim().is_empty() {
                                     parts.push(text.trim().to_string());
+                                    only_tool_results = false;
                                 }
                             }
                         }
                         Some("tool_use") => {
                             let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
                             parts.push(format!("[tool call] {name}"));
+                            only_tool_results = false;
                         }
-                        Some("tool_result") => parts.push("[tool result]".to_string()),
+                        Some("tool_result") => parts.push(
+                            recorded_text(block.get("content"))
+                                .unwrap_or_else(|| "[tool result]".to_string()),
+                        ),
                         Some("thinking") => {}
                         _ => {}
                     }
@@ -263,8 +275,11 @@ fn claude_message(line: &Value) -> Option<TranscriptMessage> {
                 return None;
             }
             // A user line whose only content is tool results renders as Tool.
-            let all_tool = parts.iter().all(|p| p.starts_with("[tool "));
-            let role = if all_tool { TranscriptRole::Tool } else { role };
+            let role = if only_tool_results {
+                TranscriptRole::Tool
+            } else {
+                role
+            };
             Some(TranscriptMessage {
                 role,
                 text: parts.join("\n\n"),
@@ -281,6 +296,26 @@ fn claude_message(line: &Value) -> Option<TranscriptMessage> {
         }
         _ => None,
     }
+}
+
+fn recorded_text(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    if let Some(text) = value.as_str() {
+        let text = text.trim();
+        return (!text.is_empty()).then(|| text.to_string());
+    }
+    if let Some(array) = value.as_array() {
+        let parts: Vec<String> = array
+            .iter()
+            .filter_map(|entry| recorded_text(entry.get("text").or(Some(entry))))
+            .collect();
+        return (!parts.is_empty()).then(|| parts.join("\n\n"));
+    }
+    value
+        .get("text")
+        .or_else(|| value.get("content"))
+        .or_else(|| value.get("output"))
+        .and_then(|nested| recorded_text(Some(nested)))
 }
 
 fn joined_block_text(content: &Value) -> Option<String> {
@@ -395,6 +430,37 @@ mod tests {
         assert_eq!(page.messages.len(), 1);
         assert!(page.messages[0].text.contains("on it"));
         assert!(page.messages[0].text.contains("[tool call] Bash"));
+    }
+
+    #[test]
+    fn skips_claude_meta_and_keeps_recorded_tool_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"user\",\"isMeta\":true,\"message\":{\"role\":\"user\",\"content\":\"ignore\"}}\n",
+                "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"content\":\"actual Claude output\"}]}}\n"
+            ),
+        )
+        .unwrap();
+        let page = read_page(SessionProvider::Claude, &path, 0, 10).unwrap();
+        assert_eq!(page.total_messages, Some(1));
+        assert_eq!(page.messages[0].role, TranscriptRole::Tool);
+        assert_eq!(page.messages[0].text, "actual Claude output");
+    }
+
+    #[test]
+    fn keeps_codex_recorded_function_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"output\":\"actual Codex output\"}}\n",
+        )
+        .unwrap();
+        let page = read_page(SessionProvider::Codex, &path, 0, 10).unwrap();
+        assert_eq!(page.messages[0].text, "actual Codex output");
     }
 
     #[test]

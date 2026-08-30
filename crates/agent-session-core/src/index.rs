@@ -199,10 +199,11 @@ impl SessionIndexReader {
     ) -> Result<Vec<SessionSummary>, SessionCoreError> {
         let (where_sql, params) = Self::filter_clause(filter)?;
         let sql = format!(
-            "SELECT {cols} FROM sessions s WHERE 1=1{where_sql} \
+            "SELECT {cols} FROM sessions s WHERE {known}{where_sql} \
              ORDER BY COALESCE(s.last_active_at, s.created_at) DESC, s.id DESC \
              LIMIT ? OFFSET ?",
-            cols = Self::SESSION_COLUMNS
+            cols = Self::SESSION_COLUMNS,
+            known = Self::known_provider_predicate(),
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let mut bind: Vec<Box<dyn rusqlite::ToSql>> = params;
@@ -239,22 +240,32 @@ impl SessionIndexReader {
         let use_fts = needle.chars().count() >= 3;
         let sql = if use_fts {
             format!(
-                "SELECT {cols}, m.seq, m.excerpt \
-                   FROM session_fts f \
-                   JOIN session_messages m ON m.id = f.rowid \
-                   JOIN sessions s ON s.id = m.session_row \
-                  WHERE session_fts MATCH ?{where_sql} \
-                  ORDER BY rank LIMIT ?",
-                cols = Self::SESSION_COLUMNS
+                "WITH body_matches AS ( \
+                   SELECT {cols}, m.seq, m.excerpt, rank AS sort_key, \
+                          ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY rank) AS row_rank \
+                     FROM session_fts f \
+                     JOIN session_messages m ON m.id = f.rowid \
+                     JOIN sessions s ON s.id = m.session_row \
+                    WHERE session_fts MATCH ? AND {known}{where_sql} \
+                 ) SELECT {cols_no_alias}, seq, excerpt FROM body_matches \
+                   WHERE row_rank = 1 ORDER BY sort_key LIMIT ?",
+                cols = Self::cte_session_columns(),
+                cols_no_alias = Self::cte_output_columns(),
+                known = Self::known_provider_predicate(),
             )
         } else {
             format!(
-                "SELECT {cols}, m.seq, m.excerpt \
-                   FROM session_messages m \
-                   JOIN sessions s ON s.id = m.session_row \
-                  WHERE m.excerpt LIKE ? ESCAPE '\\'{where_sql} \
-                  ORDER BY m.id LIMIT ?",
-                cols = Self::SESSION_COLUMNS
+                "WITH body_matches AS ( \
+                   SELECT {cols}, m.seq, m.excerpt, m.id AS sort_key, \
+                          ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY m.id) AS row_rank \
+                     FROM session_messages m \
+                     JOIN sessions s ON s.id = m.session_row \
+                    WHERE m.excerpt LIKE ? ESCAPE '\\' AND {known}{where_sql} \
+                 ) SELECT {cols_no_alias}, seq, excerpt FROM body_matches \
+                   WHERE row_rank = 1 ORDER BY sort_key LIMIT ?",
+                cols = Self::cte_session_columns(),
+                cols_no_alias = Self::cte_output_columns(),
+                known = Self::known_provider_predicate(),
             )
         };
         let needle_binding: String = if use_fts {
@@ -300,9 +311,10 @@ impl SessionIndexReader {
         let (metadata_where_sql, metadata_params) = Self::filter_clause(filter)?;
         let metadata_sql = format!(
             "SELECT {cols}, NULL AS seq, NULL AS excerpt FROM sessions s \
-             WHERE (s.title LIKE ? ESCAPE '\\' OR s.session_id LIKE ? ESCAPE '\\'){metadata_where_sql} \
+             WHERE {known} AND (s.title LIKE ? ESCAPE '\\' OR s.session_id LIKE ? ESCAPE '\\'){metadata_where_sql} \
              ORDER BY s.last_active_at IS NULL, s.last_active_at DESC, s.id DESC LIMIT ?",
             cols = Self::SESSION_COLUMNS,
+            known = Self::known_provider_predicate(),
         );
         let pattern = format!("%{}%", Self::like_pattern(needle));
         let mut metadata_bind: Vec<Box<dyn rusqlite::ToSql>> =
@@ -429,6 +441,20 @@ impl SessionIndexReader {
             .map(|provider| format!("'{}'", provider.raw_value()))
             .collect::<Vec<_>>()
             .join(",")
+    }
+
+    fn known_provider_predicate() -> String {
+        format!("s.provider IN ({})", Self::provider_placeholders())
+    }
+
+    fn cte_session_columns() -> String {
+        Self::SESSION_COLUMNS.replacen("s.id,", "s.id AS session_row_id,", 1)
+    }
+
+    fn cte_output_columns() -> String {
+        Self::SESSION_COLUMNS
+            .replace("s.id", "session_row_id")
+            .replace("s.", "")
     }
 
     fn filter_clause(
@@ -656,6 +682,13 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].provider, SessionProvider::Claude);
         assert_eq!(rows[1].provider, SessionProvider::Codex);
+        let first = reader
+            .list(&SessionListFilter {
+                limit: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(first[0].provider, SessionProvider::Claude);
     }
 
     #[test]
@@ -757,6 +790,33 @@ mod tests {
         assert_eq!(title_only.len(), 1);
         assert_eq!(title_only[0].session.provider, SessionProvider::Claude);
         assert_eq!(title_only[0].seq, None);
+    }
+
+    #[test]
+    fn body_search_deduplicates_before_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_index(dir.path());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "INSERT INTO sessions(id, provider, session_id, harness, title, created_at, source_path) \
+             VALUES(4, 'codex', 'dddd', 'Codex', 'second tray', 1700004000, '/d.jsonl'); \
+             INSERT INTO session_messages(id, session_row, seq, role, excerpt) \
+             VALUES(13, 4, 0, 'user', 'another tray result');",
+        )
+        .unwrap();
+        drop(conn);
+        let reader = SessionIndexReader::open(&path).unwrap();
+        let hits = reader
+            .search(
+                "tray",
+                &SessionListFilter {
+                    limit: 2,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_ne!(hits[0].session.row_id, hits[1].session.row_id);
     }
 
     #[test]

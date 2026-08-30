@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use serde_json::Value;
@@ -129,7 +129,8 @@ pub fn tail_json_lines(path: &Path, tail_bytes: u64) -> std::io::Result<Vec<Valu
     let len = file.metadata()?.len();
     let start = len.saturating_sub(tail_bytes.min(MAX_TAIL_BYTES));
     file.seek(SeekFrom::Start(start))?;
-    let mut reader = BufReader::with_capacity(256 * 1024, file);
+    let initial_window = len - start;
+    let mut reader = BufReader::with_capacity(256 * 1024, file.take(initial_window));
     if start > 0 {
         // Drop the partial first line of the window.
         let mut scratch = Vec::new();
