@@ -21,6 +21,9 @@ pub struct DiscoveredSession {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
     pub session_id: String,
+    /// Provider-specific relationship metadata, matching the shared index.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_variant: Option<String>,
     pub title: Option<String>,
     pub project_dir: Option<String>,
     /// Internal source location. It is metadata, not an authorization token:
@@ -116,18 +119,14 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
             {
                 return None;
             }
-            let harness = head
-                .iter()
-                .chain(tail.iter())
-                .find_map(|line| {
-                    (line.get("type").and_then(|value| value.as_str()) == Some("session_meta"))
-                        .then(|| line.get("payload"))
-                        .flatten()
-                        .and_then(|payload| payload.get("originator"))
-                        .and_then(|value| value.as_str())
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                })
+            let owned_meta = codex_session_meta(&head, &tail, &session_id);
+            let provider_variant =
+                owned_meta.and_then(|meta| codex_auto_review_provider_variant(meta, &head, &tail));
+            let harness = owned_meta
+                .and_then(|payload| payload.get("originator"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
                 .map_or("codex", |originator| {
                     if originator == "codex_work_desktop" {
                         "chatgptWork"
@@ -139,6 +138,7 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                 provider: SessionProvider::Codex,
                 harness: Some(harness.to_string()),
                 session_id,
+                provider_variant,
                 title,
                 project_dir: cwd,
                 source_path: path.to_string_lossy().into_owned(),
@@ -202,11 +202,11 @@ pub fn discover_claude(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                 }
             }
             for line in &head {
-                if line.get("isMeta").and_then(|value| value.as_bool()) == Some(true) {
-                    continue;
-                }
                 if cwd.is_none() {
                     cwd = nonempty_json_string(line.get("cwd"));
+                }
+                if line.get("isMeta").and_then(|value| value.as_bool()) == Some(true) {
+                    continue;
                 }
                 if title.is_none() && line.get("type").and_then(|v| v.as_str()) == Some("user") {
                     let text = line
@@ -239,6 +239,7 @@ pub fn discover_claude(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                 provider: SessionProvider::Claude,
                 harness: Some("claudeCode".to_string()),
                 session_id,
+                provider_variant: None,
                 title,
                 project_dir: cwd,
                 source_path: path.to_string_lossy().into_owned(),
@@ -335,6 +336,68 @@ fn nonempty_json_string(value: Option<&serde_json::Value>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn codex_auto_review_provider_variant(
+    meta: &serde_json::Value,
+    head: &[serde_json::Value],
+    tail: &[serde_json::Value],
+) -> Option<String> {
+    let source = meta.get("source");
+    let is_guardian = json_string_is(
+        source
+            .and_then(|value| value.get("subagent"))
+            .and_then(|value| value.get("other")),
+        "guardian",
+    );
+    let model = codex_model(head).or_else(|| codex_model(tail));
+    let is_review_runtime = json_string_is(meta.get("thread_source"), "subagent")
+        && model
+            .as_deref()
+            .is_some_and(|model| model.eq_ignore_ascii_case("codex-auto-review"));
+    if !is_guardian && !is_review_runtime {
+        return None;
+    }
+    let root_id = nonempty_json_string(meta.get("session_id"))
+        .or_else(|| nonempty_json_string(meta.get("parent_thread_id")))?;
+    Some(format!("auto-review:{root_id}"))
+}
+
+fn codex_session_meta<'a>(
+    head: &'a [serde_json::Value],
+    tail: &'a [serde_json::Value],
+    session_id: &str,
+) -> Option<&'a serde_json::Value> {
+    head.iter().chain(tail.iter()).find_map(|line| {
+        let payload = (line.get("type").and_then(|value| value.as_str()) == Some("session_meta"))
+            .then(|| line.get("payload"))
+            .flatten()?;
+        [payload.get("id"), payload.get("thread_id")]
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value.as_str())
+            .map(str::trim)
+            .any(|value| !value.is_empty() && value.eq_ignore_ascii_case(session_id))
+            .then_some(payload)
+    })
+}
+
+fn codex_model(lines: &[serde_json::Value]) -> Option<String> {
+    lines.iter().find_map(|line| {
+        let payload = line.get("payload");
+        let info = payload.and_then(|value| value.get("info"));
+        nonempty_json_string(payload.and_then(|value| value.get("model")))
+            .or_else(|| nonempty_json_string(info.and_then(|value| value.get("model"))))
+            .or_else(|| nonempty_json_string(info.and_then(|value| value.get("model_name"))))
+            .or_else(|| nonempty_json_string(line.get("model")))
+    })
+}
+
+fn json_string_is(value: Option<&serde_json::Value>, expected: &str) -> bool {
+    value
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .is_some_and(|value| value.eq_ignore_ascii_case(expected))
 }
 
 /// Flatten the same bounded display shapes the Swift adapters accept for a
@@ -641,10 +704,126 @@ mod tests {
             "{\"type\":\"session_meta\",\"payload\":{\"id\":\"0199aaaa-1111-2222-3333-444455556666\",\"originator\":\"codex_work_desktop\"}}\n",
         )
         .unwrap();
-        assert_eq!(
-            discover_codex(dir.path(), 1)[0].harness.as_deref(),
-            Some("chatgptWork")
+        let session = discover_codex(dir.path(), 1).remove(0);
+        assert_eq!(session.harness.as_deref(), Some("chatgptWork"));
+        assert!(session.provider_variant.is_none());
+        assert!(serde_json::to_value(session)
+            .unwrap()
+            .get("provider_variant")
+            .is_none());
+    }
+
+    #[test]
+    fn codex_auto_review_relationship_matches_guardian_and_runtime_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let guardian_id = "0199aaaa-1111-2222-3333-444455556601";
+        let guardian_root = "0299aaaa-1111-2222-3333-444455556601";
+        let runtime_id = "0199aaaa-1111-2222-3333-444455556602";
+        let runtime_root = "0299aaaa-1111-2222-3333-444455556602";
+        let normal_id = "0199aaaa-1111-2222-3333-444455556603";
+        let replay_id = "0199aaaa-1111-2222-3333-444455556604";
+
+        let write = |id: &str, lines: &[serde_json::Value]| {
+            let path = sessions.join(format!("rollout-x-{id}.jsonl"));
+            let mut file = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+            for line in lines {
+                writeln!(file, "{line}").unwrap();
+            }
+        };
+        write(
+            guardian_id,
+            &[serde_json::json!({
+                "type": "session_meta",
+                "payload": {
+                    "id": guardian_id,
+                    "session_id": guardian_root,
+                    "parent_thread_id": "0399aaaa-1111-2222-3333-444455556601",
+                    "originator": "Codex Desktop",
+                    "source": {"subagent": {"other": " Guardian "}}
+                }
+            })],
         );
+        write(
+            runtime_id,
+            &[
+                serde_json::json!({
+                    "type": "session_meta",
+                    "payload": {
+                        "id": runtime_id,
+                        "parent_thread_id": runtime_root,
+                        "originator": "codex_work_desktop",
+                        "thread_source": " SUBAGENT ",
+                        "source": "cli"
+                    }
+                }),
+                serde_json::json!({
+                    "type": "turn_context",
+                    "payload": {"model": " Codex-Auto-Review "}
+                }),
+            ],
+        );
+        write(
+            normal_id,
+            &[
+                serde_json::json!({
+                    "type": "session_meta",
+                    "payload": {
+                        "id": normal_id,
+                        "session_id": "0299aaaa-1111-2222-3333-444455556603",
+                        "originator": "codex_cli_rs",
+                        "thread_source": "subagent",
+                        "source": {"subagent": {"other": "worker"}}
+                    }
+                }),
+                serde_json::json!({
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5"}
+                }),
+            ],
+        );
+        write(
+            replay_id,
+            &[
+                serde_json::json!({
+                    "type": "session_meta",
+                    "payload": {
+                        "session_id": "0299aaaa-1111-2222-3333-444455556604",
+                        "originator": "codex_work_desktop",
+                        "source": {"subagent": {"other": "guardian"}}
+                    }
+                }),
+                serde_json::json!({
+                    "type": "session_meta",
+                    "payload": {"id": replay_id, "originator": "codex_cli_rs"}
+                }),
+            ],
+        );
+
+        let sessions = discover_codex(dir.path(), 10)
+            .into_iter()
+            .map(|session| (session.session_id.clone(), session))
+            .collect::<std::collections::HashMap<_, _>>();
+        let guardian = &sessions[guardian_id];
+        assert_eq!(
+            guardian.provider_variant.as_deref(),
+            Some("auto-review:0299aaaa-1111-2222-3333-444455556601")
+        );
+        assert_eq!(guardian.harness.as_deref(), Some("codex"));
+        assert_eq!(
+            serde_json::to_value(guardian).unwrap()["provider_variant"],
+            "auto-review:0299aaaa-1111-2222-3333-444455556601"
+        );
+        let runtime = &sessions[runtime_id];
+        assert_eq!(
+            runtime.provider_variant.as_deref(),
+            Some("auto-review:0299aaaa-1111-2222-3333-444455556602")
+        );
+        assert_eq!(runtime.harness.as_deref(), Some("chatgptWork"));
+        assert!(sessions[normal_id].provider_variant.is_none());
+        assert!(sessions[replay_id].provider_variant.is_none());
+        assert_eq!(sessions[replay_id].harness.as_deref(), Some("codex"));
     }
 
     #[test]
@@ -1037,6 +1216,31 @@ mod tests {
             cwd_by_id["aaaabbbb-cccc-dddd-eeee-ffff00002222"].as_deref(),
             Some("/Users/example/tail/")
         );
+    }
+
+    #[test]
+    fn claude_meta_head_supplies_cwd_without_supplying_title_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join(".claude/projects/p");
+        std::fs::create_dir_all(&claude).unwrap();
+        let path = claude.join("aaaabbbb-cccc-dddd-eeee-ffff00003333.jsonl");
+        let mut file = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+        writeln!(
+            file,
+            "{{\"type\":\"user\",\"isMeta\":true,\"cwd\":\" /Users/example/meta-only \",\"message\":{{\"content\":\"machine title\"}}}}"
+        )
+        .unwrap();
+        for _ in 0..=jsonl::MAX_TAIL_LINES {
+            writeln!(file, "{{\"type\":\"progress\"}}").unwrap();
+        }
+        drop(file);
+
+        let session = discover_claude(dir.path(), 1).remove(0);
+        assert_eq!(
+            session.project_dir.as_deref(),
+            Some("/Users/example/meta-only")
+        );
+        assert_eq!(session.title.as_deref(), Some("meta-only"));
     }
 
     #[test]

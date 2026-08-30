@@ -364,12 +364,16 @@ impl SessionIndexReader {
                 )
             } else {
                 format!(
-                    "WITH body_matches AS ( \
-                   SELECT {cols}, m.seq, m.excerpt, m.id AS sort_key, \
-                          ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY m.id) AS row_rank \
+                    "WITH raw_matches AS ( \
+                   SELECT {cols}, m.seq, m.excerpt, m.id AS sort_key \
                      FROM session_messages m \
                      JOIN sessions s ON s.id = m.session_row \
                     WHERE m.excerpt LIKE ? ESCAPE '\\' AND {known}{where_sql} \
+                    ORDER BY m.id LIMIT ? \
+                 ), body_matches AS ( \
+                   SELECT raw_matches.*, \
+                          ROW_NUMBER() OVER (PARTITION BY session_row_id ORDER BY sort_key) AS row_rank \
+                     FROM raw_matches \
                  ) SELECT {cols_no_alias}, seq, excerpt FROM body_matches \
                    WHERE row_rank = 1 ORDER BY sort_key LIMIT ?",
                     cols = Self::cte_session_columns(),
@@ -384,10 +388,17 @@ impl SessionIndexReader {
             };
 
             let mut stmt = snapshot.prepare(&sql)?;
-            let mut bind: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(params.len() + 2);
+            let mut bind: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(params.len() + 3);
             bind.push(Box::new(needle_binding));
             bind.extend(params);
-            bind.push(Box::new(Self::bounded_search_limit(limit, use_fts)));
+            let search_limit = Self::bounded_search_limit(limit, use_fts);
+            if !use_fts {
+                // Swift bounds raw LIKE rows before deduplication. This also
+                // keeps the window function from processing an unbounded
+                // number of matches for a one- or two-character query.
+                bind.push(Box::new(search_limit));
+            }
+            bind.push(Box::new(search_limit));
             let rows = stmt.query_map(
                 rusqlite::params_from_iter(bind.iter().map(|b| b.as_ref())),
                 |row| {
@@ -1294,6 +1305,46 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 2);
         assert_ne!(hits[0].session.row_id, hits[1].session.row_id);
+    }
+
+    #[test]
+    fn like_search_caps_raw_matches_before_deduplication() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_index(dir.path());
+        let mut conn = Connection::open(&path).unwrap();
+        let transaction = conn.transaction().unwrap();
+        {
+            let mut insert = transaction
+                .prepare(
+                    "INSERT INTO session_messages(id, session_row, seq, role, excerpt) \
+                     VALUES(?, ?, ?, 'user', 'xy raw match')",
+                )
+                .unwrap();
+            for index in 0..MAX_LIKE_SEARCH_LIMIT {
+                insert
+                    .execute((1_000 + index as i64, 1, index as i64))
+                    .unwrap();
+            }
+            insert
+                .execute((1_000 + MAX_LIKE_SEARCH_LIMIT as i64, 2, 0))
+                .unwrap();
+        }
+        transaction.commit().unwrap();
+        drop(conn);
+
+        let reader = SessionIndexReader::open(&path).unwrap();
+        let hits = reader
+            .search_with_filter(
+                "xy",
+                &SessionSearchFilter {
+                    scopes: [SessionSearchScope::User].into_iter().collect(),
+                    limit: usize::MAX,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session.row_id, 1);
     }
 
     #[test]
