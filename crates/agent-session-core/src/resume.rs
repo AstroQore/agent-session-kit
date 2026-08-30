@@ -40,9 +40,12 @@ pub fn command(
     }
 }
 
-/// `cd '<dir>' && <command>` so the resumed session lands in the directory it
-/// was recorded in.
-pub fn shell_line(cwd: Option<&str>, command: &str) -> String {
+/// Builds a POSIX-shell-only `cd '<dir>' && <command>` line.
+///
+/// This is intentionally not a cross-platform launcher. Windows hosts must
+/// pass the command and working directory as process arguments, or implement
+/// quoting for their selected shell.
+pub fn posix_shell_line(cwd: Option<&str>, command: &str) -> String {
     match cwd {
         Some(dir) if !dir.trim().is_empty() => {
             format!("cd {} && {command}", posix_single_quoted(dir))
@@ -67,9 +70,7 @@ fn is_valid(id: &str, provider: SessionProvider) -> bool {
         | SessionProvider::Codex
         | SessionProvider::Cursor
         | SessionProvider::Antigravity
-        | SessionProvider::GrokBot => id
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() || c == '-'),
+        | SessionProvider::GrokBot => id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
         SessionProvider::Grok | SessionProvider::Gemini => id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')),
@@ -83,7 +84,12 @@ mod tests {
     #[test]
     fn builds_known_commands() {
         assert_eq!(
-            command(SessionProvider::Codex, "0199a2b3-1111-2222-3333-444455556666", None).unwrap(),
+            command(
+                SessionProvider::Codex,
+                "0199a2b3-1111-2222-3333-444455556666",
+                None
+            )
+            .unwrap(),
             "codex resume 0199a2b3-1111-2222-3333-444455556666"
         );
         assert_eq!(
@@ -91,7 +97,12 @@ mod tests {
             "claude --resume ABCDEF01-2345"
         );
         assert_eq!(
-            command(SessionProvider::Antigravity, "abc123", Some(ANTIGRAVITY_CLI_VARIANT)).unwrap(),
+            command(
+                SessionProvider::Antigravity,
+                "abc123",
+                Some(ANTIGRAVITY_CLI_VARIANT)
+            )
+            .unwrap(),
             "agy --conversation abc123"
         );
     }
@@ -117,12 +128,15 @@ mod tests {
     }
 
     #[test]
-    fn shell_line_quotes_cwd() {
+    fn posix_shell_line_quotes_cwd() {
         assert_eq!(
-            shell_line(Some("/tmp/it's here"), "codex resume x"),
+            posix_shell_line(Some("/tmp/it's here"), "codex resume x"),
             "cd '/tmp/it'\\''s here' && codex resume x"
         );
-        assert_eq!(shell_line(None, "codex resume x"), "codex resume x");
-        assert_eq!(shell_line(Some("  "), "codex resume x"), "codex resume x");
+        assert_eq!(posix_shell_line(None, "codex resume x"), "codex resume x");
+        assert_eq!(
+            posix_shell_line(Some("  "), "codex resume x"),
+            "codex resume x"
+        );
     }
 }

@@ -11,6 +11,18 @@ pub enum SessionCoreError {
     #[error("session index not found at {0}")]
     IndexNotFound(String),
 
+    #[error("session source must be a non-symlink regular file: {0}")]
+    UnsafePath(String),
+
+    #[error("session row {0} was not found in this index generation")]
+    SessionNotFound(i64),
+
+    #[error("session provider {0} is not supported by this crate version")]
+    UnknownProvider(String),
+
+    #[error("{field} filter has more than {max} distinct values")]
+    FilterTooLarge { field: &'static str, max: usize },
+
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
 

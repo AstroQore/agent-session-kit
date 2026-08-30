@@ -20,8 +20,11 @@ needs to render sessions without depending on the Swift implementation:
   Code. Malformed or unknown lines are skipped, never fatal.
 - **`resume`** — mirror of the Swift `SessionResumeCommandBuilder`: same
   commands, same per-provider id charsets, same refusal semantics for
-  Cowork / Cursor / Grok Bot / AntiGravity-IDE sessions.
-- **`jsonl`** — bounded O(n) JSONL reading (moving cursor, 4 MB line cap).
+  Cowork / Cursor / Grok Bot / AntiGravity-IDE sessions. The optional
+  `posix_shell_line` helper is POSIX-only; Windows hosts launch the command
+  with an explicit working directory instead of reusing shell quoting.
+- **`jsonl`** — bounded JSONL reading (4 MB line cap, 64 MB streaming cap,
+  and bounded head/tail materialization).
 
 Like the Swift package, this crate takes every path explicitly, opens no
 sockets, spawns no processes, and writes nothing.

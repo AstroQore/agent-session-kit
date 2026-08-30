@@ -16,6 +16,7 @@
 //! committed to the WAL and not yet checkpointed — a stale read is the worse
 //! trade.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
@@ -23,8 +24,18 @@ use serde::Serialize;
 
 use crate::error::SessionCoreError;
 use crate::provider::SessionProvider;
+use crate::transcript::{self, TranscriptPage};
 
 pub const SUPPORTED_SCHEMA_VERSION: i64 = 5;
+/// Matches the Swift store's public page/search cap.
+pub const MAX_QUERY_LIMIT: usize = 500;
+/// Matches the Swift store's deliberately smaller short-needle LIKE cap.
+pub const MAX_LIKE_SEARCH_LIMIT: usize = 200;
+/// Prevent a hostile request from turning OFFSET into an expensive scan.
+pub const MAX_QUERY_OFFSET: usize = 1_000_000;
+/// A list of provider or harness filters can never generate more bind slots
+/// than this. UI filters should be far smaller in normal use.
+pub const MAX_FILTER_VALUES: usize = 64;
 
 /// One row of the `sessions` table, in display order.
 #[derive(Debug, Clone, Serialize)]
@@ -43,6 +54,8 @@ pub struct SessionSummary {
     pub created_at: Option<i64>,
     /// Unix epoch seconds.
     pub last_active_at: Option<i64>,
+    /// Internal source location. It is metadata, not an authorization token:
+    /// hosts must never accept this value back from an untrusted caller.
     pub source_path: String,
     pub size_bytes: Option<i64>,
     pub message_count: Option<i64>,
@@ -63,6 +76,22 @@ pub struct TranscriptExcerpt {
     pub excerpt: String,
 }
 
+/// A backend-only row reference in the current index generation.
+///
+/// This is a predictable SQLite row id, not an unforgeable capability. Hosts
+/// must keep a random, reader-local UI token map and resolve it to this type
+/// only inside their trusted backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SessionRef(pub i64);
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProviderCompatibility {
+    /// Provider raw values present in the index but unknown to this crate.
+    pub unknown_providers: Vec<String>,
+    /// Sessions omitted from normal rows because their provider is unknown.
+    pub unknown_session_count: i64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SessionListFilter {
     /// None = all providers; empty = matches nothing (mirrors Swift).
@@ -81,10 +110,26 @@ pub struct SessionIndexReader {
 }
 
 impl SessionIndexReader {
-    /// Opens the index read-only. Fails closed on a missing file or an
-    /// unsupported schema version.
+    /// Opens the index read-only. Fails closed on a missing file, symlinked or
+    /// non-regular leaf, or unsupported schema version. This portable leaf
+    /// check cannot eliminate a same-user path replacement race; hosts should
+    /// construct this path internally, never from untrusted IPC input.
     pub fn open(path: &Path) -> Result<Self, SessionCoreError> {
-        if !path.is_file() {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(SessionCoreError::IndexNotFound(
+                    path.to_string_lossy().into_owned(),
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(SessionCoreError::UnsafePath(
+                path.to_string_lossy().into_owned(),
+            ));
+        }
+        if !metadata.is_file() {
             return Err(SessionCoreError::IndexNotFound(
                 path.to_string_lossy().into_owned(),
             ));
@@ -111,16 +156,48 @@ impl SessionIndexReader {
         &self.path
     }
 
+    /// Number of sessions whose provider this crate understands. Consult
+    /// [`provider_compatibility`](Self::provider_compatibility) alongside it
+    /// before presenting the result as a complete index.
     pub fn session_count(&self) -> Result<i64, SessionCoreError> {
-        Ok(self
-            .conn
-            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?)
+        let providers = Self::provider_placeholders();
+        Ok(self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM sessions WHERE provider IN ({providers})"),
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Makes a forward provider-contract mismatch visible instead of silently
+    /// presenting a partial list as the complete index.
+    pub fn provider_compatibility(&self) -> Result<ProviderCompatibility, SessionCoreError> {
+        let providers = Self::provider_placeholders();
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT provider, COUNT(*) FROM sessions WHERE provider NOT IN ({providers}) GROUP BY provider ORDER BY provider"
+        ))?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut unknown_providers = Vec::new();
+        let mut unknown_session_count = 0;
+        for row in rows {
+            let (provider, count) = row?;
+            unknown_providers.push(provider);
+            unknown_session_count += count;
+        }
+        Ok(ProviderCompatibility {
+            unknown_providers,
+            unknown_session_count,
+        })
     }
 
     /// Recent sessions, newest activity first (mirrors the Swift store's
     /// `COALESCE(last_active_at, created_at) DESC, id DESC` ordering).
-    pub fn list(&self, filter: &SessionListFilter) -> Result<Vec<SessionSummary>, SessionCoreError> {
-        let (where_sql, params) = Self::filter_clause(filter);
+    pub fn list(
+        &self,
+        filter: &SessionListFilter,
+    ) -> Result<Vec<SessionSummary>, SessionCoreError> {
+        let (where_sql, params) = Self::filter_clause(filter)?;
         let sql = format!(
             "SELECT {cols} FROM sessions s WHERE 1=1{where_sql} \
              ORDER BY COALESCE(s.last_active_at, s.created_at) DESC, s.id DESC \
@@ -129,8 +206,8 @@ impl SessionIndexReader {
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let mut bind: Vec<Box<dyn rusqlite::ToSql>> = params;
-        bind.push(Box::new(filter.limit.max(1) as i64));
-        bind.push(Box::new(filter.offset as i64));
+        bind.push(Box::new(Self::bounded_limit(filter.limit)));
+        bind.push(Box::new(Self::bounded_offset(filter.offset)));
         let rows = stmt.query_map(
             rusqlite::params_from_iter(bind.iter().map(|b| b.as_ref())),
             Self::row_to_summary,
@@ -156,8 +233,8 @@ impl SessionIndexReader {
         if needle.is_empty() {
             return Ok(Vec::new());
         }
-        let (where_sql, params) = Self::filter_clause(filter);
-        let limit = filter.limit.max(1) as i64;
+        let (where_sql, params) = Self::filter_clause(filter)?;
+        let limit = Self::bounded_limit(filter.limit);
 
         let use_fts = needle.chars().count() >= 3;
         let sql = if use_fts {
@@ -190,7 +267,7 @@ impl SessionIndexReader {
         let mut bind: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(params.len() + 2);
         bind.push(Box::new(needle_binding));
         bind.extend(params);
-        bind.push(Box::new(limit));
+        bind.push(Box::new(Self::bounded_search_limit(limit, use_fts)));
         let rows = stmt.query_map(
             rusqlite::params_from_iter(bind.iter().map(|b| b.as_ref())),
             |row| {
@@ -205,9 +282,57 @@ impl SessionIndexReader {
             },
         )?;
         let mut out = Vec::new();
+        let mut seen = HashSet::new();
         for row in rows {
             if let Some(hit) = row? {
-                out.push(hit);
+                if seen.insert(hit.session.row_id) {
+                    out.push(hit);
+                }
+                if out.len() >= limit as usize {
+                    return Ok(out);
+                }
+            }
+        }
+
+        // Swift also searches title and session id after body matches. Keeping
+        // this as a separate query preserves FTS ranking for transcript hits
+        // while ensuring one result per session.
+        let (metadata_where_sql, metadata_params) = Self::filter_clause(filter)?;
+        let metadata_sql = format!(
+            "SELECT {cols}, NULL AS seq, NULL AS excerpt FROM sessions s \
+             WHERE (s.title LIKE ? ESCAPE '\\' OR s.session_id LIKE ? ESCAPE '\\'){metadata_where_sql} \
+             ORDER BY s.last_active_at IS NULL, s.last_active_at DESC, s.id DESC LIMIT ?",
+            cols = Self::SESSION_COLUMNS,
+        );
+        let pattern = format!("%{}%", Self::like_pattern(needle));
+        let mut metadata_bind: Vec<Box<dyn rusqlite::ToSql>> =
+            Vec::with_capacity(metadata_params.len() + 3);
+        metadata_bind.push(Box::new(pattern.clone()));
+        metadata_bind.push(Box::new(pattern));
+        metadata_bind.extend(metadata_params);
+        metadata_bind.push(Box::new(limit));
+        let mut metadata_stmt = self.conn.prepare(&metadata_sql)?;
+        let metadata_rows = metadata_stmt.query_map(
+            rusqlite::params_from_iter(metadata_bind.iter().map(|b| b.as_ref())),
+            |row| {
+                let summary = Self::row_to_summary(row)?;
+                let seq: Option<i64> = row.get(Self::COLUMN_COUNT)?;
+                let excerpt: Option<String> = row.get(Self::COLUMN_COUNT + 1)?;
+                Ok(summary.map(|session| SessionSearchHit {
+                    session,
+                    seq,
+                    excerpt: excerpt.unwrap_or_default(),
+                }))
+            },
+        )?;
+        for row in metadata_rows {
+            if let Some(hit) = row? {
+                if seen.insert(hit.session.row_id) {
+                    out.push(hit);
+                }
+                if out.len() >= limit as usize {
+                    break;
+                }
             }
         }
         Ok(out)
@@ -225,7 +350,11 @@ impl SessionIndexReader {
              WHERE session_row = ? ORDER BY seq LIMIT ? OFFSET ?",
         )?;
         let rows = stmt.query_map(
-            rusqlite::params![session_row, limit.max(1) as i64, offset as i64],
+            rusqlite::params![
+                session_row,
+                Self::bounded_limit(limit),
+                Self::bounded_offset(offset),
+            ],
             |row| {
                 Ok(TranscriptExcerpt {
                     seq: row.get(0)?,
@@ -237,17 +366,78 @@ impl SessionIndexReader {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Backend convenience for a known index row.
+    ///
+    /// This resolves the stored source path and uses the path convenience
+    /// reader, so it is best-effort against same-user path replacement. A
+    /// security-sensitive host should resolve its own random UI token to a
+    /// backend row, safely open the resulting file, then call
+    /// [`transcript::read_page_from_file`].
+    pub fn read_transcript_page(
+        &self,
+        session: SessionRef,
+        offset: usize,
+        limit: usize,
+    ) -> Result<TranscriptPage, SessionCoreError> {
+        let (raw_provider, source_path): (String, String) = self
+            .conn
+            .query_row(
+                "SELECT provider, source_path FROM sessions WHERE id = ?",
+                [session.0],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    SessionCoreError::SessionNotFound(session.0)
+                }
+                other => SessionCoreError::Sqlite(other),
+            })?;
+        let provider = SessionProvider::from_raw(&raw_provider)
+            .ok_or(SessionCoreError::UnknownProvider(raw_provider))?;
+        Ok(transcript::read_page(
+            provider,
+            Path::new(&source_path),
+            offset,
+            limit,
+        )?)
+    }
+
     const SESSION_COLUMNS: &'static str = "s.id, s.provider, s.session_id, s.provider_variant, \
         s.harness, s.model, s.title, s.summary, s.project_dir, s.created_at, s.last_active_at, \
         s.source_path, s.size_bytes, s.message_count";
     const COLUMN_COUNT: usize = 14;
 
+    fn bounded_limit(limit: usize) -> i64 {
+        limit.clamp(1, MAX_QUERY_LIMIT) as i64
+    }
+
+    fn bounded_offset(offset: usize) -> i64 {
+        offset.min(MAX_QUERY_OFFSET) as i64
+    }
+
+    fn bounded_search_limit(limit: i64, use_fts: bool) -> i64 {
+        if use_fts {
+            limit
+        } else {
+            limit.min(MAX_LIKE_SEARCH_LIMIT as i64)
+        }
+    }
+
+    fn provider_placeholders() -> String {
+        SessionProvider::ALL
+            .iter()
+            .map(|provider| format!("'{}'", provider.raw_value()))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
     fn filter_clause(
         filter: &SessionListFilter,
-    ) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    ) -> Result<(String, Vec<Box<dyn rusqlite::ToSql>>), SessionCoreError> {
         let mut sql = String::new();
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(providers) = &filter.providers {
+            let providers = Self::dedup_providers(providers)?;
             if providers.is_empty() {
                 // Empty selection matches nothing — mirror the Swift contract.
                 sql.push_str(" AND 0");
@@ -260,6 +450,7 @@ impl SessionIndexReader {
             }
         }
         if let Some(harnesses) = &filter.harnesses {
+            let harnesses = Self::dedup_harnesses(harnesses)?;
             if harnesses.is_empty() {
                 sql.push_str(" AND 0");
             } else {
@@ -274,7 +465,43 @@ impl SessionIndexReader {
             sql.push_str(" AND COALESCE(s.last_active_at, s.created_at) >= ?");
             params.push(Box::new(since));
         }
-        (sql, params)
+        Ok((sql, params))
+    }
+
+    fn dedup_providers(
+        providers: &[SessionProvider],
+    ) -> Result<Vec<SessionProvider>, SessionCoreError> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for provider in providers {
+            if seen.insert(*provider) {
+                if out.len() == MAX_FILTER_VALUES {
+                    return Err(SessionCoreError::FilterTooLarge {
+                        field: "providers",
+                        max: MAX_FILTER_VALUES,
+                    });
+                }
+                out.push(*provider);
+            }
+        }
+        Ok(out)
+    }
+
+    fn dedup_harnesses(harnesses: &[String]) -> Result<Vec<String>, SessionCoreError> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for harness in harnesses {
+            if seen.insert(harness.as_str()) {
+                if out.len() == MAX_FILTER_VALUES {
+                    return Err(SessionCoreError::FilterTooLarge {
+                        field: "harnesses",
+                        max: MAX_FILTER_VALUES,
+                    });
+                }
+                out.push(harness.clone());
+            }
+        }
+        Ok(out)
     }
 
     fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionSummary>> {
@@ -309,7 +536,9 @@ impl SessionIndexReader {
 
     /// Mirrors Swift `SessionIndexStore.likePattern`.
     fn like_pattern(raw: &str) -> String {
-        raw.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+        raw.replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
     }
 }
 
@@ -384,20 +613,44 @@ mod tests {
             .unwrap();
         drop(conn);
         match SessionIndexReader::open(&path) {
-            Err(SessionCoreError::UnsupportedIndexSchema { found: 4, expected: 5 }) => {}
+            Err(SessionCoreError::UnsupportedIndexSchema {
+                found: 4,
+                expected: 5,
+            }) => {}
             Err(other) => panic!("unexpected error: {other:?}"),
             Ok(_) => panic!("open unexpectedly succeeded"),
         }
     }
 
     #[test]
-    fn lists_and_skips_unknown_providers() {
+    fn read_only_open_leaves_the_database_bytes_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_index(dir.path());
+        let before = std::fs::read(&path).unwrap();
+        let reader = SessionIndexReader::open(&path).unwrap();
+        assert_eq!(reader.session_count().unwrap(), 2);
+        drop(reader);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn lists_known_sessions_and_exposes_unknown_providers() {
         let dir = tempfile::tempdir().unwrap();
         let path = fixture_index(dir.path());
         let reader = SessionIndexReader::open(&path).unwrap();
-        assert_eq!(reader.session_count().unwrap(), 3);
+        assert_eq!(reader.session_count().unwrap(), 2);
+        assert_eq!(
+            reader.provider_compatibility().unwrap(),
+            ProviderCompatibility {
+                unknown_providers: vec!["unknown-future-provider".to_string()],
+                unknown_session_count: 1,
+            }
+        );
         let rows = reader
-            .list(&SessionListFilter { limit: 10, ..Default::default() })
+            .list(&SessionListFilter {
+                limit: 10,
+                ..Default::default()
+            })
             .unwrap();
         // Unknown provider row is skipped; newest first.
         assert_eq!(rows.len(), 2);
@@ -429,21 +682,81 @@ mod tests {
     }
 
     #[test]
+    fn caps_distinct_filter_values_and_deduplicates_repeats() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_index(dir.path());
+        let reader = SessionIndexReader::open(&path).unwrap();
+        let repeats = reader
+            .list(&SessionListFilter {
+                providers: Some(vec![SessionProvider::Codex; MAX_FILTER_VALUES + 1]),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(repeats.len(), 1);
+
+        let error = reader
+            .list(&SessionListFilter {
+                harnesses: Some(
+                    (0..=MAX_FILTER_VALUES)
+                        .map(|index| format!("Harness {index}"))
+                        .collect(),
+                ),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            SessionCoreError::FilterTooLarge {
+                field: "harnesses",
+                max: MAX_FILTER_VALUES,
+            }
+        ));
+    }
+
+    #[test]
     fn fts_and_like_search() {
         let dir = tempfile::tempdir().unwrap();
         let path = fixture_index(dir.path());
         let reader = SessionIndexReader::open(&path).unwrap();
         let hits = reader
-            .search("tray", &SessionListFilter { limit: 10, ..Default::default() })
+            .search(
+                "tray",
+                &SessionListFilter {
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
             .unwrap();
-        assert_eq!(hits.len(), 2);
+        assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].session.provider, SessionProvider::Codex);
         // Two-char needle → LIKE path.
         let like_hits = reader
-            .search("sq", &SessionListFilter { limit: 10, ..Default::default() })
+            .search(
+                "sq",
+                &SessionListFilter {
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(like_hits.len(), 1);
         assert_eq!(like_hits[0].session.provider, SessionProvider::Claude);
+
+        // Metadata matches are visible even when no excerpt matches.
+        let title_only = reader
+            .search(
+                "bbbb2222",
+                &SessionListFilter {
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(title_only.len(), 1);
+        assert_eq!(title_only[0].session.provider, SessionProvider::Claude);
+        assert_eq!(title_only[0].seq, None);
     }
 
     #[test]
@@ -455,5 +768,92 @@ mod tests {
         assert_eq!(page.len(), 2);
         assert_eq!(page[0].role, "user");
         assert_eq!(page[1].seq, 1);
+    }
+
+    #[test]
+    fn clamps_query_sizes_before_sqlite_binding() {
+        assert_eq!(
+            SessionIndexReader::bounded_limit(usize::MAX),
+            MAX_QUERY_LIMIT as i64
+        );
+        assert_eq!(
+            SessionIndexReader::bounded_offset(usize::MAX),
+            MAX_QUERY_OFFSET as i64
+        );
+        assert_eq!(
+            SessionIndexReader::bounded_search_limit(MAX_QUERY_LIMIT as i64, false),
+            MAX_LIKE_SEARCH_LIMIT as i64
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_index(dir.path());
+        let reader = SessionIndexReader::open(&path).unwrap();
+        assert!(reader
+            .list(&SessionListFilter {
+                limit: usize::MAX,
+                offset: usize::MAX,
+                ..Default::default()
+            })
+            .unwrap()
+            .is_empty());
+        assert!(
+            reader
+                .search(
+                    "tray",
+                    &SessionListFilter {
+                        limit: usize::MAX,
+                        ..Default::default()
+                    }
+                )
+                .unwrap()
+                .len()
+                <= MAX_QUERY_LIMIT
+        );
+        assert!(reader
+            .excerpts(1, usize::MAX, usize::MAX)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn opaque_reference_resolves_transcript_without_caller_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript_path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &transcript_path,
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"text\":\"hello\"}]}}\n",
+        )
+        .unwrap();
+        let path = fixture_index(dir.path());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE sessions SET source_path = ? WHERE id = 1",
+            [transcript_path.to_string_lossy().into_owned()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let reader = SessionIndexReader::open(&path).unwrap();
+        let page = reader.read_transcript_page(SessionRef(1), 0, 10).unwrap();
+        assert_eq!(page.messages[0].text, "hello");
+        assert!(matches!(
+            reader.read_transcript_page(SessionRef(99), 0, 1),
+            Err(SessionCoreError::SessionNotFound(99))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlinked_index() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = fixture_index(dir.path());
+        let link = dir.path().join("index-link.sqlite3");
+        symlink(target, &link).unwrap();
+        assert!(matches!(
+            SessionIndexReader::open(&link),
+            Err(SessionCoreError::UnsafePath(_))
+        ));
     }
 }

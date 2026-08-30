@@ -19,6 +19,8 @@ pub struct DiscoveredSession {
     pub session_id: String,
     pub title: Option<String>,
     pub project_dir: Option<String>,
+    /// Internal source location. It is metadata, not an authorization token:
+    /// hosts must resolve a selected session in their trusted backend.
     pub source_path: String,
     /// Unix epoch seconds of the file's last modification.
     pub modified_at: i64,
@@ -52,7 +54,10 @@ pub fn discover_codex(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                             .map(str::to_string);
                     }
                     if cwd.is_none() {
-                        cwd = payload.get("cwd").and_then(|v| v.as_str()).map(str::to_string);
+                        cwd = payload
+                            .get("cwd")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string);
                     }
                 } else if line_type == Some("response_item") && title.is_none() {
                     let payload = line.get("payload")?;
@@ -102,9 +107,7 @@ pub fn discover_claude(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
                 if cwd.is_none() {
                     cwd = line.get("cwd").and_then(|v| v.as_str()).map(str::to_string);
                 }
-                if title.is_none()
-                    && line.get("type").and_then(|v| v.as_str()) == Some("user")
-                {
+                if title.is_none() && line.get("type").and_then(|v| v.as_str()) == Some("user") {
                     let text = line
                         .get("message")
                         .and_then(|m| m.get("content"))
@@ -165,7 +168,7 @@ fn collect_jsonl_files(root: &Path, out: &mut Vec<(PathBuf, i64, u64)>, max_dept
 fn session_id_from_rollout_name(path: &Path) -> Option<String> {
     let stem = path.file_stem()?.to_string_lossy();
     let candidate = stem.rsplit('-').next()?; // last dash-separated chunk
-    // The uuid itself contains dashes, so take the last 36 chars instead.
+                                              // The uuid itself contains dashes, so take the last 36 chars instead.
     let chars: Vec<char> = stem.chars().collect();
     if chars.len() >= 36 {
         let tail: String = chars[chars.len() - 36..].iter().collect();
@@ -181,13 +184,10 @@ fn session_id_from_rollout_name(path: &Path) -> Option<String> {
 
 fn looks_like_uuid(value: &str) -> bool {
     value.len() == 36
-        && value
-            .chars()
-            .enumerate()
-            .all(|(i, c)| match i {
-                8 | 13 | 18 | 23 => c == '-',
-                _ => c.is_ascii_hexdigit(),
-            })
+        && value.chars().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit(),
+        })
 }
 
 fn first_text(content: Option<&serde_json::Value>) -> Option<String> {
@@ -233,28 +233,38 @@ mod tests {
 
         let codex_dir = home.join(".codex/sessions/2026/08/30");
         std::fs::create_dir_all(&codex_dir).unwrap();
-        let codex_file =
-            codex_dir.join("rollout-2026-08-30T04-55-08-0199aaaa-1111-2222-3333-444455556666.jsonl");
+        let codex_file = codex_dir
+            .join("rollout-2026-08-30T04-55-08-0199aaaa-1111-2222-3333-444455556666.jsonl");
         let mut f = std::fs::File::create(&codex_file).unwrap();
         writeln!(f, "{}", serde_json::json!({
             "type": "session_meta", "timestamp": "2026-08-30T04:55:08Z",
             "payload": {"id": "0199aaaa-1111-2222-3333-444455556666", "cwd": "/Users/example/proj"}
         })).unwrap();
-        writeln!(f, "{}", serde_json::json!({
-            "type": "response_item", "timestamp": "2026-08-30T04:55:09Z",
-            "payload": {"type": "message", "role": "user",
-                        "content": [{"type": "input_text", "text": "fix the tray bug"}]}
-        })).unwrap();
+        writeln!(
+            f,
+            "{}",
+            serde_json::json!({
+                "type": "response_item", "timestamp": "2026-08-30T04:55:09Z",
+                "payload": {"type": "message", "role": "user",
+                            "content": [{"type": "input_text", "text": "fix the tray bug"}]}
+            })
+        )
+        .unwrap();
         drop(f);
 
         let claude_dir = home.join(".claude/projects/-Users-example-proj");
         std::fs::create_dir_all(&claude_dir).unwrap();
         let claude_file = claude_dir.join("aaaabbbb-cccc-dddd-eeee-ffff00001111.jsonl");
         let mut f = std::fs::File::create(&claude_file).unwrap();
-        writeln!(f, "{}", serde_json::json!({
-            "type": "user", "cwd": "/Users/example/proj", "timestamp": "2026-08-30T05:00:00Z",
-            "message": {"role": "user", "content": "refactor storage"}
-        })).unwrap();
+        writeln!(
+            f,
+            "{}",
+            serde_json::json!({
+                "type": "user", "cwd": "/Users/example/proj", "timestamp": "2026-08-30T05:00:00Z",
+                "message": {"role": "user", "content": "refactor storage"}
+            })
+        )
+        .unwrap();
         drop(f);
 
         let codex = discover_codex(home, 10);

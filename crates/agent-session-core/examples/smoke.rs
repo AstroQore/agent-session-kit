@@ -7,18 +7,32 @@ fn main() {
     let reader = SessionIndexReader::open(std::path::Path::new(&path)).expect("open");
     println!("sessions: {}", reader.session_count().expect("count"));
     let rows = reader
-        .list(&SessionListFilter { limit: 5, ..Default::default() })
+        .list(&SessionListFilter {
+            limit: 5,
+            ..Default::default()
+        })
         .expect("list");
     for row in &rows {
         println!(
             "- [{}] {} ({} msgs)",
             row.provider.raw_value(),
-            row.title.as_deref().unwrap_or("<untitled>").chars().take(60).collect::<String>(),
+            row.title
+                .as_deref()
+                .unwrap_or("<untitled>")
+                .chars()
+                .take(60)
+                .collect::<String>(),
             row.message_count.unwrap_or(0)
         );
     }
     let hits = reader
-        .search("vibe", &SessionListFilter { limit: 3, ..Default::default() })
+        .search(
+            "vibe",
+            &SessionListFilter {
+                limit: 3,
+                ..Default::default()
+            },
+        )
         .expect("search");
     println!("search 'vibe' hits: {}", hits.len());
 }

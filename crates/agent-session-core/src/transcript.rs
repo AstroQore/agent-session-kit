@@ -4,6 +4,8 @@
 //! never fail an entire session because one line is malformed or belongs to a
 //! newer schema.
 
+use std::fs::File;
+use std::io::BufRead;
 use std::path::Path;
 
 use serde::Serialize;
@@ -11,6 +13,16 @@ use serde_json::Value;
 
 use crate::jsonl;
 use crate::provider::SessionProvider;
+
+/// No transcript page can materialize more than this many messages.
+pub const MAX_PAGE_MESSAGES: usize = 500;
+/// A rendered transcript message is clipped to this many UTF-8 bytes.
+pub const MAX_MESSAGE_TEXT_BYTES: usize = 64 * 1024;
+/// A request scans at most this much of one JSONL transcript.
+pub const MAX_TRANSCRIPT_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+/// A request recognizes at most this many transcript messages before it
+/// returns a truncated result.
+pub const MAX_TRANSCRIPT_SCAN_MESSAGES: usize = 50_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -31,10 +43,16 @@ pub struct TranscriptMessage {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TranscriptPage {
     pub messages: Vec<TranscriptMessage>,
-    pub total_messages: usize,
+    /// Exact only when `truncated` is false. A large or actively growing log
+    /// deliberately reports `None` rather than a misleading partial total.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_messages: Option<usize>,
     pub offset: usize,
+    /// True when the reader reached a scan byte/message safety cap.
+    pub truncated: bool,
 }
 
 /// Parse a transcript page from a session log. Only Codex and Claude Code are
@@ -45,33 +63,96 @@ pub fn read_page(
     offset: usize,
     limit: usize,
 ) -> std::io::Result<TranscriptPage> {
-    let mut all: Vec<TranscriptMessage> = Vec::new();
-    match provider {
-        SessionProvider::Codex => {
-            jsonl::for_each_json_line(path, |line| {
-                if let Some(message) = codex_message(&line) {
-                    all.push(message);
-                }
-                true
-            })?;
-        }
-        SessionProvider::Claude => {
-            jsonl::for_each_json_line(path, |line| {
-                if let Some(message) = claude_message(&line) {
-                    all.push(message);
-                }
-                true
-            })?;
-        }
-        _ => {}
-    }
-    let total = all.len();
-    let page: Vec<TranscriptMessage> = all.into_iter().skip(offset).take(limit.max(1)).collect();
-    Ok(TranscriptPage {
-        messages: page,
-        total_messages: total,
+    // This convenience path API is best-effort: jsonl rejects a symlink/non-
+    // regular leaf, but a same-user replacement can still race check/open.
+    // Security-sensitive hosts should use read_page_from_file/reader instead.
+    let file = jsonl::open_regular_file(path)?;
+    read_page_from_file(provider, file, offset, limit)
+}
+
+/// Parses a transcript from an already-open file capability.
+///
+/// Unlike [`read_page`], this function never resolves or reopens a path while
+/// parsing. A host that needs a stronger boundary can open the file using its
+/// platform-safe policy, then pass the resulting handle here.
+pub fn read_page_from_file(
+    provider: SessionProvider,
+    file: File,
+    offset: usize,
+    limit: usize,
+) -> std::io::Result<TranscriptPage> {
+    read_page_from_reader(
+        provider,
+        std::io::BufReader::with_capacity(256 * 1024, file),
         offset,
+        limit,
+    )
+}
+
+/// Parses a transcript from an already-open buffered reader capability.
+pub fn read_page_from_reader<R: BufRead>(
+    provider: SessionProvider,
+    reader: R,
+    offset: usize,
+    limit: usize,
+) -> std::io::Result<TranscriptPage> {
+    match provider {
+        SessionProvider::Codex => read_page_with_reader(reader, offset, limit, codex_message),
+        SessionProvider::Claude => read_page_with_reader(reader, offset, limit, claude_message),
+        _ => Ok(TranscriptPage {
+            messages: Vec::new(),
+            total_messages: Some(0),
+            offset,
+            truncated: false,
+        }),
+    }
+}
+
+fn read_page_with_reader<R: BufRead>(
+    reader: R,
+    offset: usize,
+    limit: usize,
+    parse: fn(&Value) -> Option<TranscriptMessage>,
+) -> std::io::Result<TranscriptPage> {
+    let page_limit = limit.clamp(1, MAX_PAGE_MESSAGES);
+    let mut messages: Vec<TranscriptMessage> = Vec::with_capacity(page_limit);
+    let mut total_messages = 0usize;
+    let mut hit_message_cap = false;
+    let mut accept = |message: Option<TranscriptMessage>| {
+        let Some(message) = message else { return true };
+        if total_messages >= MAX_TRANSCRIPT_SCAN_MESSAGES {
+            hit_message_cap = true;
+            return false;
+        }
+        if total_messages >= offset && messages.len() < page_limit {
+            messages.push(clip_message(message));
+        }
+        total_messages += 1;
+        true
+    };
+    let stats =
+        jsonl::for_each_json_line_bounded_reader(reader, MAX_TRANSCRIPT_SCAN_BYTES, |line| {
+            accept(parse(&line))
+        })?;
+    let truncated = stats.truncated || hit_message_cap;
+    Ok(TranscriptPage {
+        messages,
+        total_messages: (!truncated).then_some(total_messages),
+        offset,
+        truncated,
     })
+}
+
+fn clip_message(mut message: TranscriptMessage) -> TranscriptMessage {
+    if message.text.len() > MAX_MESSAGE_TEXT_BYTES {
+        let mut end = MAX_MESSAGE_TEXT_BYTES.saturating_sub('…'.len_utf8());
+        while !message.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        message.text.truncate(end);
+        message.text.push('…');
+    }
+    message
 }
 
 fn codex_message(line: &Value) -> Option<TranscriptMessage> {
@@ -91,10 +172,17 @@ fn codex_message(line: &Value) -> Option<TranscriptMessage> {
                         _ => TranscriptRole::Note,
                     };
                     let text = joined_block_text(payload.get("content")?)?;
-                    Some(TranscriptMessage { role, text, timestamp })
+                    Some(TranscriptMessage {
+                        role,
+                        text,
+                        timestamp,
+                    })
                 }
                 "function_call" => {
-                    let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+                    let name = payload
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("tool");
                     Some(TranscriptMessage {
                         role: TranscriptRole::Tool,
                         text: format!("[tool call] {name}"),
@@ -145,8 +233,7 @@ fn claude_message(line: &Value) -> Option<TranscriptMessage> {
                             }
                         }
                         Some("tool_use") => {
-                            let name =
-                                block.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+                            let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
                             parts.push(format!("[tool call] {name}"));
                         }
                         Some("tool_result") => parts.push("[tool result]".to_string()),
@@ -204,27 +291,52 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("c.jsonl");
         let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(f, "{}", serde_json::json!({
-            "type": "session_meta", "payload": {"id": "x"}
-        })).unwrap();
-        writeln!(f, "{}", serde_json::json!({
-            "type": "response_item", "timestamp": "2026-08-30T04:00:00Z",
-            "payload": {"type": "message", "role": "user",
-                        "content": [{"type": "input_text", "text": "hello"}]}
-        })).unwrap();
-        writeln!(f, "{}", serde_json::json!({
-            "type": "response_item",
-            "payload": {"type": "function_call", "name": "Bash", "arguments": "{}"}
-        })).unwrap();
-        writeln!(f, "{}", serde_json::json!({
-            "type": "response_item",
-            "payload": {"type": "message", "role": "assistant",
-                        "content": [{"type": "output_text", "text": "done"}]}
-        })).unwrap();
+        writeln!(
+            f,
+            "{}",
+            serde_json::json!({
+                "type": "session_meta", "payload": {"id": "x"}
+            })
+        )
+        .unwrap();
+        writeln!(
+            f,
+            "{}",
+            serde_json::json!({
+                "type": "response_item", "timestamp": "2026-08-30T04:00:00Z",
+                "payload": {"type": "message", "role": "user",
+                            "content": [{"type": "input_text", "text": "hello"}]}
+            })
+        )
+        .unwrap();
+        writeln!(
+            f,
+            "{}",
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": "Bash", "arguments": "{}"}
+            })
+        )
+        .unwrap();
+        writeln!(
+            f,
+            "{}",
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant",
+                            "content": [{"type": "output_text", "text": "done"}]}
+            })
+        )
+        .unwrap();
         drop(f);
 
         let page = read_page(SessionProvider::Codex, &path, 0, 50).unwrap();
-        assert_eq!(page.total_messages, 3);
+        assert_eq!(page.total_messages, Some(3));
+        assert!(!page.truncated);
+        let wire = serde_json::to_value(&page).unwrap();
+        assert_eq!(wire["totalMessages"], 3);
+        assert!(wire.get("total_messages").is_none());
+        assert_eq!(wire["truncated"], false);
         assert_eq!(page.messages[0].role, TranscriptRole::User);
         assert_eq!(page.messages[0].text, "hello");
         assert_eq!(page.messages[1].role, TranscriptRole::Tool);
@@ -236,25 +348,98 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("c.jsonl");
         let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(f, "{}", serde_json::json!({
-            "type": "user", "timestamp": "t0",
-            "message": {"role": "user", "content": "do the thing"}
-        })).unwrap();
-        writeln!(f, "{}", serde_json::json!({
-            "type": "assistant", "timestamp": "t1",
-            "message": {"role": "assistant", "content": [
-                {"type": "thinking", "thinking": "hmm"},
-                {"type": "text", "text": "on it"},
-                {"type": "tool_use", "name": "Bash", "input": {}}
-            ]}
-        })).unwrap();
+        writeln!(
+            f,
+            "{}",
+            serde_json::json!({
+                "type": "user", "timestamp": "t0",
+                "message": {"role": "user", "content": "do the thing"}
+            })
+        )
+        .unwrap();
+        writeln!(
+            f,
+            "{}",
+            serde_json::json!({
+                "type": "assistant", "timestamp": "t1",
+                "message": {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "hmm"},
+                    {"type": "text", "text": "on it"},
+                    {"type": "tool_use", "name": "Bash", "input": {}}
+                ]}
+            })
+        )
+        .unwrap();
         writeln!(f, "{}", serde_json::json!({"type": "queue-operation"})).unwrap();
         drop(f);
 
         let page = read_page(SessionProvider::Claude, &path, 1, 10).unwrap();
-        assert_eq!(page.total_messages, 2);
+        assert_eq!(page.total_messages, Some(2));
         assert_eq!(page.messages.len(), 1);
         assert!(page.messages[0].text.contains("on it"));
         assert!(page.messages[0].text.contains("[tool call] Bash"));
+    }
+
+    #[test]
+    fn bounds_page_output_and_reports_truncated_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        for index in 0..=MAX_TRANSCRIPT_SCAN_MESSAGES {
+            writeln!(f, "{}", serde_json::json!({
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user",
+                            "content": [{"type": "input_text", "text": format!("message {index}")}]}
+            })).unwrap();
+        }
+        drop(f);
+
+        let page = read_page(SessionProvider::Codex, &path, 0, usize::MAX).unwrap();
+        assert_eq!(page.messages.len(), MAX_PAGE_MESSAGES);
+        assert_eq!(page.total_messages, None);
+        assert!(page.truncated);
+        let wire = serde_json::to_value(&page).unwrap();
+        assert!(wire.get("totalMessages").is_none());
+        assert_eq!(wire["truncated"], true);
+    }
+
+    #[test]
+    fn clips_message_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.jsonl");
+        let text = "x".repeat(MAX_MESSAGE_TEXT_BYTES + 1024);
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "response_item",
+                    "payload": {"type": "message", "role": "user",
+                                "content": [{"type": "input_text", "text": text}]}
+                })
+            ),
+        )
+        .unwrap();
+
+        let page = read_page(SessionProvider::Codex, &path, 0, 1).unwrap();
+        assert!(page.messages[0].text.len() <= MAX_MESSAGE_TEXT_BYTES);
+        assert!(page.messages[0].text.ends_with('…'));
+    }
+
+    #[test]
+    fn parses_from_an_already_open_file_without_a_path_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"text\":\"from handle\"}]}}\n",
+        )
+        .unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let page = read_page_from_file(SessionProvider::Codex, file, 0, 10).unwrap();
+        assert_eq!(page.messages[0].text, "from handle");
+        assert_eq!(page.total_messages, Some(1));
     }
 }
