@@ -12,11 +12,14 @@ final class AgentSessionKitInfoTests: XCTestCase {
     /// The repository root, resolved from this file rather than from the
     /// working directory: `swift test` can be invoked from anywhere, and
     /// the package deliberately ships no test resource for this.
-    /// `Tests/AgentSessionKitTests/<this file>` → three levels up.
+    /// `implementations/swift/Tests/AgentSessionKitTests/<this file>` →
+    /// five levels up.
     private var repositoryRoot: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()   // AgentSessionKitTests
             .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // swift
+            .deletingLastPathComponent()   // implementations
             .deletingLastPathComponent()   // repository root
     }
 

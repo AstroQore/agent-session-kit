@@ -1,9 +1,19 @@
-name: CI
+name: CI (Swift)
 
 on:
   push:
     branches: [main]
+    paths:
+      - "Package.swift"
+      - "implementations/swift/**"
+      - "contracts/**"
+      - ".github/workflows/ci-swift.yml"
   pull_request:
+    paths:
+      - "Package.swift"
+      - "implementations/swift/**"
+      - "contracts/**"
+      - ".github/workflows/ci-swift.yml"
   workflow_dispatch:
 
 concurrency:

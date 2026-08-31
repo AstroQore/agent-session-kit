@@ -1,32 +1,72 @@
 # agent-session-kit
 
-A Swift package that reads the session stores AI coding agents leave on your
-Mac, and serves them over MCP.
+Reads the session stores AI coding agents leave on your machine, and serves
+them over MCP. **Two implementations, one set of semantics:** a Swift package
+for macOS hosts and a Rust crate for cross-platform ones.
 
 Every coding agent keeps a local record of what you asked it — Codex writes
 rollout JSONL, Claude Code writes transcript JSONL, Cursor and AntiGravity
 write SQLite databases another process holds open. Each one has its own
 layout, its own idea of a "session id", and its own way of spelling a
-timestamp. This package hides all of that behind one adapter protocol, a
+timestamp. This repository hides all of that behind one adapter protocol, a
 searchable index, and a local MCP transport.
 
-No third-party dependencies. Foundation, Darwin, and the system SQLite.
+No third-party dependencies in either lane beyond the system SQLite.
 
 ```swift
-.package(url: "https://github.com/AstroQore/agent-session-kit", exact: "0.3.0")
+// Swift — macOS 26, Swift 6.2
+.package(url: "https://github.com/AstroQore/agent-session-kit", exact: "0.7.0")
+```
+
+```toml
+# Rust — macOS, Linux, Windows
+agent-session-core = { git = "https://github.com/AstroQore/agent-session-kit", tag = "0.7.0" }
 ```
 
 `exact:` while the package is `0.x` — see
 [Versioning and releases](#versioning-and-releases).
 
-## Targets
+## Layout
+
+```text
+Package.swift                 SwiftPM entry point
+Cargo.toml                    Cargo workspace entry point
+contracts/                    Semantics both lanes are checked against
+implementations/swift/        Sources/ + Tests/
+implementations/rust/         crates/
+```
+
+Both manifests stay at the repository root, so a consumer's git URL, pin, and
+`import AgentSessionKit` are unaffected by the layout — and neither language's
+tooling needs a non-default working directory.
+
+The two lanes are peers, not a primary and a port. Neither is generated from
+the other, which is why anything they must agree on lives in `contracts/` with
+a test on each side. Today that is the session index schema
+(`contracts/storage/session-index-v5.sql`): the Swift writer is checked to
+create exactly those objects, and the Rust reader is checked to open a database
+built from that file. Add to `contracts/` whenever a new fact has to hold in
+both languages; a change there is a coordinated change plus a kit minor bump.
+
+## What each lane provides
+
+**Swift** (`implementations/swift`, macOS 26, Swift 6.2)
 
 | Target | What it is |
 | ------ | ---------- |
 | `AgentSessionKit` | Discovery, parsing, deletion planning, the FTS5 session index, and the MCP Unix-socket / stdio transport. |
 | `AgentSessionLive` | Live views over the same stores — the unified event model, the state reducer, and the tailing protocols. |
 
-Requires macOS 26 and Swift 6.2.
+**Rust** (`implementations/rust`, macOS / Linux / Windows)
+
+| Crate | What it is |
+| ----- | ---------- |
+| `agent-session-core` | Read-only session index access, lightweight Codex and Claude Code discovery, tolerant JSONL transcript paging, and the resume command builder. |
+
+The Rust lane is deliberately the smaller of the two: it covers what a
+cross-platform host needs to render sessions without the Swift runtime. It
+never writes the index — schema mismatch is refused, never rebuilt — because
+the writer is the host that owns the file.
 
 ## Architecture
 
@@ -544,7 +584,7 @@ package is `0.x`, a **minor** bump carries anything a caller could trip over
 storage key) and a **patch** carries fixes and internals only. Pin `exact:`.
 
 ```swift
-.package(url: "https://github.com/AstroQore/agent-session-kit", exact: "0.3.0")
+.package(url: "https://github.com/AstroQore/agent-session-kit", exact: "0.7.0")
 ```
 
 Every build knows which version it is:
@@ -552,8 +592,8 @@ Every build knows which version it is:
 ```swift
 import AgentSessionKit
 
-AgentSessionKitInfo.version                   // "0.3.0"
-AgentSessionKitInfo.bundledReleaseNotesURL    // .../releases/tag/0.3.0
+AgentSessionKitInfo.version                   // "0.7.0"
+AgentSessionKitInfo.bundledReleaseNotesURL    // .../releases/tag/0.7.0
 AgentSessionKitInfo.repositoryURL
 ```
 

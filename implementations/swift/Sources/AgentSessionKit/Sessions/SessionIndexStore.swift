@@ -160,6 +160,10 @@ public actor SessionIndexStore {
         DROP TABLE IF EXISTS session_index_meta;
         """
 
+    /// Exposed for `SessionIndexContractTests`, which compares the objects
+    /// created here against `contracts/storage/session-index-v5.sql`.
+    static var schemaSQLForContractTests: String { schemaSQL }
+
     private static let schemaSQL = """
         CREATE TABLE IF NOT EXISTS session_index_meta (
             key TEXT PRIMARY KEY,

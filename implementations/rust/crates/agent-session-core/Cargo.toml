@@ -1,6 +1,6 @@
 [package]
 name = "agent-session-core"
-version = "0.1.0"
+version = "0.7.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Cross-platform Rust implementation of agent-session-kit's session reading: index queries, lightweight discovery, transcripts, and resume commands."

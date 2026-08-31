@@ -26,7 +26,7 @@ Nothing here is `1.0` yet, so `exact:` is the pin a host should use. See
 
 ## The version constant
 
-`Sources/AgentSessionKit/AgentSessionKitInfo.swift` holds
+`implementations/swift/Sources/AgentSessionKit/AgentSessionKitInfo.swift` holds
 `AgentSessionKitInfo.version`. This package is linked *statically* by its
 hosts: once it is compiled in there is no bundle, no `Info.plist`, and no
 dylib for anyone to read a version off. The constant is the only answer to
