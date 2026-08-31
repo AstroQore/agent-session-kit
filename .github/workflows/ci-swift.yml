@@ -8,12 +8,11 @@ on:
       - "implementations/swift/**"
       - "contracts/**"
       - ".github/workflows/ci-swift.yml"
+  # No path filter on pull requests: "Build and test" is a required check, and
+  # a filtered workflow simply never reports on a docs-only change, so the
+  # branch rule waits forever for a run that cannot start. Pushes to main stay
+  # filtered — there the run is informational, not a gate.
   pull_request:
-    paths:
-      - "Package.swift"
-      - "implementations/swift/**"
-      - "contracts/**"
-      - ".github/workflows/ci-swift.yml"
   workflow_dispatch:
 
 concurrency:
