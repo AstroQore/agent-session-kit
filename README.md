@@ -614,11 +614,30 @@ of its own. Nothing updates in place.
 
 ## Used by
 
+**Swift lane.**
+
 - [Vibe Bar](https://github.com/AstroQore/vibe-bar) — macOS menu-bar app for
   agent quota, usage, and cost. This package was extracted from it, and Vibe
   Bar pins it `exact:` and compiles it into the app; its Settings › System
-  pane shows the bundled `AgentSessionKitInfo.version`.
-- Auspex.
+  pane shows the bundled `AgentSessionKitInfo.version`. It uses
+  `AgentSessionKit` for the session index, transcripts, deletion planning and
+  the MCP transport.
+- [Auspex](https://github.com/AstroQore/auspex) — a macOS app that watches the
+  agent sessions running on one machine. It is the only consumer of **both**
+  products: `AgentSessionKit` for what is on disk, and `AgentSessionLive` for
+  the tailing, liveness and event pipeline that turns it into a live view.
+
+**Rust lane.**
+
+- [Vibe Bar Desktop](https://github.com/AstroQore/vibe-bar-desktop) — the
+  cross-platform client of the same product, on Windows and Linux as well as
+  macOS. It depends on `agent-session-core` for read-only index access,
+  Codex/Claude Code discovery, transcript paging and resume commands, so both
+  Vibe Bar clients read sessions by one set of rules rather than two.
+
+Vibe Bar and Auspex ship their own release trains and bump the pin
+independently; nothing here is loaded at runtime, so a kit release reaches a
+user only inside the next build of the app that consumes it.
 
 ## License
 
