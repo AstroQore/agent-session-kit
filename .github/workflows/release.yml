@@ -42,7 +42,7 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Tag: ${TAG}"
 
-          INFO="Sources/AgentSessionKit/AgentSessionKitInfo.swift"
+          INFO="implementations/swift/Sources/AgentSessionKit/AgentSessionKitInfo.swift"
           if [ ! -f "$INFO" ]; then
             echo "::error::${INFO} is missing; the version constant is the release contract."
             exit 1

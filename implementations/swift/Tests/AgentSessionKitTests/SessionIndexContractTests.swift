@@ -47,39 +47,37 @@ final class SessionIndexContractTests: XCTestCase {
         XCTAssertEqual(declared, SessionIndexStore.schemaVersion)
     }
 
-    /// Every object this lane creates is named in the contract, and every
-    /// object the contract names is created by this lane. Compared as sorted
-    /// object names rather than raw text so that formatting differences do
-    /// not fail the build, but a real addition or removal does.
-    func testCreatedObjectsMatchTheContract() throws {
-        let contractObjects = Self.createdObjectNames(in: try contractSQL())
-        let swiftObjects = Self.createdObjectNames(in: SessionIndexStore.schemaSQLForContractTests)
-        XCTAssertFalse(contractObjects.isEmpty, "contract declares no objects")
+    /// Every statement this lane creates appears in the contract, and every
+    /// statement the contract declares is created by this lane — compared as
+    /// whole normalised definitions, so a changed column type, constraint,
+    /// index expression, FTS tokenizer, or trigger body fails here too.
+    ///
+    /// Normalisation collapses whitespace and drops `IF NOT EXISTS`, because
+    /// those differ between a file meant to be run once and a writer that
+    /// re-runs on every open. Nothing semantic is normalised away.
+    func testCreatedStatementsMatchTheContract() throws {
+        let contract = Self.createStatements(in: try contractSQL())
+        let swift = Self.createStatements(in: SessionIndexStore.schemaSQLForContractTests)
+        XCTAssertFalse(contract.isEmpty, "contract declares no statements")
         XCTAssertEqual(
-            swiftObjects,
-            contractObjects,
+            swift,
+            contract,
             "session index schema drifted from contracts/storage/session-index-v5.sql"
         )
     }
 
-    /// `CREATE [UNIQUE] INDEX|TABLE|VIRTUAL TABLE|TRIGGER [IF NOT EXISTS] <name>`
-    /// reduced to the bare object name.
-    private static func createdObjectNames(in sql: String) -> [String] {
-        var names: [String] = []
-        for line in sql.split(separator: "\n") {
-            var tokens = line.trimmingCharacters(in: .whitespaces)
-                .split(separator: " ", omittingEmptySubsequences: true)
-                .map(String.init)
-            guard tokens.first?.uppercased() == "CREATE" else { continue }
-            tokens.removeFirst()
-            while let next = tokens.first?.uppercased(),
-                  ["UNIQUE", "VIRTUAL", "TABLE", "INDEX", "TRIGGER", "IF", "NOT", "EXISTS"]
-                      .contains(next) {
-                tokens.removeFirst()
+    /// Whole `CREATE …;` statements, normalised and sorted.
+    private static func createStatements(in sql: String) -> [String] {
+        sql
+            .split(separator: ";")
+            .map { statement in
+                statement
+                    .split(whereSeparator: \.isWhitespace)
+                    .joined(separator: " ")
+                    .replacingOccurrences(of: "IF NOT EXISTS ", with: "")
+                    .trimmingCharacters(in: .whitespaces)
             }
-            guard let name = tokens.first else { continue }
-            names.append(name.split(separator: "(").first.map(String.init) ?? name)
-        }
-        return names.sorted()
+            .filter { $0.uppercased().hasPrefix("CREATE ") }
+            .sorted()
     }
 }
