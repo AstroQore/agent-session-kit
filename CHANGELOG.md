@@ -6,6 +6,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-31
+
+Swift and Rust become peer implementation lanes. The repository now says out
+loud what it had already become when the Rust crate landed: one set of
+session-reading semantics with two implementations, neither generated from
+the other, and a `contracts/` directory holding the facts both must honour.
+
+### Changed
+- **Layout: `implementations/swift/` and `implementations/rust/`.** The Swift
+  sources and tests moved out of the repository root, and the Rust crates
+  moved out of `crates/`. Both manifests stay at the root and reach in with
+  explicit paths, so **no consumer changes anything**: the git URL, the
+  `exact:` pin, `import AgentSessionKit`, and both product names are
+  unaffected. `crates/` at the root became `implementations/rust/crates/`,
+  which does move the Cargo path for anyone depending on the crate by path
+  rather than by git.
+- `ci.yml` is now `ci-swift.yml`, and both lane workflows are scoped to their
+  own paths plus `contracts/`.
+
+### Added
+- **`contracts/storage/session-index-v5.sql`** — the canonical index DDL and
+  `user_version`, extracted from the Swift writer that had been its only
+  definition. Both lanes are now tested against it: `SessionIndexContractTests`
+  checks that Swift creates exactly the objects the contract names, and
+  `index::contract_tests` builds a database from the file and opens it with the
+  Rust reader. A schema change in either lane alone now fails CI.
+
+### Fixed
+- `AgentSessionKitInfoTests` resolved the repository root by walking three
+  directories up from `#filePath`, which the new layout broke. It is five now,
+  and the failure was real: the test could not find `CHANGELOG.md`.
+
 ### Fixed
 - **Rust discovery/search/transcript parity.** The first Rust session-core
   slice now mirrors Swift's default title/user/assistant search scopes,

@@ -1513,3 +1513,55 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    /// The canonical DDL lives in `contracts/storage/session-index-v5.sql` and
+    /// is shared with the Swift lane. Building a database from it and opening
+    /// that database with this reader proves the two agree on the schema this
+    /// crate refuses to rebuild — a drift in either direction fails here.
+    #[test]
+    fn reader_accepts_a_database_built_from_the_shared_contract() {
+        let sql = include_str!("../../../../../contracts/storage/session-index-v5.sql");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session_index.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(sql).unwrap();
+        drop(conn);
+
+        let reader = SessionIndexReader::open(&path).expect("contract schema must be readable");
+        assert_eq!(reader.session_count().unwrap(), 0);
+        // Every query path must work against the contract's own objects.
+        assert!(reader
+            .list(&SessionListFilter {
+                limit: 5,
+                ..Default::default()
+            })
+            .unwrap()
+            .is_empty());
+        assert!(reader
+            .search(
+                "anything",
+                &SessionListFilter {
+                    limit: 5,
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+            .is_empty());
+    }
+
+    /// The version this crate enforces is the version the contract declares.
+    #[test]
+    fn supported_version_matches_the_contract_pragma() {
+        let sql = include_str!("../../../../../contracts/storage/session-index-v5.sql");
+        let declared = sql
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("PRAGMA user_version = "))
+            .and_then(|rest| rest.trim_end_matches(';').trim().parse::<i64>().ok())
+            .expect("contract declares a user_version");
+        assert_eq!(declared, SUPPORTED_SCHEMA_VERSION);
+    }
+}

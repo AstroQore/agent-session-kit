@@ -21,8 +21,16 @@ own mapping as an extension in its own module.
 ```text
 .
 ├── Package.swift                       # swift-tools-version 6.2, macOS 26
+├── Cargo.toml                          # Cargo workspace root
 ├── RELEASING.md                        # semver policy + how a tag is cut
-├── Sources/
+├── contracts/                          # Facts both lanes are tested against
+│   └── storage/
+│       └── session-index-v5.sql        # Canonical index DDL + user_version
+├── implementations/rust/
+│   └── crates/
+│       └── agent-session-core/         # macOS / Linux / Windows, read-only
+└── implementations/swift/
+    ├── Sources/
 │   ├── AgentSessionKit/                # Swift 5 language mode (migration pending)
 │   │   ├── AgentSessionKitInfo.swift   # version, repository URL, release-notes URL
 │   │   ├── Harness/
@@ -57,11 +65,21 @@ own mapping as an extension in its own module.
 │   │       ├── MCPArguments.swift      # Typed tools/call argument decoding
 │   │       ├── MCPSocketServer.swift   # AF_UNIX listener, 0600
 │   │       └── MCPStdioBridge.swift    # Byte pump for spawn-a-command clients
-│   └── AgentSessionLive/               # Swift 6 language mode. Placeholder.
-└── Tests/
-    ├── AgentSessionKitTests/
-    └── AgentSessionLiveTests/
+    │   └── AgentSessionLive/           # Swift 6 language mode. Placeholder.
+    └── Tests/
+        ├── AgentSessionKitTests/
+        └── AgentSessionLiveTests/
 ```
+
+The two implementation lanes are peers. Neither is generated from the other,
+so anything that must hold in both languages goes in `contracts/` with a test
+on each side — `SessionIndexContractTests` in Swift and `index::contract_tests`
+in Rust both read `contracts/storage/session-index-v5.sql`. Changing a shared
+fact means changing the contract, both lanes, and the kit minor version in one
+pull request.
+
+Both manifests stay at the repository root and reach into `implementations/`
+with explicit paths, so consumers' git URLs, pins, and imports never move.
 
 Boundary rule: `AgentSessionKit` answers "what is on disk right now" — one
 pass, one snapshot, no observers. Anything that watches, debounces, or tails
