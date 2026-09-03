@@ -38,6 +38,8 @@ pub struct DeletionPlan {
 pub enum DeleteError {
     #[error("this provider's sessions are read by another app and are never deleted here")]
     ProviderIsReadOnly,
+    #[error("this implementation deletes only Codex and Claude Code sessions")]
+    ProviderNotImplemented,
     #[error("the session's files do not resolve below one of the provider's roots")]
     PathEscapesProviderRoot,
     #[error("one of the session's files is a symbolic link")]
@@ -56,10 +58,20 @@ pub enum DeleteOutcome {
     Failed(SessionToDelete, DeleteError),
 }
 
+/// Whether this implementation knows how to delete the provider's sessions:
+/// it has roots and a re-parse for Codex and Claude Code only. Grok and
+/// Gemini are deletable in the Swift lane; here they are refused rather
+/// than planned for and then failed.
+pub fn implemented_here(provider: SessionProvider) -> bool {
+    matches!(provider, SessionProvider::Codex | SessionProvider::Claude)
+}
+
 /// The provider roots deletion is fenced to, under `home`: the same
-/// directories discovery reads, resolved through symlinks so the fence and
-/// the targets are compared on equal terms. A root that does not exist is
-/// simply absent.
+/// directories discovery reads, walked component by component with a
+/// symlinked component refused — a link at `.codex` or `sessions` would
+/// otherwise make somewhere outside the home an "authorized" root — and
+/// then canonicalized so the fence and the targets compare on equal terms.
+/// A root that does not exist is simply absent.
 pub fn provider_roots(provider: SessionProvider, home: &Path) -> Vec<PathBuf> {
     let candidates: &[&[&str]] = match provider {
         SessionProvider::Codex => &[&[".codex", "sessions"], &[".codex", "archived_sessions"]],
@@ -68,13 +80,8 @@ pub fn provider_roots(provider: SessionProvider, home: &Path) -> Vec<PathBuf> {
     };
     candidates
         .iter()
-        .filter_map(|components| {
-            let mut path = home.to_path_buf();
-            for component in components.iter() {
-                path.push(component);
-            }
-            std::fs::canonicalize(path).ok()
-        })
+        .filter_map(|components| discovery::safe_root(home, components))
+        .filter_map(|root| std::fs::canonicalize(root).ok())
         .collect()
 }
 
@@ -85,6 +92,9 @@ pub fn provider_roots(provider: SessionProvider, home: &Path) -> Vec<PathBuf> {
 pub fn plan(session: &SessionToDelete) -> Result<DeletionPlan, DeleteError> {
     if !session.provider.supports_deletion() {
         return Err(DeleteError::ProviderIsReadOnly);
+    }
+    if !implemented_here(session.provider) {
+        return Err(DeleteError::ProviderNotImplemented);
     }
     let mut paths = vec![session.source_path.clone()];
     if session.provider == SessionProvider::Claude {
@@ -334,6 +344,90 @@ mod tests {
             delete(dir.path(), &[session])[0],
             DeleteOutcome::Failed(_, DeleteError::ProviderIsReadOnly)
         ));
+    }
+
+    #[test]
+    fn refuses_providers_the_swift_lane_deletes_but_this_one_does_not() {
+        let dir = home();
+        let session = SessionToDelete {
+            provider: SessionProvider::Gemini,
+            session_id: "x".into(),
+            source_path: dir.path().join("x"),
+        };
+        assert_eq!(plan(&session), Err(DeleteError::ProviderNotImplemented));
+    }
+
+    #[test]
+    fn an_empty_claude_file_with_a_uuid_name_is_unreadable_not_deleted() {
+        let dir = home();
+        let session = claude_session(dir.path());
+        std::fs::write(&session.source_path, "").unwrap();
+        let outcomes = delete(dir.path(), std::slice::from_ref(&session));
+        assert!(matches!(
+            outcomes[0],
+            DeleteOutcome::Failed(_, DeleteError::ValidationUnreadable)
+        ));
+        assert!(session.source_path.exists());
+    }
+
+    #[test]
+    fn a_codex_file_without_metadata_is_unreadable_whatever_its_name_says() {
+        let dir = home();
+        let session = codex_session(dir.path());
+        write(
+            &session.source_path,
+            &["{\"type\":\"event_msg\",\"payload\":{\"text\":\"no meta here\"}}"],
+        );
+        let outcomes = delete(dir.path(), std::slice::from_ref(&session));
+        assert!(matches!(
+            outcomes[0],
+            DeleteOutcome::Failed(_, DeleteError::ValidationUnreadable)
+        ));
+        assert!(session.source_path.exists());
+    }
+
+    #[test]
+    fn a_codex_file_whose_metadata_disagrees_with_its_name_is_refused() {
+        let dir = home();
+        let session = codex_session(dir.path());
+        write(&session.source_path, &["{\"type\":\"session_meta\",\"payload\":{\"id\":\"ffffffff-0000-4000-8000-000000000000\"}}"]);
+        let outcomes = delete(dir.path(), std::slice::from_ref(&session));
+        assert!(matches!(
+            outcomes[0],
+            DeleteOutcome::Failed(_, DeleteError::ValidationUnreadable)
+        ));
+        assert!(session.source_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_root_component_authorizes_nothing() {
+        let dir = home();
+        let outside = tempfile::tempdir().unwrap();
+        // `<home>/.codex` is a link to a directory outside the home.
+        std::os::unix::fs::symlink(outside.path(), dir.path().join(".codex")).unwrap();
+        let path = outside
+            .path()
+            .join("sessions/2026/09/03")
+            .join(format!("rollout-2026-09-03T10-00-00-{CODEX_ID}.jsonl"));
+        write(
+            &path,
+            &[&format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{CODEX_ID}\"}}}}"
+            )],
+        );
+        assert!(provider_roots(SessionProvider::Codex, dir.path()).is_empty());
+        let session = SessionToDelete {
+            provider: SessionProvider::Codex,
+            session_id: CODEX_ID.into(),
+            source_path: path.clone(),
+        };
+        let outcomes = delete(dir.path(), std::slice::from_ref(&session));
+        assert!(matches!(
+            outcomes[0],
+            DeleteOutcome::Failed(_, DeleteError::PathEscapesProviderRoot)
+        ));
+        assert!(path.exists());
     }
 
     #[test]

@@ -259,7 +259,7 @@ pub fn discover_claude(home: &Path, limit: usize) -> Vec<DiscoveredSession> {
 /// directory. This prevents a configured root or an intermediate component
 /// from redirecting the walk through a symlink. Like other std-only checks it
 /// remains best-effort against a same-user replacement race after checking.
-fn safe_root(home: &Path, components: &[&str]) -> Option<PathBuf> {
+pub(crate) fn safe_root(home: &Path, components: &[&str]) -> Option<PathBuf> {
     let mut path = home.to_path_buf();
     for component in components {
         path.push(component);
@@ -615,34 +615,49 @@ fn strip_codex_ide_envelope(text: &str) -> String {
     text.to_string()
 }
 
-/// The id a Codex rollout names right now: the first `session_meta` /
-/// `id` in its head, else the uuid its filename ends with. What
-/// [`crate::deletion`] re-parses before removing the file.
+/// The id a Codex rollout names right now, read from its metadata alone:
+/// the `payload.id` of its head. A file whose head carries no metadata —
+/// empty, malformed, or truncated — yields `None`; the filename's uuid is
+/// good enough for discovery but not for deciding what to delete. When the
+/// filename does carry a uuid and it disagrees with the metadata, that is
+/// also `None`: the file is not what its name says it is.
 pub(crate) fn codex_session_id(path: &Path) -> Option<String> {
     let head = jsonl::head_json_lines(path, 10).ok()?;
     let from_head = head.iter().find_map(|line| {
         let payload = line.get("payload")?;
         nonempty_json_string(payload.get("id"))
-    });
-    from_head.or_else(|| session_id_from_rollout_name(path))
+    })?;
+    match session_id_from_rollout_name(path) {
+        Some(named) if !named.eq_ignore_ascii_case(&from_head) => None,
+        _ => Some(from_head),
+    }
 }
 
-/// The id a Claude session file names right now: a uuid stem, else the
-/// last `sessionId` its tail carries, else the first in its head.
+/// The id a Claude session file names right now. The file must parse — an
+/// empty or malformed transcript yields `None` even when its stem is a
+/// uuid — and a `sessionId` the records carry must agree with a uuid stem.
 pub(crate) fn claude_session_id(path: &Path) -> Option<String> {
     let stem = path.file_stem()?.to_string_lossy().into_owned();
-    if looks_like_uuid(&stem) {
-        return Some(stem);
-    }
+    let head = jsonl::head_json_lines(path, 12).ok()?;
     let tail = jsonl::tail_json_lines(path, jsonl::MAX_TAIL_BYTES).ok()?;
-    tail.iter()
+    if head.is_empty() && tail.is_empty() {
+        return None;
+    }
+    let recorded = tail
+        .iter()
         .rev()
         .find_map(|line| nonempty_json_string(line.get("sessionId")))
         .or_else(|| {
-            let head = jsonl::head_json_lines(path, 12).ok()?;
             head.iter()
                 .find_map(|line| nonempty_json_string(line.get("sessionId")))
-        })
+        });
+    if looks_like_uuid(&stem) {
+        return match recorded {
+            Some(recorded) if !recorded.eq_ignore_ascii_case(&stem) => None,
+            _ => Some(stem),
+        };
+    }
+    recorded
 }
 
 #[cfg(test)]
