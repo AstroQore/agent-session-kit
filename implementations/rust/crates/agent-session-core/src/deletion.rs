@@ -170,16 +170,53 @@ fn delete_one(home: &Path, session: &SessionToDelete) -> Result<(), DeleteError>
     Ok(())
 }
 
-/// Strictly below one of `roots` after symlink resolution: the root itself
+/// Strictly below one of `roots` after symlink resolution — the root itself
 /// never qualifies, and a link pointing outside the provider's tree resolves
-/// out of every root's prefix.
+/// out of every root's prefix — and reached without passing through a
+/// symlinked directory: every component between the root and the target is
+/// checked with `symlink_metadata`, the way discovery walks the tree. A
+/// link that resolves elsewhere inside the root would otherwise let
+/// revalidation and removal follow a path discovery never took.
 fn is_contained(path: &Path, roots: &[PathBuf]) -> bool {
     let Ok(resolved) = std::fs::canonicalize(path) else {
         return false;
     };
-    roots
+    let Some(root) = roots
         .iter()
-        .any(|root| resolved != *root && resolved.starts_with(root))
+        .find(|root| resolved != **root && resolved.starts_with(root))
+    else {
+        return false;
+    };
+    // The given path may be spelled through the un-canonicalized root; walk
+    // the given spelling from its own prefix that maps onto the root.
+    let Ok(relative) = resolved.strip_prefix(root) else {
+        return false;
+    };
+    let mut cursor = root.clone();
+    for component in relative.components() {
+        cursor.push(component);
+        match std::fs::symlink_metadata(&cursor) {
+            Ok(meta) if !meta.file_type().is_symlink() => {}
+            _ => return false,
+        }
+    }
+    // And the path as given, component by component below the root's
+    // spelling of it, so a link in the given spelling is refused too.
+    let mut given = PathBuf::new();
+    let mut below_root = false;
+    for component in path.components() {
+        given.push(component);
+        if !below_root {
+            if std::fs::canonicalize(&given).ok().as_deref() == Some(root.as_path()) {
+                below_root = true;
+            }
+            continue;
+        }
+        if is_symlink(&given) {
+            return false;
+        }
+    }
+    true
 }
 
 fn is_symlink(path: &Path) -> bool {
@@ -428,6 +465,77 @@ mod tests {
             DeleteOutcome::Failed(_, DeleteError::PathEscapesProviderRoot)
         ));
         assert!(path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_directory_inside_the_root_is_refused() {
+        let dir = home();
+        let real = codex_session(dir.path());
+        // `<root>/2026/09/link` → `<root>/2026/09/03`: inside the root, but a link.
+        let link_dir = dir.path().join(".codex/sessions/2026/09/link");
+        std::os::unix::fs::symlink(dir.path().join(".codex/sessions/2026/09/03"), &link_dir)
+            .unwrap();
+        let via_link = SessionToDelete {
+            source_path: link_dir.join(real.source_path.file_name().unwrap()),
+            ..real.clone()
+        };
+        let outcomes = delete(dir.path(), std::slice::from_ref(&via_link));
+        assert!(
+            matches!(
+                outcomes[0],
+                DeleteOutcome::Failed(_, DeleteError::PathEscapesProviderRoot)
+            ),
+            "{outcomes:?}"
+        );
+        assert!(real.source_path.exists());
+    }
+
+    #[test]
+    fn revalidates_the_older_thread_id_form_and_a_tail_only_meta() {
+        let dir = home();
+        let session = codex_session(dir.path());
+        write(
+            &session.source_path,
+            &[&format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"thread_id\":\"{CODEX_ID}\"}}}}"
+            )],
+        );
+        assert!(matches!(
+            delete(dir.path(), std::slice::from_ref(&session))[0],
+            DeleteOutcome::Succeeded(_)
+        ));
+        let session = codex_session(dir.path());
+        let mut lines: Vec<String> = (0..12)
+            .map(|i| format!("{{\"type\":\"event_msg\",\"payload\":{{\"n\":{i}}}}}"))
+            .collect();
+        lines.push(format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{CODEX_ID}\"}}}}"
+        ));
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        write(&session.source_path, &refs);
+        assert!(matches!(
+            delete(dir.path(), std::slice::from_ref(&session))[0],
+            DeleteOutcome::Succeeded(_)
+        ));
+    }
+
+    #[test]
+    fn an_id_on_some_other_record_does_not_revalidate() {
+        let dir = home();
+        let session = codex_session(dir.path());
+        write(
+            &session.source_path,
+            &[&format!(
+                "{{\"type\":\"response_item\",\"payload\":{{\"id\":\"{CODEX_ID}\"}}}}"
+            )],
+        );
+        let outcomes = delete(dir.path(), std::slice::from_ref(&session));
+        assert!(matches!(
+            outcomes[0],
+            DeleteOutcome::Failed(_, DeleteError::ValidationUnreadable)
+        ));
+        assert!(session.source_path.exists());
     }
 
     #[test]

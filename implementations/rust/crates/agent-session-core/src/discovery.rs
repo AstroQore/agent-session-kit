@@ -616,20 +616,27 @@ fn strip_codex_ide_envelope(text: &str) -> String {
 }
 
 /// The id a Codex rollout names right now, read from its metadata alone:
-/// the `payload.id` of its head. A file whose head carries no metadata —
-/// empty, malformed, or truncated — yields `None`; the filename's uuid is
-/// good enough for discovery but not for deciding what to delete. When the
-/// filename does carry a uuid and it disagrees with the metadata, that is
-/// also `None`: the file is not what its name says it is.
+/// the `id` (or the older `thread_id`) of a `session_meta` record in its
+/// head, else in its bounded tail — the same records discovery accepts. A
+/// file with no such record — empty, malformed, truncated, or holding an
+/// `id` on some other kind of record — yields `None`; the filename's uuid
+/// is good enough for discovery but not for deciding what to delete. When
+/// the filename does carry a uuid and it disagrees with the metadata, that
+/// is also `None`: the file is not what its name says it is.
 pub(crate) fn codex_session_id(path: &Path) -> Option<String> {
     let head = jsonl::head_json_lines(path, 10).ok()?;
-    let from_head = head.iter().find_map(|line| {
+    let tail = jsonl::tail_json_lines(path, jsonl::MAX_TAIL_BYTES).ok()?;
+    let recorded = head.iter().chain(tail.iter()).find_map(|line| {
+        if line.get("type").and_then(|value| value.as_str()) != Some("session_meta") {
+            return None;
+        }
         let payload = line.get("payload")?;
         nonempty_json_string(payload.get("id"))
+            .or_else(|| nonempty_json_string(payload.get("thread_id")))
     })?;
     match session_id_from_rollout_name(path) {
-        Some(named) if !named.eq_ignore_ascii_case(&from_head) => None,
-        _ => Some(from_head),
+        Some(named) if !named.eq_ignore_ascii_case(&recorded) => None,
+        _ => Some(recorded),
     }
 }
 
