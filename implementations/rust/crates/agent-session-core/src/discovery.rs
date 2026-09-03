@@ -615,6 +615,36 @@ fn strip_codex_ide_envelope(text: &str) -> String {
     text.to_string()
 }
 
+/// The id a Codex rollout names right now: the first `session_meta` /
+/// `id` in its head, else the uuid its filename ends with. What
+/// [`crate::deletion`] re-parses before removing the file.
+pub(crate) fn codex_session_id(path: &Path) -> Option<String> {
+    let head = jsonl::head_json_lines(path, 10).ok()?;
+    let from_head = head.iter().find_map(|line| {
+        let payload = line.get("payload")?;
+        nonempty_json_string(payload.get("id"))
+    });
+    from_head.or_else(|| session_id_from_rollout_name(path))
+}
+
+/// The id a Claude session file names right now: a uuid stem, else the
+/// last `sessionId` its tail carries, else the first in its head.
+pub(crate) fn claude_session_id(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_string_lossy().into_owned();
+    if looks_like_uuid(&stem) {
+        return Some(stem);
+    }
+    let tail = jsonl::tail_json_lines(path, jsonl::MAX_TAIL_BYTES).ok()?;
+    tail.iter()
+        .rev()
+        .find_map(|line| nonempty_json_string(line.get("sessionId")))
+        .or_else(|| {
+            let head = jsonl::head_json_lines(path, 12).ok()?;
+            head.iter()
+                .find_map(|line| nonempty_json_string(line.get("sessionId")))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

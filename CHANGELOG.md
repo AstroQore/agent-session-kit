@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Rust: `deletion` module.** `agent-session-core` can now remove a whole
+  session's own log files — the Rust counterpart of the Swift
+  `SessionDeleter`, fenced the same way: every target must resolve strictly
+  below one of the provider's roots under the given home, a target that is
+  itself a symlink is refused, the session file is re-parsed immediately
+  before removal so a stale summary cannot delete a different session, and
+  only Codex and Claude sessions (`supports_deletion`) are ever candidates.
+  Claude removes the sidecar directory of the same stem when it exists; a
+  directory is walked without following links. Hosts call it only at the
+  person's explicit request.
+
 ## [0.7.0] - 2026-08-31
 
 Swift and Rust become peer implementation lanes. The repository now says out

@@ -8,9 +8,12 @@
 //!
 //! Everything takes explicit paths — like the Swift package, this crate never
 //! invents a location under someone else's home directory, opens no sockets,
-//! and spawns no processes. It also never writes: index mutation stays with
-//! the index owner (today the Swift implementation).
+//! and spawns no processes. It never edits a file and never touches the
+//! index: index mutation stays with the index owner (today the Swift
+//! implementation). The one thing it removes is a whole session's own log
+//! files, through [`deletion`], fenced exactly as the Swift `SessionDeleter`.
 
+pub mod deletion;
 pub mod discovery;
 pub mod error;
 pub mod index;
