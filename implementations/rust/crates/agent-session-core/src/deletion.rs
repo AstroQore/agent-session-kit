@@ -162,7 +162,7 @@ fn delete_one(home: &Path, session: &SessionToDelete) -> Result<(), DeleteError>
             continue;
         };
         let result = if meta.file_type().is_dir() {
-            remove_dir_without_following_links(path)
+            remove_sidecar_without_following_links(path)
         } else {
             std::fs::remove_file(path)
         };
@@ -236,18 +236,24 @@ fn is_symlink(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
 }
 
-/// Remove a directory tree without ever following a symlink: a link inside
-/// is unlinked, never descended.
-fn remove_dir_without_following_links(dir: &Path) -> std::io::Result<()> {
+/// Remove a sidecar directory without ever following a symlink and without
+/// reopening a path after checking it: a Claude sidecar is a flat directory
+/// of `agent-*.jsonl` logs, so its entries are unlinked one by one —
+/// `remove_file` on a symlink removes the link, never its target — and a
+/// nested directory, which a sidecar never has, is refused rather than
+/// walked. Nothing here descends, so a directory swapped for a link
+/// between two calls has nothing to redirect.
+fn remove_sidecar_without_following_links(dir: &Path) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
-        let path = entry.path();
-        let meta = std::fs::symlink_metadata(&path)?;
-        if meta.file_type().is_dir() {
-            remove_dir_without_following_links(&path)?;
-        } else {
-            std::fs::remove_file(&path)?;
+        // The entry's own type, from the directory listing, not from a
+        // second look-up of its pathname.
+        if entry.file_type()?.is_dir() {
+            return Err(std::io::Error::other(
+                "a sidecar with a nested directory is left alone",
+            ));
         }
+        std::fs::remove_file(entry.path())?;
     }
     std::fs::remove_dir(dir)
 }
@@ -597,6 +603,47 @@ mod tests {
             session.source_path.exists(),
             "the session file is still there to retry from"
         );
+    }
+
+    #[test]
+    fn a_sidecar_with_a_nested_directory_is_left_alone() {
+        let dir = home();
+        let session = claude_session(dir.path());
+        let sidecar = session.source_path.with_extension("");
+        write(&sidecar.join("nested/deep.jsonl"), &["{}"]);
+        let outcomes = delete(dir.path(), std::slice::from_ref(&session));
+        assert!(
+            matches!(
+                outcomes[0],
+                DeleteOutcome::Failed(_, DeleteError::RemovalFailed(_))
+            ),
+            "{outcomes:?}"
+        );
+        assert!(session.source_path.exists());
+        assert!(sidecar.join("nested/deep.jsonl").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_inside_the_sidecar_is_unlinked_not_followed() {
+        let dir = home();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("keep.jsonl");
+        std::fs::write(&target, "{}").unwrap();
+        let session = claude_session(dir.path());
+        let sidecar = session.source_path.with_extension("");
+        std::fs::create_dir_all(&sidecar).unwrap();
+        std::os::unix::fs::symlink(&target, sidecar.join("agent-link.jsonl")).unwrap();
+        let outcomes = delete(dir.path(), std::slice::from_ref(&session));
+        assert!(
+            matches!(outcomes[0], DeleteOutcome::Succeeded(_)),
+            "{outcomes:?}"
+        );
+        assert!(
+            target.exists(),
+            "the link's target outside the root is untouched"
+        );
+        assert!(!sidecar.exists());
     }
 
     #[test]
