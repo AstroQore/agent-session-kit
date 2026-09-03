@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-03
+
+The Rust lane can now delete a whole session, fenced exactly as the Swift
+`SessionDeleter` — the piece a second client needs before it may offer
+deletion at all.
+
 ### Added
 - **Rust: `deletion` module.** `agent-session-core` can now remove a whole
   session's own log files — the Rust counterpart of the Swift
