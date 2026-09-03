@@ -112,8 +112,10 @@ pub fn plan(session: &SessionToDelete) -> Result<DeletionPlan, DeleteError> {
 }
 
 /// Delete each session, one at a time, reporting per session. A failure on
-/// one never stops the others, and nothing about a failed session is
-/// removed — the checks all run before the first `remove`.
+/// one never stops the others. The checks all run before the first
+/// `remove`; a removal that fails part-way (a sidecar entry that cannot be
+/// removed) leaves the session file itself in place, so a `Failed` outcome
+/// still names a session that can be re-parsed and retried.
 pub fn delete(home: &Path, sessions: &[SessionToDelete]) -> Vec<DeleteOutcome> {
     sessions
         .iter()
@@ -150,7 +152,12 @@ fn delete_one(home: &Path, session: &SessionToDelete) -> Result<(), DeleteError>
     if !reparsed.eq_ignore_ascii_case(&plan.expected_session_id) {
         return Err(DeleteError::SessionIdMismatch);
     }
-    for path in &plan.paths_to_remove {
+    // Sidecars first, the session file last: a failure part-way leaves the
+    // file that names the session in place, so the outcome is honest and a
+    // retry can still re-parse it.
+    let mut ordered: Vec<&PathBuf> = plan.paths_to_remove.iter().collect();
+    ordered.sort_by_key(|path| **path == plan.validation_source_path);
+    for path in ordered {
         let Ok(meta) = std::fs::symlink_metadata(path) else {
             continue;
         };
@@ -208,6 +215,12 @@ fn is_contained(path: &Path, roots: &[PathBuf]) -> bool {
         given.push(component);
         if !below_root {
             if std::fs::canonicalize(&given).ok().as_deref() == Some(root.as_path()) {
+                // The component that names the root must be the root itself,
+                // not a link aliasing it: retargeting such a link between the
+                // re-parse and the removal would move the target elsewhere.
+                if is_symlink(&given) {
+                    return false;
+                }
                 below_root = true;
             }
             continue;
@@ -536,6 +549,54 @@ mod tests {
             DeleteOutcome::Failed(_, DeleteError::ValidationUnreadable)
         ));
         assert!(session.source_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_aliasing_the_root_is_refused() {
+        let dir = home();
+        let real = codex_session(dir.path());
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(dir.path().join(".codex/sessions"), &alias).unwrap();
+        let via_alias = SessionToDelete {
+            source_path: alias
+                .join("2026/09/03")
+                .join(real.source_path.file_name().unwrap()),
+            ..real.clone()
+        };
+        let outcomes = delete(dir.path(), std::slice::from_ref(&via_alias));
+        assert!(
+            matches!(
+                outcomes[0],
+                DeleteOutcome::Failed(_, DeleteError::PathEscapesProviderRoot)
+            ),
+            "{outcomes:?}"
+        );
+        assert!(real.source_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sidecar_that_cannot_be_removed_leaves_the_session_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = home();
+        let session = claude_session(dir.path());
+        let sidecar = session.source_path.with_extension("");
+        write(&sidecar.join("agent-1.jsonl"), &["{}"]);
+        std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let outcomes = delete(dir.path(), std::slice::from_ref(&session));
+        std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            matches!(
+                outcomes[0],
+                DeleteOutcome::Failed(_, DeleteError::RemovalFailed(_))
+            ),
+            "{outcomes:?}"
+        );
+        assert!(
+            session.source_path.exists(),
+            "the session file is still there to retry from"
+        );
     }
 
     #[test]
