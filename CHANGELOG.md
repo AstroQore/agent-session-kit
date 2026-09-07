@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-07
+
+An AntiGravity session says what it was about. Its rows used to read
+"Conversation <uuid>" — the name the file already had — and its transcripts
+showed no user messages at all.
+
 ### Fixed
 
 - AntiGravity sessions take their title from the user's own first prompt.
