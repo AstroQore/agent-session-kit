@@ -489,6 +489,25 @@ final class AntigravitySessionAdapterTests: XCTestCase {
         XCTAssertEqual(AntigravitySessionAdapter.stepTypeRoleMap[14], .user)
     }
 
+    /// The user's message in a transcript is the prompt, not the prompt
+    /// wrapped in the wire bytes around it. The prose walker reads a user
+    /// step's submessage as prose — it is mostly printable — and hands back
+    /// the prompt twice with its control bytes between.
+    func testATranscriptShowsTheUsersPromptAndNotItsWireBytes() throws {
+        let prompt = "Rewrite the release notes for the menu bar strip"
+        let steps = [
+            AntigravityDBFixture.Step(idx: 0, type: 14, payload: AntigravityProtoFixture.userStepPayload(prompt)),
+            AntigravityDBFixture.Step(
+                idx: 1, type: 132,
+                payload: AntigravityProtoFixture.stepPayload(texts: ["Reading the input chunk before translating it."])
+            )
+        ]
+        let url = try writeConversation(surface: "antigravity-cli", steps: steps)
+        let document = try adapter.parseTranscript(fileURL: url, range: nil)
+        XCTAssertEqual(document.messages.map(\.role), [.user, .assistant])
+        XCTAssertEqual(document.messages.first?.text, prompt)
+    }
+
     func testFallbackTitleReadsOnlyItsBoundedStepPrefix() throws {
         let steps = (0..<100).map { index in
             AntigravityDBFixture.Step(

@@ -240,12 +240,22 @@ public struct AntigravitySessionAdapter: SessionProviderAdapter {
         var stepMessages: [(idx: Int, role: SessionRole, text: String)] = []
         for step in steps {
             guard let payload = step.payload else { continue }
-            let runs = AntigravityStepText.runs(in: payload)
-            guard !runs.isEmpty else { continue }
-            let text = SessionParsing.truncate(
-                runs.joined(separator: "\n"),
-                limit: AntigravityStepText.maxStepTextLength
-            )
+            // A user step's prompt is at a known place, and the prose walk
+            // would read the submessage around it as prose too: mostly
+            // printable bytes, so it passes the walker's control-byte test
+            // and comes back with the prompt twice and its wire bytes in
+            // between. Read the field.
+            let text: String
+            if step.type == Self.userStepType, let prompt = Self.userPrompt(inStepPayload: payload) {
+                text = SessionParsing.truncate(prompt, limit: AntigravityStepText.maxStepTextLength)
+            } else {
+                let runs = AntigravityStepText.runs(in: payload)
+                guard !runs.isEmpty else { continue }
+                text = SessionParsing.truncate(
+                    runs.joined(separator: "\n"),
+                    limit: AntigravityStepText.maxStepTextLength
+                )
+            }
             if let role = Self.stepTypeRoleMap[step.type] {
                 stepMessages.append((step.idx, role, text))
             } else {
