@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- AntiGravity sessions take their title from the user's own first prompt.
+  Step type 14 is the user's turn and carries the prompt at a known place in
+  its payload; the previous reading looked for prose in steps whose type this
+  build did *not* recognize, which a real conversation has none of, so every
+  row fell back to "Conversation &lt;uuid&gt;" — the name the file already had.
+  The same step type is now mapped to `.user` rather than `.system`, so
+  AntiGravity transcripts show the user's messages as the user's.
+
 ## [0.8.0] - 2026-09-03
 
 The Rust lane can now delete a whole session, fenced exactly as the Swift

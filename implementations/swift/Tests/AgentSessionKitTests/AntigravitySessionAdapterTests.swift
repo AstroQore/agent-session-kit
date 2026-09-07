@@ -32,6 +32,15 @@ enum AntigravityProtoFixture {
         message(field, [UInt8](value.utf8))
     }
 
+    /// A user step's payload as the real database writes it: the prompt at
+    /// field 19, sub-field 2, with the usual id noise around it.
+    static func userStepPayload(_ prompt: String, noise: [String] = defaultNoise) -> Data {
+        var out: [UInt8] = varintField(1, 14)
+        for text in noise { out += string(3, text) }
+        out += message(19, string(2, prompt) + message(3, string(1, prompt)))
+        return Data(out)
+    }
+
     /// A step payload shaped like the real thing: a couple of scalar
     /// fields, some id / field-name noise, and the readable content one
     /// level down inside a nested message.
@@ -445,6 +454,41 @@ final class AntigravitySessionAdapterTests: XCTestCase {
         XCTAssertEqual(metadata.model, "gemini-newest")
     }
 
+    /// The title a user would recognize: their own first prompt, read out of
+    /// the user step rather than looked for in a tool's prose.
+    ///
+    /// Before this, a conversation of ordinary step types had *no* readable
+    /// step by construction — the prose walk skipped every type the role map
+    /// knew — so every AntiGravity row fell back to "Conversation <uuid>",
+    /// which is what the file was already named.
+    func testTitleIsTheUsersOwnFirstPrompt() throws {
+        let steps = [
+            AntigravityDBFixture.Step(
+                idx: 0, type: 14,
+                payload: AntigravityProtoFixture.userStepPayload(
+                    "Rewrite the release notes for the menu bar strip"
+                )
+            ),
+            AntigravityDBFixture.Step(
+                idx: 1, type: 132,
+                payload: AntigravityProtoFixture.stepPayload(
+                    texts: ["Encountered retryable error from model provider: 503"]
+                )
+            ),
+            AntigravityDBFixture.Step(
+                idx: 2, type: 14,
+                payload: AntigravityProtoFixture.userStepPayload("And again, shorter")
+            )
+        ]
+        let url = try writeConversation(surface: "antigravity-cli", steps: steps)
+        let summary = try adapter.extractMetadata(fileURL: url)
+        XCTAssertEqual(summary.title, "Rewrite the release notes for the menu bar strip")
+        XCTAssertFalse(summary.title?.contains("retryable") ?? false,
+                       "a tool's chatter is not what the conversation was about")
+        // The user step is the user's, so a transcript shows it as one.
+        XCTAssertEqual(AntigravitySessionAdapter.stepTypeRoleMap[14], .user)
+    }
+
     func testFallbackTitleReadsOnlyItsBoundedStepPrefix() throws {
         let steps = (0..<100).map { index in
             AntigravityDBFixture.Step(
@@ -572,7 +616,8 @@ final class AntigravitySessionAdapterTests: XCTestCase {
         let url = try writeConversation()
         let document = try adapter.parseTranscript(fileURL: url, range: nil)
 
-        XCTAssertEqual(document.messages.map(\.role), [.system, .assistant, .tool, .other])
+        // Type 14 is the user's own turn, so a transcript shows it as one.
+        XCTAssertEqual(document.messages.map(\.role), [.user, .assistant, .tool, .other])
         XCTAssertEqual(document.messages.map(\.text), [
             "You are a translation worker for this workspace.",
             "Reading the input chunk before translating it.",
