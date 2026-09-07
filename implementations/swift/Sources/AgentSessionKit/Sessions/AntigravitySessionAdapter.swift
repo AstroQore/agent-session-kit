@@ -176,11 +176,51 @@ public struct AntigravitySessionAdapter: SessionProviderAdapter {
             at: fileURL,
             limit: Self.titleStepScanLimit
         ) else { return nil }
+        // The user's own step first: it carries the prompt in a known place,
+        // which is the only reading of it that cannot pick up a tool's
+        // chatter instead.
+        for step in steps where step.type == Self.userStepType {
+            guard let payload = step.payload,
+                  let prompt = Self.userPrompt(inStepPayload: payload) else { continue }
+            return prompt
+        }
+        // Then the prose walk, over step types this build does not know. A
+        // recognized step is skipped because its text is an assistant's or a
+        // tool's; unrecognized ones are where a future build might put a
+        // prompt this one cannot name.
         for step in steps {
             if Self.stepTypeRoleMap[step.type] != nil { continue }
             guard let payload = step.payload else { continue }
             for run in AntigravityStepText.runs(in: payload) where !run.hasPrefix("{") {
                 if let instruction = HumanPromptText.instruction(run) { return instruction }
+            }
+        }
+        return nil
+    }
+
+    /// The step type AntiGravity writes a user turn as.
+    static let userStepType = 14
+
+    /// The prompt inside a user step's payload: field 19, sub-field 2.
+    ///
+    /// Read straight rather than searched for. The prose walk that used to
+    /// stand in for this could only see steps whose type was *unknown*, and
+    /// a real conversation contains none — so every AntiGravity row fell
+    /// through to "Conversation <uuid>", which is what the file was already
+    /// called.
+    static func userPrompt(inStepPayload payload: Data) -> String? {
+        let bytes = [UInt8](payload)
+        for field in ProtobufWireReader.fields(in: bytes) where field.number == 19 {
+            guard case let .bytes(outer) = field.value else { continue }
+            for inner in ProtobufWireReader.fields(
+                in: bytes,
+                range: outer.startIndex..<outer.endIndex
+            ) where inner.number == 2 {
+                guard case let .bytes(text) = inner.value,
+                      let string = String(bytes: text, encoding: .utf8),
+                      let instruction = HumanPromptText.instruction(string)
+                else { continue }
+                return instruction
             }
         }
         return nil
@@ -200,12 +240,22 @@ public struct AntigravitySessionAdapter: SessionProviderAdapter {
         var stepMessages: [(idx: Int, role: SessionRole, text: String)] = []
         for step in steps {
             guard let payload = step.payload else { continue }
-            let runs = AntigravityStepText.runs(in: payload)
-            guard !runs.isEmpty else { continue }
-            let text = SessionParsing.truncate(
-                runs.joined(separator: "\n"),
-                limit: AntigravityStepText.maxStepTextLength
-            )
+            // A user step's prompt is at a known place, and the prose walk
+            // would read the submessage around it as prose too: mostly
+            // printable bytes, so it passes the walker's control-byte test
+            // and comes back with the prompt twice and its wire bytes in
+            // between. Read the field.
+            let text: String
+            if step.type == Self.userStepType, let prompt = Self.userPrompt(inStepPayload: payload) {
+                text = SessionParsing.truncate(prompt, limit: AntigravityStepText.maxStepTextLength)
+            } else {
+                let runs = AntigravityStepText.runs(in: payload)
+                guard !runs.isEmpty else { continue }
+                text = SessionParsing.truncate(
+                    runs.joined(separator: "\n"),
+                    limit: AntigravityStepText.maxStepTextLength
+                )
+            }
             if let role = Self.stepTypeRoleMap[step.type] {
                 stepMessages.append((step.idx, role, text))
             } else {
@@ -261,7 +311,7 @@ public struct AntigravitySessionAdapter: SessionProviderAdapter {
     static let stepTypeRoleMap: [Int: SessionRole] = [
         8: .assistant,
         9: .tool,
-        14: .system,
+        14: .user,
         15: .assistant,
         23: .system,
         33: .tool,
