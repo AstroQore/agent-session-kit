@@ -175,7 +175,8 @@ final class SessionDeleterTests: XCTestCase {
             .cursor: ".cursor/chats/workspace/\(sessionID)/store.db",
             .claudeCowork: "Library/Application Support/Claude/local-agent-mode-sessions/"
                 + "space/x/local_\(sessionID)/.claude/projects/-Users-example-proj/\(sessionID).jsonl",
-            .grokBot: "Library/Application Support/Grok Bot/sand-client-persistence/\(sessionID).blob"
+            .grokBot: "Library/Application Support/Grok Bot/sand-client-persistence/\(sessionID).blob",
+            .muse: ".local/share/muse/sessions/2026/01/01/\(sessionID)/session.jsonl"
         ]
         for (provider, path) in paths {
             XCTAssertFalse(provider.supportsDeletion, "\(provider) must not be deletable")
@@ -199,7 +200,7 @@ final class SessionDeleterTests: XCTestCase {
         }
         XCTAssertEqual(
             Set(SessionProvider.allCases.filter { !$0.supportsDeletion }),
-            [.antigravity, .cursor, .claudeCowork, .grokBot]
+            [.antigravity, .cursor, .claudeCowork, .grokBot, .muse]
         )
     }
 

@@ -113,6 +113,7 @@ struct SessionResumeTests {
         #expect(Harness.grokBuild.sessionProvider == .grok)
         #expect(Harness.cursor.sessionProvider == .cursor)
         #expect(Harness.grokBot.sessionProvider == .grokBot)
+        #expect(Harness.museCode.sessionProvider == .muse)
     }
 
     @Test("the mapping is the inverse of the provider's default harness")

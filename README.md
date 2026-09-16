@@ -103,6 +103,7 @@ point takes the home directory it should read.
 | Grok Build | `~/.grok/sessions/**`, `~/.grok/archived_sessions` | ✅ | ✅ | ✅ |
 | Cursor | `~/.cursor/chats/**/store.db` | ✅ | ⚠️ when a turn recorded one | ❌ store stays open |
 | Grok Bot | `~/Library/Application Support/Grok Bot/sand-client-persistence` | ✅ | ❌ the run happens server-side | ❌ a cloud cache |
+| Muse Code | `~/.local/share/muse/sessions/YYYY/MM/DD/<id>/session.jsonl` | ✅ | ✅ | ❌ the CLI indexes and locks it |
 
 Where a ⚠️ appears the log genuinely does not carry the value — an aborted
 Cursor conversation records no model name at all, and old Gemini CLI chats
@@ -112,7 +113,7 @@ an empty one. Grok Bot's ❌ is the stronger statement: the conversation runs
 on xAI's servers and the client's cache records no model, no token counts,
 and no cost for anyone to read.
 
-Four providers are listed and readable but never deletable, because another
+Five providers are listed and readable but never deletable, because another
 running app — or, for Grok Bot, a server — owns the store.
 `SessionProvider.supportsDeletion` says so up front, and the adapters fail
 closed with `SessionDeleteError.providerIsReadOnly`.
@@ -286,7 +287,7 @@ snapshot.quota?.usedPercent      // 43.2, from Codex's own rate_limits
 | Claude Code, Claude Cowork | `message.usage` input + both cache counters; the window from `ModelContextWindows` | `derived` |
 | Codex, ChatGPT Work | `token_count`: `last_token_usage.input_tokens` and `info.model_context_window` | `measured` |
 | Grok Build | `signals.json`: `contextTokensUsed` and `contextWindowTokens` | `measured` |
-| Cursor, AntiGravity, Grok Bot, Gemini CLI | nothing on disk answers it | `nil` |
+| Cursor, AntiGravity, Grok Bot, Gemini CLI, Muse Code | nothing on disk answers it | `nil` |
 
 Claude Code computes both its window size *and* its category breakdown
 (messages, system tools, skills, MCP tools, memory files) in-process and writes
@@ -337,6 +338,7 @@ table goes through `ArgvSanitizer`.
 | ChatGPT Work | ✅ `CodexLiveAdapter` | the same tree, keyed apart by `session_meta.originator == "codex_work_desktop"` |
 | Grok Build | ✅ `GrokLiveAdapter` | `~/.grok/sessions/<percent-encoded cwd>/<id>/{events,updates}.jsonl`; liveness via `~/.grok/active_sessions.json` and the per-file writer locks |
 | Gemini CLI | — | `~/.gemini/tmp/*/chats` |
+| Muse Code | — | `~/.local/share/muse/sessions/**/session.jsonl` |
 | AntiGravity | ✅ `AntigravityLiveAdapter` | `~/.gemini/antigravity{-cli,}/conversations/*.db`; state from the SQL columns plus a shallow `step_payload` decode; liveness via `presence/<id>.lock` |
 | Cursor | ✅ `CursorLiveAdapter` | `~/.cursor/chats/**/store.db` + `~/.cursor/projects/<slug>/agent-transcripts`; liveness via `cursor-agent-worker-*.pid` and the store's WAL |
 | Grok Bot | ✅ `GrokBotLiveAdapter` | `~/Library/Application Support/Grok Bot/sand-client-persistence/<base32(key)>.blob`; the roster slice supplies the name and the needs-you flag; liveness via the `Grok Bot` process and `~/.grokbot/local-exec-supervisor.json` |

@@ -31,6 +31,7 @@ pub fn command(
             }
             Ok(format!("agy --conversation {id}"))
         }
+        SessionProvider::Muse => Ok(format!("muse resume {id}")),
         SessionProvider::ClaudeCowork | SessionProvider::Cursor | SessionProvider::GrokBot => {
             // Cowork runs inside Claude.app and Cursor's agents inside Cursor;
             // neither publishes a "reopen this conversation" command. Grok Bot
@@ -79,7 +80,8 @@ fn is_valid(id: &str, provider: SessionProvider) -> bool {
         | SessionProvider::Codex
         | SessionProvider::Cursor
         | SessionProvider::Antigravity
-        | SessionProvider::GrokBot => id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+        | SessionProvider::GrokBot
+        | SessionProvider::Muse => id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
         SessionProvider::Grok | SessionProvider::Gemini => id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')),
@@ -113,6 +115,15 @@ mod tests {
             )
             .unwrap(),
             "agy --conversation abc123"
+        );
+        assert_eq!(
+            command(
+                SessionProvider::Muse,
+                "01a0ac0d-5355-7c41-bc77-3b55f0e77ea1",
+                None
+            )
+            .unwrap(),
+            "muse resume 01a0ac0d-5355-7c41-bc77-3b55f0e77ea1"
         );
     }
 

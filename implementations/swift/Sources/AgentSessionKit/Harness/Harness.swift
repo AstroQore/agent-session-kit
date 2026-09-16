@@ -18,6 +18,7 @@ import Foundation
 /// | Grok Build     | xAI        | `~/.grok/sessions/**/updates.jsonl`                          |
 /// | Cursor         | Anysphere  | `~/.cursor/chats/**/store.db`                                |
 /// | Grok Bot       | xAI        | `~/Library/Application Support/Grok Bot/sand-client-persistence` — a cloud cache: conversations only, no model |
+/// | Muse Code      | Meta AI    | `~/.local/share/muse/sessions/YYYY/MM/DD/<id>/session.jsonl`  |
 ///
 /// Renaming a harness is one edit here, not a hunt across a UI.
 public enum HarnessCatalog {
@@ -36,6 +37,8 @@ public enum HarnessCatalog {
     /// server-side, so the local store holds conversations and nothing a
     /// token counter could read.
     public static let grokBot = "Grok Bot"
+    /// Meta's terminal coding agent, the `muse` CLI.
+    public static let museCode = "Muse Code"
 }
 
 /// The local harness a session or usage event came from — the unit every
@@ -57,6 +60,7 @@ public enum Harness: String, CaseIterable, Codable, Sendable, Hashable {
     case grokBuild
     case cursor
     case grokBot
+    case museCode
 
     public var displayName: String {
         switch self {
@@ -69,6 +73,7 @@ public enum Harness: String, CaseIterable, Codable, Sendable, Hashable {
         case .grokBuild:    HarnessCatalog.grokBuild
         case .cursor:       HarnessCatalog.cursor
         case .grokBot:      HarnessCatalog.grokBot
+        case .museCode:     HarnessCatalog.museCode
         }
     }
 }
