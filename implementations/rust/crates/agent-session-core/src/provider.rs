@@ -23,10 +23,14 @@ pub enum SessionProvider {
     GrokBot,
     #[serde(rename = "muse")]
     Muse,
+    #[serde(rename = "devin")]
+    Devin,
+    #[serde(rename = "mistralVibe")]
+    MistralVibe,
 }
 
 impl SessionProvider {
-    pub const ALL: [SessionProvider; 9] = [
+    pub const ALL: [SessionProvider; 11] = [
         SessionProvider::Claude,
         SessionProvider::ClaudeCowork,
         SessionProvider::Codex,
@@ -36,6 +40,8 @@ impl SessionProvider {
         SessionProvider::Antigravity,
         SessionProvider::GrokBot,
         SessionProvider::Muse,
+        SessionProvider::Devin,
+        SessionProvider::MistralVibe,
     ];
 
     /// Storage raw value — identical to Swift's `rawValue`.
@@ -50,6 +56,8 @@ impl SessionProvider {
             SessionProvider::Antigravity => "antigravity",
             SessionProvider::GrokBot => "grokBot",
             SessionProvider::Muse => "muse",
+            SessionProvider::Devin => "devin",
+            SessionProvider::MistralVibe => "mistralVibe",
         }
     }
 
@@ -72,6 +80,8 @@ impl SessionProvider {
             SessionProvider::Antigravity => "AntiGravity",
             SessionProvider::GrokBot => "Grok Bot",
             SessionProvider::Muse => "Muse Code",
+            SessionProvider::Devin => "Devin",
+            SessionProvider::MistralVibe => "Mistral Vibe",
         }
     }
 
@@ -86,5 +96,46 @@ impl SessionProvider {
                 | SessionProvider::Grok
                 | SessionProvider::Gemini
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_values_round_trip_and_match_serde() {
+        for provider in SessionProvider::ALL {
+            assert_eq!(
+                SessionProvider::from_raw(provider.raw_value()),
+                Some(provider)
+            );
+            assert_eq!(
+                serde_json::to_string(&provider).unwrap(),
+                format!("\"{}\"", provider.raw_value())
+            );
+        }
+        assert_eq!(SessionProvider::Devin.raw_value(), "devin");
+        assert_eq!(SessionProvider::MistralVibe.raw_value(), "mistralVibe");
+        assert_eq!(SessionProvider::Devin.default_harness(), "Devin");
+        assert_eq!(
+            SessionProvider::MistralVibe.default_harness(),
+            "Mistral Vibe"
+        );
+    }
+
+    #[test]
+    fn read_only_providers_refuse_deletion() {
+        for provider in [
+            SessionProvider::ClaudeCowork,
+            SessionProvider::Cursor,
+            SessionProvider::Antigravity,
+            SessionProvider::GrokBot,
+            SessionProvider::Muse,
+            SessionProvider::Devin,
+            SessionProvider::MistralVibe,
+        ] {
+            assert!(!provider.supports_deletion(), "{provider:?}");
+        }
     }
 }

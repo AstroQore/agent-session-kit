@@ -3,11 +3,12 @@ import SQLite3
 
 /// Read helpers for another app's SQLite store while that app is running.
 ///
-/// AntiGravity's conversation databases and Cursor's agent stores are both
-/// written by processes that may be running right now, so they routinely
-/// carry a live `-wal` / `-shm` pair. That rules out `immutable=1` — the flag
-/// tells SQLite there is no journal to replay, which on a live database means
-/// reading a stale or torn snapshot.
+/// AntiGravity's conversation databases, Cursor's agent stores, and Devin's
+/// shared session database are all written by processes that may be running
+/// right now, so they routinely carry a live `-wal` / `-shm` pair. That rules
+/// out `immutable=1` while a journal exists — the flag tells SQLite there is
+/// no journal to replay, which on a live database means reading a stale or
+/// torn snapshot.
 ///
 /// The strategy is therefore: open the real file read-only with a short busy
 /// timeout and, only if that fails to produce a complete read, snapshot the
@@ -38,12 +39,32 @@ public enum LiveSQLiteReader {
     /// Run `body` against a read-only handle on `url`, falling back to a
     /// snapshot copy. Returns `nil` when neither route produced a result;
     /// `body` must build its output from scratch so a retry is clean.
-    public static func read<T>(at url: URL, _ body: (OpaquePointer) throws -> T) -> T? {
+    ///
+    /// `snapshotFallback: false` gives up after the direct read instead. That
+    /// is for a probe run once per session against a store many sessions
+    /// share (Devin's), where one locked moment must not turn into a copy of
+    /// the whole database per session: the caller skips and asks again later.
+    public static func read<T>(
+        at url: URL,
+        snapshotFallback: Bool = true,
+        _ body: (OpaquePointer) throws -> T
+    ) -> T? {
         if let handle = open(path: url.path) {
             defer { sqlite3_close_v2(handle) }
             if let value = try? body(handle) { return value }
         }
-        guard let snapshot = snapshot(of: url) else { return nil }
+        // A WAL database whose last writer closed cleanly has no `-wal` left,
+        // and a read-only connection cannot create one, so the plain open
+        // above fails with SQLITE_CANTOPEN. Nothing is waiting to be replayed
+        // in that state, and a writer that arrives mid-read appends to a new
+        // journal rather than touching the main file, so the file is read in
+        // place rather than copied.
+        if isCheckpointedWALDatabase(url),
+           let handle = open(path: immutableURI(url.path), uri: true) {
+            defer { sqlite3_close_v2(handle) }
+            if let value = try? body(handle) { return value }
+        }
+        guard snapshotFallback, let snapshot = snapshot(of: url) else { return nil }
         defer { try? FileManager.default.removeItem(at: snapshot.deletingLastPathComponent()) }
 
         // The copy is ours, so a read-write open is allowed to replay the
@@ -53,11 +74,31 @@ public enum LiveSQLiteReader {
             defer { sqlite3_close_v2(handle) }
             if let value = try? body(handle) { return value }
         }
-        guard let handle = open(path: "file:\(snapshot.path)?immutable=1", uri: true) else {
+        guard let handle = open(path: immutableURI(snapshot.path), uri: true) else {
             return nil
         }
         defer { sqlite3_close_v2(handle) }
         return try? body(handle)
+    }
+
+    /// The file's header says WAL (format bytes 18 and 19 are both 2) and no
+    /// `-wal` sibling exists.
+    static func isCheckpointedWALDatabase(_ url: URL) -> Bool {
+        guard !FileManager.default.fileExists(atPath: url.path + "-wal"),
+              let handle = try? FileHandle(forReadingFrom: url)
+        else { return false }
+        defer { try? handle.close() }
+        guard let header = try? handle.read(upToCount: 20), header.count == 20 else { return false }
+        return header[header.startIndex + 18] == 2 && header[header.startIndex + 19] == 2
+    }
+
+    /// `file:<path>?immutable=1`, with the path percent-encoded the way a
+    /// SQLite URI requires (`?`, `#`, and `%` would otherwise end or escape it).
+    static func immutableURI(_ path: String) -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "?#%")
+        let encoded = path.addingPercentEncoding(withAllowedCharacters: allowed) ?? path
+        return "file:\(encoded)?immutable=1"
     }
 
     private static func open(path: String, readOnly: Bool = true, uri: Bool = false) -> OpaquePointer? {

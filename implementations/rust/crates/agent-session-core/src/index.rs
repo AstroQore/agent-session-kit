@@ -759,6 +759,8 @@ impl SessionIndexReader {
             "Cursor" => "cursor",
             "Grok Bot" => "grokBot",
             "Muse Code" => "museCode",
+            "Devin" => "devin",
+            "Mistral Vibe" => "mistralVibe",
             raw => raw,
         }
     }
@@ -773,7 +775,9 @@ impl SessionIndexReader {
          WHEN 'gemini' THEN 'geminiCLI' \
          WHEN 'antigravity' THEN 'antigravity' \
          WHEN 'grokBot' THEN 'grokBot' \
-         WHEN 'muse' THEN 'museCode' END)"
+         WHEN 'muse' THEN 'museCode' \
+         WHEN 'devin' THEN 'devin' \
+         WHEN 'mistralVibe' THEN 'mistralVibe' END)"
     }
 
     fn dedup_nonempty_strings(
@@ -1006,6 +1010,43 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].harness.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn devin_and_mistral_vibe_rows_list_and_filter_by_either_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_index(dir.path());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "INSERT INTO sessions(id, provider, session_id, harness, title, created_at, last_active_at, source_path) \
+             VALUES(4, 'devin', 'quiet-harbor', NULL, 'devin row', 1700004000, 1700004000, \
+                    '/Users/example/.local/share/devin/cli/sessions.db/quiet-harbor'); \
+             INSERT INTO sessions(id, provider, session_id, harness, title, created_at, last_active_at, source_path) \
+             VALUES(5, 'mistralVibe', '5c0ffee1-7a1b-4c2d-8e3f-0123456789ab', 'mistralVibe', 'vibe row', \
+                    1700005000, 1700005000, \
+                    '/Users/example/.vibe/logs/session/session_20260101_000000_5c0ffee1/messages.jsonl');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let reader = SessionIndexReader::open(&path).unwrap();
+        for (harness, provider, title) in [
+            ("Devin", SessionProvider::Devin, "devin row"),
+            ("devin", SessionProvider::Devin, "devin row"),
+            ("Mistral Vibe", SessionProvider::MistralVibe, "vibe row"),
+            ("mistralVibe", SessionProvider::MistralVibe, "vibe row"),
+        ] {
+            let rows = reader
+                .list(&SessionListFilter {
+                    harnesses: Some(vec![harness.to_string()]),
+                    limit: 10,
+                    ..Default::default()
+                })
+                .unwrap();
+            assert_eq!(rows.len(), 1, "{harness}");
+            assert_eq!(rows[0].provider, provider);
+            assert_eq!(rows[0].title.as_deref(), Some(title));
+        }
     }
 
     #[test]

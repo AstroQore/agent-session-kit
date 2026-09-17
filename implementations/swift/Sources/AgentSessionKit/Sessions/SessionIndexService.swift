@@ -4,7 +4,8 @@ import Foundation
 /// Keeps `SessionIndexStore` in step with what is actually on disk.
 ///
 /// One pass walks every adapter's session files, fingerprints each one
-/// (modification time in nanoseconds + size), and re-reads only the
+/// (`SessionProviderAdapter.changeFingerprint` — for most providers the
+/// file's modification time in nanoseconds + size), and re-reads only the
 /// files whose fingerprint moved. Metadata is always indexed; message
 /// bodies are indexed only while `bodyIndexing()` says so, and turning
 /// that off drops the bodies on the next pass.
@@ -180,7 +181,7 @@ public actor SessionIndexService {
         pathHash: String,
         bodies: Bool
     ) async -> SessionIndexStore.IndexBatchEntry? {
-        guard let fingerprint = Self.fingerprint(url) else { return nil }
+        guard let fingerprint = adapter.changeFingerprint(fileURL: url) else { return nil }
         do {
             if let cursor = try await store.fileCursor(pathHash: pathHash),
                cursor.mtimeNanos == fingerprint.mtimeNanos,
@@ -230,30 +231,6 @@ public actor SessionIndexService {
 
     static func pathHash(_ path: String) -> String {
         PrivacyPreservingHash.fileComponent(prefix: "session-path-v1", rawValue: path)
-    }
-
-    /// Nanosecond mtime + size. Second-resolution timestamps are too
-    /// coarse: a session file appended to twice inside the same second is
-    /// exactly the case an incremental index has to notice.
-    ///
-    /// A live SQLite store in WAL mode commits into `<file>-wal` and leaves
-    /// the main file untouched until a checkpoint, so the journal sibling is
-    /// folded in (latest mtime, summed size) or an active Cursor / AntiGravity
-    /// conversation would look unchanged for as long as it is being written.
-    static func fingerprint(_ url: URL) -> (mtimeNanos: Int64, size: Int64)? {
-        guard var result = statFingerprint(url.path) else { return nil }
-        if let wal = statFingerprint(url.path + "-wal") {
-            result = (max(result.mtimeNanos, wal.mtimeNanos), result.size + wal.size)
-        }
-        return result
-    }
-
-    private static func statFingerprint(_ path: String) -> (mtimeNanos: Int64, size: Int64)? {
-        var info = stat()
-        guard stat(path, &info) == 0 else { return nil }
-        let seconds = Int64(info.st_mtimespec.tv_sec)
-        let nanos = Int64(info.st_mtimespec.tv_nsec)
-        return (seconds * 1_000_000_000 + nanos, Int64(info.st_size))
     }
 
     // MARK: - Excerpt policy

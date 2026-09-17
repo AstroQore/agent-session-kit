@@ -46,6 +46,22 @@ final class JSONLHeadTailTests: XCTestCase {
         XCTAssertEqual(text(JSONLHeadTail.headLines(url: url, count: 5)).count, 2)
     }
 
+    /// A byte budget stops the head read at the last whole line inside it,
+    /// however long the next record runs.
+    func testHeadByteBudgetBoundsAnOversizedRecord() throws {
+        let huge = "{\"blob\":\"" + String(repeating: "x", count: 200_000) + "\"}"
+        let url = try write(["{\"i\":0}", huge, "{\"i\":2}"])
+        XCTAssertEqual(text(JSONLHeadTail.headLines(url: url, count: 3, maxBytes: 32 * 1024)), ["{\"i\":0}"])
+
+        let unterminated = directory.appendingPathComponent("unterminated.jsonl")
+        try String(repeating: "y", count: 100_000).write(to: unterminated, atomically: true, encoding: .utf8)
+        XCTAssertEqual(JSONLHeadTail.headLines(url: unterminated, count: 1, maxBytes: 20_000), [])
+        XCTAssertEqual(JSONLHeadTail.headLines(url: unterminated, count: 1).first?.count, 100_000)
+
+        let small = try write(["{\"i\":0}", "{\"i\":1}"], name: "small.jsonl")
+        XCTAssertEqual(text(JSONLHeadTail.headLines(url: small, count: 5, maxBytes: 1 << 20)).count, 2)
+    }
+
     func testLargeFileTailSeeksAndDropsThePartialFirstLine() throws {
         // ~100 KB: well past the 16 KB whole-read threshold, so the tail
         // window opens in the middle of a line.

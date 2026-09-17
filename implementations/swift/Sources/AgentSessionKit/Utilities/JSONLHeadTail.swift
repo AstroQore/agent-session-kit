@@ -19,7 +19,12 @@ public enum JSONLHeadTail {
     private static let chunkSize = 16 * 1024
 
     /// First `count` non-empty lines, reading only as far as needed.
-    public static func headLines(url: URL, count: Int) -> [Data] {
+    ///
+    /// `maxBytes` caps how much of the file is read at all. A head whose
+    /// lines run past it ends at the last complete line inside the budget,
+    /// so one enormous (or newline-free) first record cannot pull a whole
+    /// transcript into memory to learn a title.
+    public static func headLines(url: URL, count: Int, maxBytes: Int? = nil) -> [Data] {
         guard count > 0 else { return [] }
         guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
         defer { try? handle.close() }
@@ -27,10 +32,13 @@ public enum JSONLHeadTail {
         var out: [Data] = []
         var buffer: [UInt8] = []
         var lineStart = 0
+        var bytesRead = 0
         do {
             while out.count < count,
-                  let chunk = try handle.read(upToCount: chunkSize),
+                  maxBytes.map({ bytesRead < $0 }) ?? true,
+                  let chunk = try handle.read(upToCount: maxBytes.map { min(chunkSize, $0 - bytesRead) } ?? chunkSize),
                   !chunk.isEmpty {
+                bytesRead += chunk.count
                 buffer.append(contentsOf: chunk)
                 let end = buffer.count
                 var i = lineStart
@@ -49,7 +57,10 @@ public enum JSONLHeadTail {
                     lineStart = 0
                 }
             }
-            if out.count < count, lineStart < buffer.count {
+            // An unterminated remainder is a whole last line only when the
+            // file ended; a spent budget leaves it partial, so it is dropped.
+            let exhausted = maxBytes.map { bytesRead >= $0 } ?? false
+            if out.count < count, !exhausted, lineStart < buffer.count {
                 let tail = Data(buffer[lineStart..<buffer.count])
                 if !tail.isEmpty { out.append(tail) }
             }

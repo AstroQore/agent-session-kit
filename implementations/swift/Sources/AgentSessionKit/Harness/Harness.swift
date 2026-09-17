@@ -19,6 +19,8 @@ import Foundation
 /// | Cursor         | Anysphere  | `~/.cursor/chats/**/store.db`                                |
 /// | Grok Bot       | xAI        | `~/Library/Application Support/Grok Bot/sand-client-persistence` — a cloud cache: conversations only, no model |
 /// | Muse Code      | Meta AI    | `~/.local/share/muse/sessions/YYYY/MM/DD/<id>/session.jsonl`  |
+/// | Devin          | Cognition  | `~/.local/share/devin/cli/sessions.db` — one database, every session a row |
+/// | Mistral Vibe   | Mistral AI | `~/.vibe/logs/session/session_*/{meta.json,messages.jsonl}`    |
 ///
 /// Renaming a harness is one edit here, not a hunt across a UI.
 public enum HarnessCatalog {
@@ -39,6 +41,12 @@ public enum HarnessCatalog {
     public static let grokBot = "Grok Bot"
     /// Meta's terminal coding agent, the `muse` CLI.
     public static let museCode = "Muse Code"
+    /// Cognition's local agent: the `devin` CLI and the Devin desktop app,
+    /// whose "Devin Local" agent drives that CLI over ACP. Both write the one
+    /// session database, so they are one harness.
+    public static let devin = "Devin"
+    /// Mistral AI's terminal coding agent, the `vibe` CLI.
+    public static let mistralVibe = "Mistral Vibe"
 }
 
 /// The local harness a session or usage event came from — the unit every
@@ -61,6 +69,8 @@ public enum Harness: String, CaseIterable, Codable, Sendable, Hashable {
     case cursor
     case grokBot
     case museCode
+    case devin
+    case mistralVibe
 
     public var displayName: String {
         switch self {
@@ -74,6 +84,8 @@ public enum Harness: String, CaseIterable, Codable, Sendable, Hashable {
         case .cursor:       HarnessCatalog.cursor
         case .grokBot:      HarnessCatalog.grokBot
         case .museCode:     HarnessCatalog.museCode
+        case .devin:        HarnessCatalog.devin
+        case .mistralVibe:  HarnessCatalog.mistralVibe
         }
     }
 }

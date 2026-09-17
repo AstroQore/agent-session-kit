@@ -32,6 +32,8 @@ pub fn command(
             Ok(format!("agy --conversation {id}"))
         }
         SessionProvider::Muse => Ok(format!("muse resume {id}")),
+        SessionProvider::Devin => Ok(format!("devin --resume {id}")),
+        SessionProvider::MistralVibe => Ok(format!("vibe --resume {id}")),
         SessionProvider::ClaudeCowork | SessionProvider::Cursor | SessionProvider::GrokBot => {
             // Cowork runs inside Claude.app and Cursor's agents inside Cursor;
             // neither publishes a "reopen this conversation" command. Grok Bot
@@ -81,8 +83,10 @@ fn is_valid(id: &str, provider: SessionProvider) -> bool {
         | SessionProvider::Cursor
         | SessionProvider::Antigravity
         | SessionProvider::GrokBot
-        | SessionProvider::Muse => id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
-        SessionProvider::Grok | SessionProvider::Gemini => id
+        | SessionProvider::Muse
+        | SessionProvider::MistralVibe => id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+        // Devin names a session with a word pair (`quiet-harbor`), not a UUID.
+        SessionProvider::Grok | SessionProvider::Gemini | SessionProvider::Devin => id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')),
     }
@@ -125,6 +129,19 @@ mod tests {
             .unwrap(),
             "muse resume 01a0ac0d-5355-7c41-bc77-3b55f0e77ea1"
         );
+        assert_eq!(
+            command(SessionProvider::Devin, "quiet-harbor", None).unwrap(),
+            "devin --resume quiet-harbor"
+        );
+        assert_eq!(
+            command(
+                SessionProvider::MistralVibe,
+                "5c0ffee1-7a1b-4c2d-8e3f-0123456789ab",
+                None
+            )
+            .unwrap(),
+            "vibe --resume 5c0ffee1-7a1b-4c2d-8e3f-0123456789ab"
+        );
     }
 
     #[test]
@@ -143,6 +160,14 @@ mod tests {
         ));
         assert!(matches!(
             command(SessionProvider::Codex, "", None),
+            Err(SessionCoreError::InvalidSessionId)
+        ));
+        assert!(matches!(
+            command(SessionProvider::MistralVibe, "quiet-harbor", None),
+            Err(SessionCoreError::InvalidSessionId)
+        ));
+        assert!(matches!(
+            command(SessionProvider::Devin, "quiet harbor; rm -rf /", None),
             Err(SessionCoreError::InvalidSessionId)
         ));
     }

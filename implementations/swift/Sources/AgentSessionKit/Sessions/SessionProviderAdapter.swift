@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// Failure modes shared by every adapter's read paths.
@@ -52,11 +53,26 @@ public protocol SessionProviderAdapter: Sendable {
     /// What removing this session means on disk, plus the inputs the
     /// deleter re-asserts before it removes anything.
     func deletionPlan(for summary: SessionSummary, homeDirectory: String) throws -> SessionDeletionPlan
+
+    /// What the incremental index compares to decide whether `fileURL` must be
+    /// re-read; `nil` skips it for this pass and retries on the next.
+    ///
+    /// The default is the file's own fingerprint
+    /// (`SessionChangeFingerprint.file(at:)`). An adapter overrides it when
+    /// the file alone is the wrong answer: Mistral Vibe renames a session by
+    /// rewriting a sibling `meta.json`, and Devin keeps every session as rows
+    /// in one shared database, where the file's fingerprint would re-read all
+    /// of them after a turn in any one.
+    func changeFingerprint(fileURL: URL) -> SessionChangeFingerprint?
 }
 
 public extension SessionProviderAdapter {
     func parseTranscript(fileURL: URL) throws -> TranscriptDocument {
         try parseTranscript(fileURL: fileURL, range: nil)
+    }
+
+    func changeFingerprint(fileURL: URL) -> SessionChangeFingerprint? {
+        SessionChangeFingerprint.file(at: fileURL)
     }
 
     /// Discover + describe in one pass, dropping files that do not
@@ -66,6 +82,77 @@ public extension SessionProviderAdapter {
         discoverSessionFiles(homeDirectory: homeDirectory).compactMap {
             try? extractMetadata(fileURL: $0)
         }
+    }
+}
+
+/// Two numbers the incremental index stores per discovered session and
+/// compares for equality on the next pass. They are never interpreted, so an
+/// adapter whose session is not one file may fill them with whatever moves
+/// exactly when the session does.
+public struct SessionChangeFingerprint: Hashable, Sendable {
+    public let mtimeNanos: Int64
+    public let size: Int64
+
+    public init(mtimeNanos: Int64, size: Int64) {
+        self.mtimeNanos = mtimeNanos
+        self.size = size
+    }
+
+    /// Nanosecond mtime + size. Second-resolution timestamps are too coarse:
+    /// a session file appended to twice inside the same second is exactly the
+    /// case an incremental index has to notice.
+    ///
+    /// A live SQLite store in WAL mode commits into `<file>-wal` and leaves
+    /// the main file untouched until a checkpoint, so the journal sibling is
+    /// folded in (latest mtime, summed size) or an active Cursor / AntiGravity
+    /// conversation would look unchanged for as long as it is being written.
+    ///
+    /// A locator that names a session *inside* a store file —
+    /// `<store>/<session id>`, the shape Devin's session URLs take — answers
+    /// with the store's own fingerprint. That is coarse (every session in the
+    /// store moves together), and it is only reached by a wrapper adapter that
+    /// does not forward `changeFingerprint`; without it such a wrapper would
+    /// silently index none of those sessions.
+    public static func file(at url: URL) -> SessionChangeFingerprint? {
+        switch statFingerprint(url.path) {
+        case let .success(own):
+            return own.folding(try? statFingerprint(url.path + "-wal").get())
+        case .failure(let failure) where failure.code == ENOTDIR:
+            let store = url.deletingLastPathComponent().path
+            var info = stat()
+            guard lstat(store, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+                  let parent = try? statFingerprint(store).get()
+            else { return nil }
+            return parent.folding(try? statFingerprint(store + "-wal").get())
+        case .failure:
+            return nil
+        }
+    }
+
+    /// `self` with another file's fingerprint folded in the way a WAL sibling
+    /// is: the later mtime, the summed size.
+    public func folding(_ other: SessionChangeFingerprint?) -> SessionChangeFingerprint {
+        guard let other else { return self }
+        return SessionChangeFingerprint(
+            mtimeNanos: max(mtimeNanos, other.mtimeNanos),
+            size: size &+ other.size
+        )
+    }
+
+    struct StatFailure: Error {
+        let code: Int32
+    }
+
+    /// `stat(2)` with its `errno` captured at the call, not read back later.
+    static func statFingerprint(_ path: String) -> Result<SessionChangeFingerprint, StatFailure> {
+        var info = stat()
+        guard stat(path, &info) == 0 else { return .failure(StatFailure(code: errno)) }
+        let seconds = Int64(info.st_mtimespec.tv_sec)
+        let nanos = Int64(info.st_mtimespec.tv_nsec)
+        return .success(SessionChangeFingerprint(
+            mtimeNanos: seconds * 1_000_000_000 + nanos,
+            size: Int64(info.st_size)
+        ))
     }
 }
 
@@ -85,9 +172,10 @@ public struct SessionProviderRegistry: Sendable {
 
     /// The adapters shipped today, one per `SessionProvider`.
     ///
-    /// AntiGravity, Claude Cowork, Cursor, Grok Bot, and Muse Code list and read like the
-    /// rest but refuse to plan a delete, because another running app owns
-    /// those stores — see `SessionProvider.supportsDeletion`.
+    /// AntiGravity, Claude Cowork, Cursor, Grok Bot, Muse Code, Devin, and
+    /// Mistral Vibe list and read like the rest but refuse to plan a delete,
+    /// because another running app owns those stores — see
+    /// `SessionProvider.supportsDeletion`.
     public static func standard(homeDirectory: String = RealHomeDirectory.path) -> SessionProviderRegistry {
         SessionProviderRegistry(adapters: [
             ClaudeSessionAdapter(),
@@ -98,7 +186,9 @@ public struct SessionProviderRegistry: Sendable {
             GeminiSessionAdapter(),
             AntigravitySessionAdapter(),
             GrokBotSessionAdapter(),
-            MuseSessionAdapter()
+            MuseSessionAdapter(),
+            DevinSessionAdapter(),
+            MistralVibeSessionAdapter()
         ])
     }
 

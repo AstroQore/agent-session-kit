@@ -49,6 +49,10 @@ public enum SessionResumeCommandBuilder {
             return "agy --conversation \(id)"
         case .muse:
             return "muse resume \(id)"
+        case .devin:
+            return "devin --resume \(id)"
+        case .mistralVibe:
+            return "vibe --resume \(id)"
         case .claudeCowork, .cursor, .grokBot:
             // Cowork runs inside Claude.app and Cursor's agents inside
             // Cursor; neither publishes a "reopen this conversation"
@@ -81,9 +85,10 @@ public enum SessionResumeCommandBuilder {
     static func isValid(_ id: String, for provider: SessionProvider) -> Bool {
         guard !id.isEmpty, id.count <= maxSessionIDLength else { return false }
         switch provider {
-        case .claude, .claudeCowork, .codex, .cursor, .antigravity, .grokBot, .muse:
+        case .claude, .claudeCowork, .codex, .cursor, .antigravity, .grokBot, .muse, .mistralVibe:
             return id.unicodeScalars.allSatisfy { uuidCharacters.contains($0) }
-        case .grok, .gemini:
+        case .grok, .gemini, .devin:
+            // Devin names a session with a word pair (`quiet-harbor`), not a UUID.
             return id.unicodeScalars.allSatisfy { looseCharacters.contains($0) }
         }
     }
