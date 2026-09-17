@@ -104,6 +104,8 @@ point takes the home directory it should read.
 | Cursor | `~/.cursor/chats/**/store.db` | ✅ | ⚠️ when a turn recorded one | ❌ store stays open |
 | Grok Bot | `~/Library/Application Support/Grok Bot/sand-client-persistence` | ✅ | ❌ the run happens server-side | ❌ a cloud cache |
 | Muse Code | `~/.local/share/muse/sessions/YYYY/MM/DD/<id>/session.jsonl` | ✅ | ✅ | ❌ the CLI indexes and locks it |
+| Devin | `~/.local/share/devin/cli/sessions.db` — one database, a row per session | ✅ | ✅ | ❌ rows in a live database |
+| Mistral Vibe | `~/.vibe/logs/session/session_*/{meta.json,messages.jsonl}` | ✅ | ✅ | ❌ the CLI indexes and leases it |
 
 Where a ⚠️ appears the log genuinely does not carry the value — an aborted
 Cursor conversation records no model name at all, and old Gemini CLI chats
@@ -113,10 +115,22 @@ an empty one. Grok Bot's ❌ is the stronger statement: the conversation runs
 on xAI's servers and the client's cache records no model, no token counts,
 and no cost for anyone to read.
 
-Five providers are listed and readable but never deletable, because another
+Seven providers are listed and readable but never deletable, because another
 running app — or, for Grok Bot, a server — owns the store.
 `SessionProvider.supportsDeletion` says so up front, and the adapters fail
 closed with `SessionDeleteError.providerIsReadOnly`.
+
+Devin is the one store that is not a file per session: the `devin` CLI and the
+Devin desktop app (whose "Devin Local" agent drives that CLI) keep every
+conversation as rows in one SQLite database. Its adapter hands out a locator
+per session, `…/sessions.db/<session id>`, which names a row rather than a
+file, and answers `changeFingerprint` per session, so a turn in one
+conversation re-reads that one. A session's messages are a forest —
+compaction re-roots the system prefix, retries add siblings, sub-agents grow
+trees of their own — and the transcript is the one chain from
+`sessions.main_chain_id` back to its root. Sessions Devin marks `hidden` (its
+own helper agents' runs) are not listed. Mistral Vibe's sub-agent sessions
+nest inside their parent's directory and are not listed either.
 
 ## Usage
 
@@ -153,8 +167,12 @@ await service.refreshIndex { done, total in print("\(done)/\(total)") }
 let hits = try await service.search("sqlite migration", harnesses: [.codex, .claudeCode])
 ```
 
-The index is incremental: a file is re-read only when its fingerprint —
-nanosecond mtime plus size, WAL sibling folded in — has moved. Full-text
+The index is incremental: a session is re-read only when its adapter's
+`changeFingerprint` has moved — for a file, nanosecond mtime plus size with a
+WAL sibling folded in; for Mistral Vibe, `messages.jsonl` and `meta.json`
+together; for a Devin session, its own row and node counters. A host that wraps
+an adapter should forward `changeFingerprint`; one that does not still indexes
+Devin, only at the coarser granularity of the whole database. Full-text
 search uses an FTS5 `trigram` tokenizer, the only built-in one that matches
 inside words, which is what makes substring search work for CJK and for
 identifiers alike.
@@ -288,6 +306,7 @@ snapshot.quota?.usedPercent      // 43.2, from Codex's own rate_limits
 | Codex, ChatGPT Work | `token_count`: `last_token_usage.input_tokens` and `info.model_context_window` | `measured` |
 | Grok Build | `signals.json`: `contextTokensUsed` and `contextWindowTokens` | `measured` |
 | Cursor, AntiGravity, Grok Bot, Gemini CLI, Muse Code | nothing on disk answers it | `nil` |
+| Devin, Mistral Vibe | no live adapter yet; Devin records per-reply `metrics`, Vibe `stats.context_tokens` | `nil` |
 
 Claude Code computes both its window size *and* its category breakdown
 (messages, system tools, skills, MCP tools, memory files) in-process and writes
@@ -339,6 +358,8 @@ table goes through `ArgvSanitizer`.
 | Grok Build | ✅ `GrokLiveAdapter` | `~/.grok/sessions/<percent-encoded cwd>/<id>/{events,updates}.jsonl`; liveness via `~/.grok/active_sessions.json` and the per-file writer locks |
 | Gemini CLI | — | `~/.gemini/tmp/*/chats` |
 | Muse Code | — | `~/.local/share/muse/sessions/**/session.jsonl` |
+| Devin | — | `~/.local/share/devin/cli/sessions.db` (WAL) |
+| Mistral Vibe | — | `~/.vibe/logs/session/session_*/messages.jsonl` + `meta.json` |
 | AntiGravity | ✅ `AntigravityLiveAdapter` | `~/.gemini/antigravity{-cli,}/conversations/*.db`; state from the SQL columns plus a shallow `step_payload` decode; liveness via `presence/<id>.lock` |
 | Cursor | ✅ `CursorLiveAdapter` | `~/.cursor/chats/**/store.db` + `~/.cursor/projects/<slug>/agent-transcripts`; liveness via `cursor-agent-worker-*.pid` and the store's WAL |
 | Grok Bot | ✅ `GrokBotLiveAdapter` | `~/Library/Application Support/Grok Bot/sand-client-persistence/<base32(key)>.blob`; the roster slice supplies the name and the needs-you flag; liveness via the `Grok Bot` process and `~/.grokbot/local-exec-supervisor.json` |

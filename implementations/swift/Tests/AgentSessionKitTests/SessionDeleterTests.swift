@@ -166,7 +166,7 @@ final class SessionDeleterTests: XCTestCase {
         XCTAssertTrue(exists(url))
     }
 
-    /// The four providers whose stores belong to another running app — or, for
+    /// The providers whose stores belong to another running app — or, for
     /// Grok Bot, to a server — never reach the containment fence at all: their
     /// adapters refuse first, and each says which app to delete from instead.
     func testProvidersWhoseStoreAnotherAppOwnsAreRefused() {
@@ -176,7 +176,9 @@ final class SessionDeleterTests: XCTestCase {
             .claudeCowork: "Library/Application Support/Claude/local-agent-mode-sessions/"
                 + "space/x/local_\(sessionID)/.claude/projects/-Users-example-proj/\(sessionID).jsonl",
             .grokBot: "Library/Application Support/Grok Bot/sand-client-persistence/\(sessionID).blob",
-            .muse: ".local/share/muse/sessions/2026/01/01/\(sessionID)/session.jsonl"
+            .muse: ".local/share/muse/sessions/2026/01/01/\(sessionID)/session.jsonl",
+            .devin: ".local/share/devin/cli/sessions.db/\(sessionID)",
+            .mistralVibe: ".vibe/logs/session/session_20260101_000000_\(sessionID.prefix(8))/messages.jsonl"
         ]
         for (provider, path) in paths {
             XCTAssertFalse(provider.supportsDeletion, "\(provider) must not be deletable")
@@ -200,7 +202,7 @@ final class SessionDeleterTests: XCTestCase {
         }
         XCTAssertEqual(
             Set(SessionProvider.allCases.filter { !$0.supportsDeletion }),
-            [.antigravity, .cursor, .claudeCowork, .grokBot, .muse]
+            [.antigravity, .cursor, .claudeCowork, .grokBot, .muse, .devin, .mistralVibe]
         )
     }
 

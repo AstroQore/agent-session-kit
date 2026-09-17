@@ -8,7 +8,7 @@ import Foundation
 /// ChatGPT Work depending on its `originator`), which is why every summary
 /// also carries a `harness`.
 ///
-/// Five providers are listed and readable but never deletable, because
+/// Seven providers are listed and readable but never deletable, because
 /// another running app — or, for Grok Bot, a server — owns the store; see
 /// `supportsDeletion`.
 public enum SessionProvider: String, Codable, Sendable, CaseIterable, Hashable {
@@ -21,6 +21,8 @@ public enum SessionProvider: String, Codable, Sendable, CaseIterable, Hashable {
     case antigravity
     case grokBot
     case muse
+    case devin
+    case mistralVibe
 
     public var displayName: String {
         switch self {
@@ -33,6 +35,8 @@ public enum SessionProvider: String, Codable, Sendable, CaseIterable, Hashable {
         case .antigravity: return HarnessCatalog.antigravity
         case .grokBot: return HarnessCatalog.grokBot
         case .muse: return HarnessCatalog.museCode
+        case .devin: return HarnessCatalog.devin
+        case .mistralVibe: return HarnessCatalog.mistralVibe
         }
     }
 
@@ -50,6 +54,8 @@ public enum SessionProvider: String, Codable, Sendable, CaseIterable, Hashable {
         case .antigravity: return .antigravity
         case .grokBot: return .grokBot
         case .muse: return .museCode
+        case .devin: return .devin
+        case .mistralVibe: return .mistralVibe
         }
     }
 
@@ -59,16 +65,19 @@ public enum SessionProvider: String, Codable, Sendable, CaseIterable, Hashable {
     /// underneath it is how a store gets corrupted rather than emptied —
     /// AntiGravity's live WAL handles, Cursor's open agent database,
     /// Cowork's transcripts inside Claude.app's own container, and Grok
-    /// Bot's replica of conversations that actually live in the cloud, and
+    /// Bot's replica of conversations that actually live in the cloud,
     /// Muse Code's session directories, which the CLI's own SQLite index
-    /// references and a running `muse` holds locks and sockets inside.
+    /// references and a running `muse` holds locks and sockets inside,
+    /// Devin's sessions, which are rows in one database the CLI holds open,
+    /// and Mistral Vibe's session directories, which the CLI indexes, leases,
+    /// and nests sub-agent sessions inside.
     /// The adapters fail closed with
     /// `SessionDeleteError.providerIsReadOnly`; this is the same fact
     /// stated where a UI can ask it before offering the action.
     public var supportsDeletion: Bool {
         switch self {
         case .claude, .codex, .grok, .gemini: return true
-        case .claudeCowork, .cursor, .antigravity, .grokBot, .muse: return false
+        case .claudeCowork, .cursor, .antigravity, .grokBot, .muse, .devin, .mistralVibe: return false
         }
     }
 }
@@ -317,6 +326,10 @@ public enum SessionDeleteError: Error, Hashable, Codable, Sendable {
                 return "Grok Bot sessions are the app's own cloud cache; manage them in Grok Bot."
             case .muse:
                 return "Muse Code indexes its own sessions; remove them from the muse CLI."
+            case .devin:
+                return "Devin keeps every session in one live database; remove them with devin rm."
+            case .mistralVibe:
+                return "Mistral Vibe indexes and leases its own sessions; manage them from the vibe CLI."
             case .claude, .codex, .grok, .gemini:
                 return "Deleting sessions is not supported for this provider."
             }

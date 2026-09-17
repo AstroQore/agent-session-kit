@@ -17,7 +17,9 @@ final class HarnessNamingTests: XCTestCase {
                 "Grok Build",
                 "Cursor",
                 "Grok Bot",
-                "Muse Code"
+                "Muse Code",
+                "Devin",
+                "Mistral Vibe"
             ]
         )
     }
@@ -38,7 +40,8 @@ final class HarnessNamingTests: XCTestCase {
             Harness.allCases.map(\.rawValue),
             [
                 "codex", "chatgptWork", "claudeCode", "claudeCowork",
-                "geminiCLI", "antigravity", "grokBuild", "cursor", "grokBot", "museCode"
+                "geminiCLI", "antigravity", "grokBuild", "cursor", "grokBot", "museCode",
+                "devin", "mistralVibe"
             ]
         )
     }
@@ -49,7 +52,7 @@ final class HarnessNamingTests: XCTestCase {
         XCTAssertEqual(
             SessionProvider.allCases.map(\.defaultHarness),
             [.claudeCode, .claudeCowork, .codex, .grokBuild, .cursor, .geminiCLI,
-             .antigravity, .grokBot, .museCode]
+             .antigravity, .grokBot, .museCode, .devin, .mistralVibe]
         )
         XCTAssertEqual(
             Set(Harness.allCases).subtracting(SessionProvider.allCases.map(\.defaultHarness)),
@@ -66,6 +69,16 @@ final class HarnessNamingTests: XCTestCase {
         XCTAssertEqual(SessionProvider.grokBot.displayName, HarnessCatalog.grokBot)
         XCTAssertEqual(SessionProvider.muse.displayName, HarnessCatalog.museCode)
         XCTAssertEqual(Harness.museCode.displayName, "Muse Code")
+        XCTAssertEqual(SessionProvider.devin.displayName, HarnessCatalog.devin)
+        XCTAssertEqual(Harness.devin.displayName, "Devin")
+        XCTAssertEqual(SessionProvider.mistralVibe.displayName, HarnessCatalog.mistralVibe)
+        XCTAssertEqual(Harness.mistralVibe.displayName, "Mistral Vibe")
+    }
+
+    /// The provider raw values are storage keys too.
+    func testNewProviderRawValuesAreStable() {
+        XCTAssertEqual(SessionProvider.devin.rawValue, "devin")
+        XCTAssertEqual(SessionProvider.mistralVibe.rawValue, "mistralVibe")
     }
 
     /// Grok Build and Grok Bot share a company and nothing else: one is a

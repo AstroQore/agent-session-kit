@@ -17,6 +17,21 @@ final class SessionResumeCommandBuilderTests: XCTestCase {
                        "gemini --resume session-2026-01-01T00-00-abc")
         XCTAssertEqual(try SessionResumeCommandBuilder.command(provider: .muse, sessionID: uuid),
                        "muse resume \(uuid)")
+        XCTAssertEqual(try SessionResumeCommandBuilder.command(provider: .devin, sessionID: "quiet-harbor"),
+                       "devin --resume quiet-harbor")
+        XCTAssertEqual(try SessionResumeCommandBuilder.command(provider: .mistralVibe, sessionID: uuid),
+                       "vibe --resume \(uuid)")
+    }
+
+    /// Devin names sessions with a word pair, not a UUID; Mistral Vibe's ids
+    /// are UUID-shaped hex. Each is held to its own charset.
+    func testDevinAndMistralVibeIDCharsets() {
+        assertThrows(.invalidSessionID) {
+            try SessionResumeCommandBuilder.command(provider: .mistralVibe, sessionID: "quiet-harbor")
+        }
+        assertThrows(.invalidSessionID) {
+            try SessionResumeCommandBuilder.command(provider: .devin, sessionID: "quiet harbor; rm -rf /")
+        }
     }
 
     func testAntigravityNeedsTheCLIVariant() throws {
@@ -54,7 +69,9 @@ final class SessionResumeCommandBuilderTests: XCTestCase {
     /// Every provider either builds a command or refuses for a stated
     /// reason — a new case must not fall through to a wrong CLI.
     func testEveryProviderIsAccountedFor() {
-        let resumable: Set<SessionProvider> = [.claude, .codex, .grok, .gemini, .antigravity, .muse]
+        let resumable: Set<SessionProvider> = [
+            .claude, .codex, .grok, .gemini, .antigravity, .muse, .devin, .mistralVibe
+        ]
         for provider in SessionProvider.allCases {
             let command = try? SessionResumeCommandBuilder.command(
                 provider: provider, sessionID: uuid, variant: "cli"

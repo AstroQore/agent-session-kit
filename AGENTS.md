@@ -39,7 +39,7 @@ own mapping as an extension in its own module.
 │   │   │   ├── SessionModels.swift     # SessionProvider, SessionSummary, transcripts, delete plans
 │   │   │   ├── SessionParsing.swift    # Provider-agnostic, total parsing primitives
 │   │   │   ├── SessionProviderAdapter.swift  # The protocol + the registry
-│   │   │   ├── {Claude,ClaudeCowork,Codex,Grok,Cursor,Gemini,Antigravity,GrokBot,Muse}SessionAdapter.swift
+│   │   │   ├── {Claude,ClaudeCowork,Codex,Grok,Cursor,Gemini,Antigravity,GrokBot,Muse,Devin,MistralVibe}SessionAdapter.swift
 │   │   │   ├── CodexTitleHydrator.swift          # Titles from Codex's side index
 │   │   │   ├── AntigravityConversationIndex.swift
 │   │   │   ├── LiveSQLiteReader.swift            # Read a store another process holds open
@@ -161,8 +161,13 @@ Claude Cowork because another running app owns those stores, and for Grok Bot
 because the conversation itself lives on xAI's servers and this directory is
 only what the client replicated. Muse Code is read-only too: the CLI's own
 `session-index.db` points at every log, and a running `muse` keeps locks and
-sockets inside the session directory. Removing from underneath a live SQLite
-handle is how a store gets corrupted rather than emptied. Do not "fix" that.
+sockets inside the session directory. Devin keeps every session as rows in one
+database the CLI holds open, so a delete would be SQL against another
+process's live store — that is `devin rm`'s job. Mistral Vibe caches its
+listing, leases running sessions, nests sub-agent sessions inside the parent's
+directory, and sweeps worktrees no listed session resumes into. Removing from
+underneath a live SQLite handle is how a store gets corrupted rather than
+emptied. Do not "fix" that.
 
 ## 7. Adding a harness
 
@@ -170,6 +175,11 @@ handle is how a store gets corrupted rather than emptied. Do not "fix" that.
    `defaultHarness` + an honest `supportsDeletion`.
 2. An adapter. `roots(homeDirectory:)` is both the discovery scope and the
    deleter's containment fence — keep it exactly as narrow as the store is.
+   If a session is not exactly one file — a sibling file changes on its own
+   (Mistral Vibe's `meta.json`), or many sessions share one store (Devin's
+   database, addressed as `<store>/<session id>`) — override
+   `changeFingerprint(fileURL:)` so the index re-reads exactly the sessions
+   that moved.
 3. Register in `SessionProviderRegistry.standard`.
 4. Tests over a synthetic temp tree: metadata, transcript, deletion plan, and
    the malformed-input case.

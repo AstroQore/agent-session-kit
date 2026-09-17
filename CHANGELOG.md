@@ -6,6 +6,60 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`DevinSessionAdapter`** — Cognition's Devin is a listed, readable,
+  searchable provider. The `devin` CLI and the Devin desktop app (whose
+  "Devin Local" agent drives the CLI over ACP) keep every session as rows in
+  one WAL-mode database, `~/.local/share/devin/cli/sessions.db`. Discovery
+  hands out one locator per visible session, `…/sessions.db/<session id>`,
+  which names a row rather than a file. Metadata comes from the `sessions` row
+  (title, working directory, unix-second timestamps) and a bounded window at
+  each end of the main chain (first typed prompt, last reply, the model that
+  generated it). The transcript is the one chain from
+  `sessions.main_chain_id` back to its root — not compaction's abandoned
+  prefixes, retried siblings, or sub-agent trees — with system blocks,
+  injected user turns, and reasoning dropped. Sessions Devin marks
+  `hidden = 1` (its own helper agents' runs) are not listed.
+- **`MistralVibeSessionAdapter`** — Mistral AI's Vibe CLI (`vibe`) is a listed,
+  readable, searchable provider. A session is
+  `~/.vibe/logs/session/session_<UTC stamp>_<first 8 of id>/`, and its file is
+  `messages.jsonl`; `meta.json` beside it supplies the id (which the directory
+  must agree with), title, working directory, start and end times, and the
+  model the active alias resolves to (`config.models[active_model].name`).
+  Without a recorded title, the first prompt a person typed is the title.
+  `injected` lines — compaction summaries, hook messages — stay out of the
+  transcript. Sub-agent sessions nested under a parent's `agents/` directory
+  are not listed.
+- **`Harness.devin`** / **`SessionProvider.devin`** ("Devin") and
+  **`Harness.mistralVibe`** / **`SessionProvider.mistralVibe`** ("Mistral
+  Vibe"). Both are read-only, and resume with `devin --resume <id>` and
+  `vibe --resume <id>`. Devin's ids are word pairs, validated against the
+  loose `[A-Za-z0-9._-]` charset; Vibe's are UUID-shaped hex.
+- **`SessionProviderAdapter.changeFingerprint(fileURL:)`** and
+  **`SessionChangeFingerprint`** — what the incremental index compares to
+  decide whether a session must be re-read. The default is the file's
+  nanosecond mtime and size with a `-wal` sibling folded in, exactly as
+  before. Mistral Vibe folds `meta.json` in, so a rename re-indexes the row;
+  Devin answers per session, so a turn in one conversation re-reads only that
+  one. A host adapter that wraps another should forward it; a wrapper that
+  does not still indexes Devin, at the coarser granularity of the whole
+  database.
+- The Rust lane knows both providers: raw values `devin` and `mistralVibe`,
+  the same harness storage keys, resume commands, and id validation.
+
+### Changed
+
+- `SessionIndexService` fingerprints each session through its adapter's
+  `changeFingerprint` rather than a `stat` of its own.
+- `LiveSQLiteReader.read(at:snapshotFallback:_:)` can give up after the direct
+  read instead of copying the database, for a probe that runs once per
+  session against a store many sessions share.
+- `LiveSQLiteReader` reads a WAL database whose last writer closed cleanly (no
+  `-wal` left behind) in place with `immutable=1`. A read-only connection
+  cannot recreate the journal, so that read used to fail and fall back to a
+  full snapshot copy; it now neither copies nor leaves a file behind.
+
 ## [0.9.0] - 2026-09-17
 
 Meta's Muse Code joins the session list: its sessions are listed, searched,

@@ -27,6 +27,9 @@ struct SessionResumeTests {
         (.chatgptWork, "codex resume 11111111-2222-3333-4444-555555555555"),
         (.grokBuild, "grok --resume 11111111-2222-3333-4444-555555555555"),
         (.geminiCLI, "gemini --resume 11111111-2222-3333-4444-555555555555"),
+        (.museCode, "muse resume 11111111-2222-3333-4444-555555555555"),
+        (.devin, "devin --resume 11111111-2222-3333-4444-555555555555"),
+        (.mistralVibe, "vibe --resume 11111111-2222-3333-4444-555555555555"),
     ])
     func commandPerHarness(_ harness: Harness, _ expected: String) {
         #expect(SessionResume.availability(for: Self.identity(harness)).command == expected)
@@ -114,6 +117,8 @@ struct SessionResumeTests {
         #expect(Harness.cursor.sessionProvider == .cursor)
         #expect(Harness.grokBot.sessionProvider == .grokBot)
         #expect(Harness.museCode.sessionProvider == .muse)
+        #expect(Harness.devin.sessionProvider == .devin)
+        #expect(Harness.mistralVibe.sessionProvider == .mistralVibe)
     }
 
     @Test("the mapping is the inverse of the provider's default harness")
