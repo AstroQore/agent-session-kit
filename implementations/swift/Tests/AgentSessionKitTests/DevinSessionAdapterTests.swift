@@ -319,6 +319,21 @@ final class DevinSessionAdapterTests: XCTestCase {
         XCTAssertEqual(summary.projectDir, "/Users/example/other")
     }
 
+    /// A newest reply without a `generation_model` does not borrow an older
+    /// response's model, which may predate a model switch.
+    func testTheNewestReplyWithoutAModelFallsBackToTheSessionRow() throws {
+        let nodes: [Fixture.Node] = [
+            .init(sessionID: olderID, nodeID: 0, parentNodeID: nil, chatMessage: Fixture.user("Rename the target")),
+            .init(sessionID: olderID, nodeID: 1, parentNodeID: 0,
+                  chatMessage: Fixture.assistant("Looking.", model: "swe-1.6")),
+            .init(sessionID: olderID, nodeID: 2, parentNodeID: 1, chatMessage: Fixture.assistant("Renamed.", model: nil))
+        ]
+        try writeStore(nodes: nodes)
+        let summary = try adapter.extractMetadata(fileURL: locator(olderID))
+        XCTAssertEqual(summary.summary, "Renamed.")
+        XCTAssertEqual(summary.model, "swe-2")
+    }
+
     /// An injected user turn is not the session's first prompt.
     func testTitleSkipsInjectedAndSystemTurns() throws {
         let nodes: [Fixture.Node] = [

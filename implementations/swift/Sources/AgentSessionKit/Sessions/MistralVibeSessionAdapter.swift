@@ -44,6 +44,9 @@ public struct MistralVibeSessionAdapter: SessionProviderAdapter {
     /// not grow with the conversation; anything past this is not one.
     static let maxMetadataBytes: Int64 = 16 * 1024 * 1024
     static let headLineCount = 40
+    /// A pasted prompt can make the first record large; a title never needs
+    /// more than this much of the log.
+    static let headByteBudget = 1 << 20
     static let tailLineCount = 40
 
     public func roots(homeDirectory: String) -> [URL] {
@@ -119,7 +122,7 @@ public struct MistralVibeSessionAdapter: SessionProviderAdapter {
 
         var firstPrompt: String?
         if SessionParsing.string(meta["title"]) == nil {
-            for line in JSONLHeadTail.headLines(url: fileURL, count: Self.headLineCount) {
+            for line in JSONLHeadTail.headLines(url: fileURL, count: Self.headLineCount, maxBytes: Self.headByteBudget) {
                 guard let message = Self.message(line), message.role == "user" else { continue }
                 if let text = SessionParsing.string(message.text) {
                     firstPrompt = text

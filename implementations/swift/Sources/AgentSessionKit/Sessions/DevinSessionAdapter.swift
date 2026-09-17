@@ -233,13 +233,20 @@ public struct DevinSessionAdapter: SessionProviderAdapter {
 
         var lastReply: String?
         var lastModel: String?
+        var sawNewestAssistant = false
         for nodeID in chain.nodes.suffix(tailScanNodes).reversed() {
             guard let node = try lookup.node(nodeID), node.role == "assistant" else { continue }
-            if lastModel == nil { lastModel = node.generationModel }
+            // The model is the newest response's own. One without a
+            // `generation_model` leaves the session row's model to answer,
+            // rather than an older response that may predate a model switch.
+            if !sawNewestAssistant {
+                sawNewestAssistant = true
+                lastModel = node.generationModel
+            }
             if lastReply == nil {
                 lastReply = SessionParsing.string(SessionParsing.extractText(node.message["content"]))
             }
-            if lastModel != nil, lastReply != nil { break }
+            if lastReply != nil { break }
         }
 
         return Head(
