@@ -15,6 +15,8 @@ final class SessionResumeCommandBuilderTests: XCTestCase {
                        "grok --resume \(uuid)")
         XCTAssertEqual(try SessionResumeCommandBuilder.command(provider: .gemini, sessionID: "session-2026-01-01T00-00-abc"),
                        "gemini --resume session-2026-01-01T00-00-abc")
+        XCTAssertEqual(try SessionResumeCommandBuilder.command(provider: .muse, sessionID: uuid),
+                       "muse resume \(uuid)")
     }
 
     func testAntigravityNeedsTheCLIVariant() throws {
@@ -52,7 +54,7 @@ final class SessionResumeCommandBuilderTests: XCTestCase {
     /// Every provider either builds a command or refuses for a stated
     /// reason — a new case must not fall through to a wrong CLI.
     func testEveryProviderIsAccountedFor() {
-        let resumable: Set<SessionProvider> = [.claude, .codex, .grok, .gemini, .antigravity]
+        let resumable: Set<SessionProvider> = [.claude, .codex, .grok, .gemini, .antigravity, .muse]
         for provider in SessionProvider.allCases {
             let command = try? SessionResumeCommandBuilder.command(
                 provider: provider, sessionID: uuid, variant: "cli"

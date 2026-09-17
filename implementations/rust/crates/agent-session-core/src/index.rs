@@ -758,6 +758,7 @@ impl SessionIndexReader {
             "Grok Build" => "grokBuild",
             "Cursor" => "cursor",
             "Grok Bot" => "grokBot",
+            "Muse Code" => "museCode",
             raw => raw,
         }
     }
@@ -771,7 +772,8 @@ impl SessionIndexReader {
          WHEN 'cursor' THEN 'cursor' \
          WHEN 'gemini' THEN 'geminiCLI' \
          WHEN 'antigravity' THEN 'antigravity' \
-         WHEN 'grokBot' THEN 'grokBot' END)"
+         WHEN 'grokBot' THEN 'grokBot' \
+         WHEN 'muse' THEN 'museCode' END)"
     }
 
     fn dedup_nonempty_strings(

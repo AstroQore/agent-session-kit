@@ -8,7 +8,7 @@ import Foundation
 /// ChatGPT Work depending on its `originator`), which is why every summary
 /// also carries a `harness`.
 ///
-/// Four providers are listed and readable but never deletable, because
+/// Five providers are listed and readable but never deletable, because
 /// another running app — or, for Grok Bot, a server — owns the store; see
 /// `supportsDeletion`.
 public enum SessionProvider: String, Codable, Sendable, CaseIterable, Hashable {
@@ -20,6 +20,7 @@ public enum SessionProvider: String, Codable, Sendable, CaseIterable, Hashable {
     case gemini
     case antigravity
     case grokBot
+    case muse
 
     public var displayName: String {
         switch self {
@@ -31,6 +32,7 @@ public enum SessionProvider: String, Codable, Sendable, CaseIterable, Hashable {
         case .gemini: return HarnessCatalog.geminiCLI
         case .antigravity: return HarnessCatalog.antigravity
         case .grokBot: return HarnessCatalog.grokBot
+        case .muse: return HarnessCatalog.museCode
         }
     }
 
@@ -47,6 +49,7 @@ public enum SessionProvider: String, Codable, Sendable, CaseIterable, Hashable {
         case .gemini: return .geminiCLI
         case .antigravity: return .antigravity
         case .grokBot: return .grokBot
+        case .muse: return .museCode
         }
     }
 
@@ -56,14 +59,16 @@ public enum SessionProvider: String, Codable, Sendable, CaseIterable, Hashable {
     /// underneath it is how a store gets corrupted rather than emptied —
     /// AntiGravity's live WAL handles, Cursor's open agent database,
     /// Cowork's transcripts inside Claude.app's own container, and Grok
-    /// Bot's replica of conversations that actually live in the cloud.
+    /// Bot's replica of conversations that actually live in the cloud, and
+    /// Muse Code's session directories, which the CLI's own SQLite index
+    /// references and a running `muse` holds locks and sockets inside.
     /// The adapters fail closed with
     /// `SessionDeleteError.providerIsReadOnly`; this is the same fact
     /// stated where a UI can ask it before offering the action.
     public var supportsDeletion: Bool {
         switch self {
         case .claude, .codex, .grok, .gemini: return true
-        case .claudeCowork, .cursor, .antigravity, .grokBot: return false
+        case .claudeCowork, .cursor, .antigravity, .grokBot, .muse: return false
         }
     }
 }
@@ -310,6 +315,8 @@ public enum SessionDeleteError: Error, Hashable, Codable, Sendable {
                 return "Cursor keeps its session store open; delete from Cursor itself."
             case .grokBot:
                 return "Grok Bot sessions are the app's own cloud cache; manage them in Grok Bot."
+            case .muse:
+                return "Muse Code indexes its own sessions; remove them from the muse CLI."
             case .claude, .codex, .grok, .gemini:
                 return "Deleting sessions is not supported for this provider."
             }

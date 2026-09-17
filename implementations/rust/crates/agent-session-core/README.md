@@ -52,8 +52,8 @@ let recent = reader.list(&SessionListFilter { limit: 20, ..Default::default() })
 | Contract | Value |
 | --- | --- |
 | Index schema version | `PRAGMA user_version = 5` (any other value ⇒ refuse) |
-| Provider raw values | `claude`, `claudeCowork`, `codex`, `grok`, `cursor`, `gemini`, `antigravity`, `grokBot` |
+| Provider raw values | `claude`, `claudeCowork`, `codex`, `grok`, `cursor`, `gemini`, `antigravity`, `grokBot`, `muse` |
 | Harness display names | `Codex`, `ChatGPT Work`, `Claude Code`, `Claude Cowork`, `Gemini CLI`, `AntiGravity`, `Grok Build`, `Cursor`, `Grok Bot` |
 | Index timestamps | Unix epoch seconds (INTEGER) |
 | FTS query | one double-quoted phrase, `""` escaping; needles < 3 chars use escaped `LIKE` |
-| Resume validation | uuid charset for claude/codex/cursor/antigravity/grokBot ids; `[A-Za-z0-9._-]` for grok/gemini; max 200 chars |
+| Resume validation | uuid charset for claude/codex/cursor/antigravity/grokBot/muse ids; `[A-Za-z0-9._-]` for grok/gemini; max 200 chars |

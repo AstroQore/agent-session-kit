@@ -74,8 +74,8 @@ public enum SessionParsing {
         return String(raw[raw.startIndex..<keep]) + String(raw[digitsEnd...])
     }
 
-    /// Dates arrive as ISO strings or as epoch numbers in seconds or
-    /// milliseconds depending on the CLI and its vintage.
+    /// Dates arrive as ISO strings or as epoch numbers in seconds,
+    /// milliseconds, or microseconds depending on the CLI and its vintage.
     public static func date(_ value: Any?) -> Date? {
         if let raw = value as? String {
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -92,9 +92,17 @@ public enum SessionParsing {
 
     private static func date(fromEpoch value: Double) -> Date? {
         guard value > 0 else { return nil }
-        // Anything past ~2001 in seconds is below 1e12; larger values
-        // are milliseconds.
-        let seconds = value > 1_000_000_000_000 ? value / 1000 : value
+        // Anything past ~2001 in seconds is below 1e12; up to 1e15 is
+        // milliseconds (the year 33658), and beyond that microseconds —
+        // Muse Code stamps every record with `recorded_at` in µs.
+        let seconds: Double
+        if value > 1_000_000_000_000_000 {
+            seconds = value / 1_000_000
+        } else if value > 1_000_000_000_000 {
+            seconds = value / 1000
+        } else {
+            seconds = value
+        }
         return Date(timeIntervalSince1970: seconds)
     }
 

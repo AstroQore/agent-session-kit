@@ -6,6 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`MuseSessionAdapter`** — Meta's Muse Code CLI (`muse`) is a listed,
+  readable, searchable provider. Its sessions live at
+  `~/.local/share/muse/sessions/YYYY/MM/DD/<id>/session.jsonl`, an append-only
+  record log; the adapter reads the session id from the records' own stream
+  and requires the directory to agree, takes the workspace, model, first
+  prompt, and last reply from a bounded head and tail, and unwraps
+  `retained_frame` children. The transcript is the `run` events: `started`
+  prompts, committed assistant messages, and tool calls with their results.
+  Reminder and verifier children under `<id>/subagent/` belong to their parent
+  and are not listed as sessions.
+- **`Harness.museCode`** / **`SessionProvider.muse`** ("Muse Code"). Muse Code
+  is read-only — the CLI's own `session-index.db` references every log and a
+  running `muse` holds locks inside the directory — and resumes with
+  `muse resume <id>`.
+- The Rust lane knows the new provider: raw value `muse`, harness storage key
+  `museCode`, the same resume command and id validation.
+
+### Changed
+
+- `SessionParsing.date` reads epoch numbers in microseconds as well as
+  seconds and milliseconds; Muse Code stamps every record's `recorded_at` in µs.
+
 ## [0.8.1] - 2026-09-07
 
 An AntiGravity session says what it was about. Its rows used to read

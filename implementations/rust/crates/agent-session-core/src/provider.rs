@@ -21,10 +21,12 @@ pub enum SessionProvider {
     Antigravity,
     #[serde(rename = "grokBot")]
     GrokBot,
+    #[serde(rename = "muse")]
+    Muse,
 }
 
 impl SessionProvider {
-    pub const ALL: [SessionProvider; 8] = [
+    pub const ALL: [SessionProvider; 9] = [
         SessionProvider::Claude,
         SessionProvider::ClaudeCowork,
         SessionProvider::Codex,
@@ -33,6 +35,7 @@ impl SessionProvider {
         SessionProvider::Gemini,
         SessionProvider::Antigravity,
         SessionProvider::GrokBot,
+        SessionProvider::Muse,
     ];
 
     /// Storage raw value — identical to Swift's `rawValue`.
@@ -46,6 +49,7 @@ impl SessionProvider {
             SessionProvider::Gemini => "gemini",
             SessionProvider::Antigravity => "antigravity",
             SessionProvider::GrokBot => "grokBot",
+            SessionProvider::Muse => "muse",
         }
     }
 
@@ -67,6 +71,7 @@ impl SessionProvider {
             SessionProvider::Gemini => "Gemini CLI",
             SessionProvider::Antigravity => "AntiGravity",
             SessionProvider::GrokBot => "Grok Bot",
+            SessionProvider::Muse => "Muse Code",
         }
     }
 

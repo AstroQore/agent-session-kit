@@ -16,7 +16,8 @@ final class HarnessNamingTests: XCTestCase {
                 "AntiGravity",
                 "Grok Build",
                 "Cursor",
-                "Grok Bot"
+                "Grok Bot",
+                "Muse Code"
             ]
         )
     }
@@ -37,7 +38,7 @@ final class HarnessNamingTests: XCTestCase {
             Harness.allCases.map(\.rawValue),
             [
                 "codex", "chatgptWork", "claudeCode", "claudeCowork",
-                "geminiCLI", "antigravity", "grokBuild", "cursor", "grokBot"
+                "geminiCLI", "antigravity", "grokBuild", "cursor", "grokBot", "museCode"
             ]
         )
     }
@@ -48,7 +49,7 @@ final class HarnessNamingTests: XCTestCase {
         XCTAssertEqual(
             SessionProvider.allCases.map(\.defaultHarness),
             [.claudeCode, .claudeCowork, .codex, .grokBuild, .cursor, .geminiCLI,
-             .antigravity, .grokBot]
+             .antigravity, .grokBot, .museCode]
         )
         XCTAssertEqual(
             Set(Harness.allCases).subtracting(SessionProvider.allCases.map(\.defaultHarness)),
@@ -63,6 +64,8 @@ final class HarnessNamingTests: XCTestCase {
         XCTAssertEqual(SessionProvider.claudeCowork.displayName, HarnessCatalog.claudeCowork)
         XCTAssertEqual(SessionProvider.antigravity.displayName, HarnessCatalog.antigravity)
         XCTAssertEqual(SessionProvider.grokBot.displayName, HarnessCatalog.grokBot)
+        XCTAssertEqual(SessionProvider.muse.displayName, HarnessCatalog.museCode)
+        XCTAssertEqual(Harness.museCode.displayName, "Muse Code")
     }
 
     /// Grok Build and Grok Bot share a company and nothing else: one is a

@@ -47,6 +47,8 @@ public enum SessionResumeCommandBuilder {
             // sessions have no documented command-line entry point.
             guard variant == antigravityCLIVariant else { throw SessionResumeError.resumeUnavailable }
             return "agy --conversation \(id)"
+        case .muse:
+            return "muse resume \(id)"
         case .claudeCowork, .cursor, .grokBot:
             // Cowork runs inside Claude.app and Cursor's agents inside
             // Cursor; neither publishes a "reopen this conversation"
@@ -79,7 +81,7 @@ public enum SessionResumeCommandBuilder {
     static func isValid(_ id: String, for provider: SessionProvider) -> Bool {
         guard !id.isEmpty, id.count <= maxSessionIDLength else { return false }
         switch provider {
-        case .claude, .claudeCowork, .codex, .cursor, .antigravity, .grokBot:
+        case .claude, .claudeCowork, .codex, .cursor, .antigravity, .grokBot, .muse:
             return id.unicodeScalars.allSatisfy { uuidCharacters.contains($0) }
         case .grok, .gemini:
             return id.unicodeScalars.allSatisfy { looseCharacters.contains($0) }
