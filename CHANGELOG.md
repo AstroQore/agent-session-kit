@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-17
+
+Cognition's Devin and Mistral AI's Mistral Vibe join the session list. Devin
+is the first provider whose sessions are rows in one shared database rather
+than files, so adapters can now say for themselves what changed; both are
+read-only. New provider and harness raw values (`devin`, `mistralVibe`) land
+in host caches.
+
 ### Added
 
 - **`DevinSessionAdapter`** — Cognition's Devin is a listed, readable,
@@ -47,6 +55,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   database.
 - The Rust lane knows both providers: raw values `devin` and `mistralVibe`,
   the same harness storage keys, resume commands, and id validation.
+- `JSONLHeadTail.headLines(url:count:maxBytes:)` — an optional byte budget
+  for the head read. A spent budget ends at the last whole line, so one
+  oversized or newline-free first record cannot pull a log into memory;
+  Mistral Vibe's title scan reads at most 1 MiB.
 
 ### Changed
 
