@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-17
+
+Meta's Muse Code joins the session list: its sessions are listed, searched,
+read and resumed like the other harnesses, and — like AntiGravity and Cursor —
+never deleted, because the CLI indexes and locks its own store. New provider
+and harness raw values (`muse`, `museCode`) land in host caches.
+
 ### Added
 
 - **`MuseSessionAdapter`** — Meta's Muse Code CLI (`muse`) is a listed,
