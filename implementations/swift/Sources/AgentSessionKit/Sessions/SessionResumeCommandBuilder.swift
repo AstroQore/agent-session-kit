@@ -53,12 +53,13 @@ public enum SessionResumeCommandBuilder {
             return "devin --resume \(id)"
         case .mistralVibe:
             return "vibe --resume \(id)"
-        case .claudeCowork, .cursor, .grokBot:
+        case .claudeCowork, .cursor, .grokBot, .museAgent:
             // Cowork runs inside Claude.app and Cursor's agents inside
             // Cursor; neither publishes a "reopen this conversation"
             // command, and inventing one would hand the user a line that
             // silently starts a *new* session. Grok Bot goes further: the
-            // conversation runs on xAI's servers and there is no CLI at all.
+            // conversation runs on xAI's servers and there is no CLI at all,
+            // and Muse's agent runs in a VM on Meta's servers.
             throw SessionResumeError.resumeUnavailable
         }
     }
@@ -87,8 +88,9 @@ public enum SessionResumeCommandBuilder {
         switch provider {
         case .claude, .claudeCowork, .codex, .cursor, .antigravity, .grokBot, .muse, .mistralVibe:
             return id.unicodeScalars.allSatisfy { uuidCharacters.contains($0) }
-        case .grok, .gemini, .devin:
-            // Devin names a session with a word pair (`quiet-harbor`), not a UUID.
+        case .grok, .gemini, .devin, .museAgent:
+            // Devin names a session with a word pair (`quiet-harbor`), not a UUID;
+            // Muse's is its cache file's stem (`hatch-main`).
             return id.unicodeScalars.allSatisfy { looseCharacters.contains($0) }
         }
     }

@@ -86,7 +86,7 @@ public enum SessionResume: Sendable {
     /// a given session: only its CLI surface takes a conversation id.
     public static func isResumable(_ harness: Harness) -> Bool {
         switch harness {
-        case .claudeCowork, .cursor, .grokBot: false
+        case .claudeCowork, .cursor, .grokBot, .museAgent: false
         case .codex, .chatgptWork, .claudeCode, .geminiCLI, .antigravity, .grokBuild, .museCode,
              .devin, .mistralVibe: true
         }
@@ -126,6 +126,8 @@ public enum SessionResume: Sendable {
             return "Cursor's agents live inside Cursor and have no command-line resume."
         case .grokBot:
             return "Grok Bot conversations run on xAI's servers; there is nothing local to resume."
+        case .museAgent:
+            return "Muse conversations run on Meta's servers; there is nothing local to resume."
         case .antigravity:
             return "Only AntiGravity's CLI sessions take a conversation id; an IDE session has none."
         case .codex, .chatgptWork, .claudeCode, .geminiCLI, .grokBuild, .museCode, .devin, .mistralVibe:
@@ -153,6 +155,7 @@ public extension Harness {
         case .cursor: .cursor
         case .grokBot: .grokBot
         case .museCode: .muse
+        case .museAgent: .museAgent
         case .devin: .devin
         case .mistralVibe: .mistralVibe
         }

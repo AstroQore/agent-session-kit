@@ -56,8 +56,8 @@ struct SessionResumeTests {
 
     // MARK: - The harnesses without one
 
-    @Test("Claude Cowork, Cursor, and Grok Bot cannot be resumed", arguments: [
-        Harness.claudeCowork, .cursor, .grokBot,
+    @Test("Claude Cowork, Cursor, Grok Bot, and Muse cannot be resumed", arguments: [
+        Harness.claudeCowork, .cursor, .grokBot, .museAgent,
     ])
     func harnessesWithoutAResume(_ harness: Harness) {
         let availability = SessionResume.availability(for: Self.identity(harness))
@@ -119,6 +119,7 @@ struct SessionResumeTests {
         #expect(Harness.museCode.sessionProvider == .muse)
         #expect(Harness.devin.sessionProvider == .devin)
         #expect(Harness.mistralVibe.sessionProvider == .mistralVibe)
+        #expect(Harness.museAgent.sessionProvider == .museAgent)
     }
 
     @Test("the mapping is the inverse of the provider's default harness")

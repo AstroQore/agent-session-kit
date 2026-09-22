@@ -39,7 +39,7 @@ own mapping as an extension in its own module.
 │   │   │   ├── SessionModels.swift     # SessionProvider, SessionSummary, transcripts, delete plans
 │   │   │   ├── SessionParsing.swift    # Provider-agnostic, total parsing primitives
 │   │   │   ├── SessionProviderAdapter.swift  # The protocol + the registry
-│   │   │   ├── {Claude,ClaudeCowork,Codex,Grok,Cursor,Gemini,Antigravity,GrokBot,Muse,Devin,MistralVibe}SessionAdapter.swift
+│   │   │   ├── {Claude,ClaudeCowork,Codex,Grok,Cursor,Gemini,Antigravity,GrokBot,Muse,Devin,MistralVibe,MuseAgent}SessionAdapter.swift
 │   │   │   ├── CodexTitleHydrator.swift          # Titles from Codex's side index
 │   │   │   ├── AntigravityConversationIndex.swift
 │   │   │   ├── LiveSQLiteReader.swift            # Read a store another process holds open
@@ -165,7 +165,10 @@ sockets inside the session directory. Devin keeps every session as rows in one
 database the CLI holds open, so a delete would be SQL against another
 process's live store — that is `devin rm`'s job. Mistral Vibe caches its
 listing, leases running sessions, nests sub-agent sessions inside the parent's
-directory, and sweeps worktrees no listed session resumes into. Removing from
+directory, and sweeps worktrees no listed session resumes into. Muse (the
+desktop app, not Muse Code) is Grok Bot's case again: its conversation cache
+is owned and rewritten by the running app, and the conversations themselves
+live on Meta's servers. Removing from
 underneath a live SQLite handle is how a store gets corrupted rather than
 emptied. Do not "fix" that.
 

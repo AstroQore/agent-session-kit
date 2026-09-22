@@ -172,9 +172,9 @@ public struct SessionProviderRegistry: Sendable {
 
     /// The adapters shipped today, one per `SessionProvider`.
     ///
-    /// AntiGravity, Claude Cowork, Cursor, Grok Bot, Muse Code, Devin, and
-    /// Mistral Vibe list and read like the rest but refuse to plan a delete,
-    /// because another running app owns those stores — see
+    /// AntiGravity, Claude Cowork, Cursor, Grok Bot, Muse Code, Devin,
+    /// Mistral Vibe, and Muse list and read like the rest but refuse to plan a
+    /// delete, because another running app owns those stores — see
     /// `SessionProvider.supportsDeletion`.
     public static func standard(homeDirectory: String = RealHomeDirectory.path) -> SessionProviderRegistry {
         SessionProviderRegistry(adapters: [
@@ -188,7 +188,8 @@ public struct SessionProviderRegistry: Sendable {
             GrokBotSessionAdapter(),
             MuseSessionAdapter(),
             DevinSessionAdapter(),
-            MistralVibeSessionAdapter()
+            MistralVibeSessionAdapter(),
+            MuseAgentSessionAdapter()
         ])
     }
 
