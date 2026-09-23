@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-23
+
+Meta's Muse app (muse.ai's Mac client) joins the session list as a read-only
+provider distinct from Muse Code. New provider and harness raw value
+(`museAgent`) lands in host caches.
+
 ### Added
 
 - **`MuseAgentSessionAdapter`** — Meta's desktop agent app, `Muse.app`
@@ -20,7 +26,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The session id is the file stem (`hatch-main`). Messages are ordered by
   `sortSeq`; roles come from `isUser`; text is `content`, or the message's
   markdown blocks when that is empty. Timestamps are seconds since the Apple
-  reference date and are converted as such. The title is the first prompt,
+  reference date and are converted as such. An `isUser` that is not a JSON
+  boolean marks an entry as foreign and it is skipped. The title is the first prompt,
   since the cache has none. Read-only (`supportsDeletion == false`), no resume
   command, and no model, token counts, or project directory: the agent runs in
   a VM on Meta's servers and the cache may hold only part of the history.

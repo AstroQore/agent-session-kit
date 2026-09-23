@@ -251,6 +251,22 @@ final class MuseAgentSessionAdapterTests: XCTestCase {
 
     // MARK: - Malformed input
 
+    func testNumericIsUserIsNotAMessage() throws {
+        // `0` / `1` bridge through `is Bool`; a numeric flag is not this
+        // store's shape and must not be given an invented role.
+        let url = try write("hatch-main.json", """
+        [{"id":"a","isUser":1,"content":"numeric user","timestamp":\(referenceStart)},
+         {"id":"b","isUser":0,"content":"numeric reply","timestamp":\(referenceStart + 1)},
+         {"id":"c","isUser":true,"content":"real prompt","timestamp":\(referenceStart + 2)}]
+        """)
+        let summary = try adapter.extractMetadata(fileURL: url)
+        XCTAssertEqual(summary.messageCount, 1)
+        XCTAssertEqual(summary.title, "real prompt")
+        let document = try adapter.parseTranscript(fileURL: url, range: nil)
+        XCTAssertEqual(document.messages.map(\.text), ["real prompt"])
+        XCTAssertEqual(document.messages.map(\.role), [.user])
+    }
+
     func testMalformedFilesFailWithTheTwoParseErrors() throws {
         let truncated = try write("hatch-main.json", "[{\"id\":\"a\",\"isUser\":tr")
         XCTAssertThrowsError(try adapter.extractMetadata(fileURL: truncated)) { error in

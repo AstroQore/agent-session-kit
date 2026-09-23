@@ -172,7 +172,7 @@ public struct MuseAgentSessionAdapter: SessionProviderAdapter {
 
     static func transcript(from elements: [Any]) -> Transcript {
         let entries = ordered(elements.compactMap { element -> [String: Any]? in
-            guard let entry = element as? [String: Any], entry["isUser"] is Bool else { return nil }
+            guard let entry = element as? [String: Any], isUser(entry) != nil else { return nil }
             return entry
         })
 
@@ -189,10 +189,20 @@ public struct MuseAgentSessionAdapter: SessionProviderAdapter {
             // reply; it counts as a turn but is not a bubble.
             let body = text(of: entry)
             guard !body.isEmpty else { continue }
-            let role: SessionRole = (entry["isUser"] as? Bool) == true ? .user : .assistant
+            let role: SessionRole = isUser(entry) == true ? .user : .assistant
             messages.append(SessionMessage(seq: messages.count, role: role, text: body, timestamp: stamp))
         }
         return Transcript(messages: messages, entryCount: entries.count, firstStamp: first, lastStamp: last)
+    }
+
+    /// The entry's `isUser` flag, only when it is a real JSON boolean.
+    /// Foundation bridges `0` / `1` through `is Bool`, and a numeric flag is
+    /// not this store's shape — reading one would invent a role.
+    static func isUser(_ entry: [String: Any]) -> Bool? {
+        guard let number = entry["isUser"] as? NSNumber,
+              CFGetTypeID(number) == CFBooleanGetTypeID()
+        else { return nil }
+        return number.boolValue
     }
 
     /// `sortSeq` order when every entry has one, file order otherwise. A
