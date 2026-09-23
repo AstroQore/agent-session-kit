@@ -19,6 +19,7 @@ import Foundation
 /// | Cursor         | Anysphere  | `~/.cursor/chats/**/store.db`                                |
 /// | Grok Bot       | xAI        | `~/Library/Application Support/Grok Bot/sand-client-persistence` — a cloud cache: conversations only, no model |
 /// | Muse Code      | Meta AI    | `~/.local/share/muse/sessions/YYYY/MM/DD/<id>/session.jsonl`  |
+/// | Muse           | Meta AI    | `~/Library/Caches/ConversationCache/hatch-*.json` — a cloud cache: conversations only, no model |
 /// | Devin          | Cognition  | `~/.local/share/devin/cli/sessions.db` — one database, every session a row |
 /// | Mistral Vibe   | Mistral AI | `~/.vibe/logs/session/session_*/{meta.json,messages.jsonl}`    |
 ///
@@ -41,6 +42,10 @@ public enum HarnessCatalog {
     public static let grokBot = "Grok Bot"
     /// Meta's terminal coding agent, the `muse` CLI.
     public static let museCode = "Muse Code"
+    /// Meta's desktop agent app, `Muse.app` — muse.ai's Mac client, not the
+    /// `muse` CLI. Its agent runs in a VM on Meta's servers, so the local
+    /// store is a conversation cache and nothing a token counter could read.
+    public static let museAgent = "Muse"
     /// Cognition's local agent: the `devin` CLI and the Devin desktop app,
     /// whose "Devin Local" agent drives that CLI over ACP. Both write the one
     /// session database, so they are one harness.
@@ -69,6 +74,7 @@ public enum Harness: String, CaseIterable, Codable, Sendable, Hashable {
     case cursor
     case grokBot
     case museCode
+    case museAgent
     case devin
     case mistralVibe
 
@@ -84,6 +90,7 @@ public enum Harness: String, CaseIterable, Codable, Sendable, Hashable {
         case .cursor:       HarnessCatalog.cursor
         case .grokBot:      HarnessCatalog.grokBot
         case .museCode:     HarnessCatalog.museCode
+        case .museAgent:    HarnessCatalog.museAgent
         case .devin:        HarnessCatalog.devin
         case .mistralVibe:  HarnessCatalog.mistralVibe
         }

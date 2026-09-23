@@ -106,6 +106,7 @@ point takes the home directory it should read.
 | Muse Code | `~/.local/share/muse/sessions/YYYY/MM/DD/<id>/session.jsonl` | ✅ | ✅ | ❌ the CLI indexes and locks it |
 | Devin | `~/.local/share/devin/cli/sessions.db` — one database, a row per session | ✅ | ✅ | ❌ rows in a live database |
 | Mistral Vibe | `~/.vibe/logs/session/session_*/{meta.json,messages.jsonl}` | ✅ | ✅ | ❌ the CLI indexes and leases it |
+| Muse | `~/Library/Caches/ConversationCache/hatch-*.json` | ⚠️ only what the client cached | ❌ the run happens server-side | ❌ a cloud cache |
 
 Where a ⚠️ appears the log genuinely does not carry the value — an aborted
 Cursor conversation records no model name at all, and old Gemini CLI chats
@@ -115,8 +116,19 @@ an empty one. Grok Bot's ❌ is the stronger statement: the conversation runs
 on xAI's servers and the client's cache records no model, no token counts,
 and no cost for anyone to read.
 
-Seven providers are listed and readable but never deletable, because another
-running app — or, for Grok Bot, a server — owns the store.
+Muse — Meta's desktop agent app, `Muse.app`, not the `muse` CLI that is Muse
+Code — is the same kind of store. Its agent runs in a VM on Meta's servers, and
+the app caches each conversation as one JSON array of messages. The cache
+holds no model, no token counts, no title (the list row's title is the first
+prompt), and no local project directory, and it may hold only part of the
+history; the running app rewrites it at will. Its timestamps are seconds since
+2001-01-01 (Apple's reference date), not Unix seconds. The directory is shared
+with the consumer `Meta AI.app`, which is built from the same code: only the
+`hatch-*.json` files are Muse's, and the UUID-named ones beside them are never
+listed.
+
+Eight providers are listed and readable but never deletable, because another
+running app — or, for Grok Bot and Muse, a server — owns the store.
 `SessionProvider.supportsDeletion` says so up front, and the adapters fail
 closed with `SessionDeleteError.providerIsReadOnly`.
 
@@ -307,6 +319,7 @@ snapshot.quota?.usedPercent      // 43.2, from Codex's own rate_limits
 | Grok Build | `signals.json`: `contextTokensUsed` and `contextWindowTokens` | `measured` |
 | Cursor, AntiGravity, Grok Bot, Gemini CLI, Muse Code | nothing on disk answers it | `nil` |
 | Devin, Mistral Vibe | no live adapter yet; Devin records per-reply `metrics`, Vibe `stats.context_tokens` | `nil` |
+| Muse | nothing on disk answers it; the run happens server-side | `nil` |
 
 Claude Code computes both its window size *and* its category breakdown
 (messages, system tools, skills, MCP tools, memory files) in-process and writes
@@ -360,6 +373,7 @@ table goes through `ArgvSanitizer`.
 | Muse Code | — | `~/.local/share/muse/sessions/**/session.jsonl` |
 | Devin | — | `~/.local/share/devin/cli/sessions.db` (WAL) |
 | Mistral Vibe | — | `~/.vibe/logs/session/session_*/messages.jsonl` + `meta.json` |
+| Muse | — | `~/Library/Caches/ConversationCache/hatch-*.json` |
 | AntiGravity | ✅ `AntigravityLiveAdapter` | `~/.gemini/antigravity{-cli,}/conversations/*.db`; state from the SQL columns plus a shallow `step_payload` decode; liveness via `presence/<id>.lock` |
 | Cursor | ✅ `CursorLiveAdapter` | `~/.cursor/chats/**/store.db` + `~/.cursor/projects/<slug>/agent-transcripts`; liveness via `cursor-agent-worker-*.pid` and the store's WAL |
 | Grok Bot | ✅ `GrokBotLiveAdapter` | `~/Library/Application Support/Grok Bot/sand-client-persistence/<base32(key)>.blob`; the roster slice supplies the name and the needs-you flag; liveness via the `Grok Bot` process and `~/.grokbot/local-exec-supervisor.json` |

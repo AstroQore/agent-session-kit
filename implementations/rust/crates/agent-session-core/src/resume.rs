@@ -34,10 +34,14 @@ pub fn command(
         SessionProvider::Muse => Ok(format!("muse resume {id}")),
         SessionProvider::Devin => Ok(format!("devin --resume {id}")),
         SessionProvider::MistralVibe => Ok(format!("vibe --resume {id}")),
-        SessionProvider::ClaudeCowork | SessionProvider::Cursor | SessionProvider::GrokBot => {
+        SessionProvider::ClaudeCowork
+        | SessionProvider::Cursor
+        | SessionProvider::GrokBot
+        | SessionProvider::MuseAgent => {
             // Cowork runs inside Claude.app and Cursor's agents inside Cursor;
             // neither publishes a "reopen this conversation" command. Grok Bot
-            // has no CLI at all.
+            // has no CLI at all, and Muse's agent runs in a VM on Meta's
+            // servers.
             Err(SessionCoreError::ResumeUnavailable)
         }
     }
@@ -85,8 +89,12 @@ fn is_valid(id: &str, provider: SessionProvider) -> bool {
         | SessionProvider::GrokBot
         | SessionProvider::Muse
         | SessionProvider::MistralVibe => id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
-        // Devin names a session with a word pair (`quiet-harbor`), not a UUID.
-        SessionProvider::Grok | SessionProvider::Gemini | SessionProvider::Devin => id
+        // Devin names a session with a word pair (`quiet-harbor`), not a UUID;
+        // Muse's is its cache file's stem (`hatch-main`).
+        SessionProvider::Grok
+        | SessionProvider::Gemini
+        | SessionProvider::Devin
+        | SessionProvider::MuseAgent => id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')),
     }
@@ -168,6 +176,14 @@ mod tests {
         ));
         assert!(matches!(
             command(SessionProvider::Devin, "quiet harbor; rm -rf /", None),
+            Err(SessionCoreError::InvalidSessionId)
+        ));
+        assert!(matches!(
+            command(SessionProvider::MuseAgent, "hatch-main", None),
+            Err(SessionCoreError::ResumeUnavailable)
+        ));
+        assert!(matches!(
+            command(SessionProvider::MuseAgent, "hatch main; rm -rf /", None),
             Err(SessionCoreError::InvalidSessionId)
         ));
     }

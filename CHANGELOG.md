@@ -6,6 +6,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-23
+
+Meta's Muse app (muse.ai's Mac client) joins the session list as a read-only
+provider distinct from Muse Code. New provider and harness raw value
+(`museAgent`) lands in host caches.
+
+### Added
+
+- **`MuseAgentSessionAdapter`** — Meta's desktop agent app, `Muse.app`
+  (muse.ai's Mac client, bundle `com.meta.endo`), is a listed, readable,
+  searchable provider: **`SessionProvider.museAgent`** / **`Harness.museAgent`**
+  (raw value `museAgent`, display name "Muse", `HarnessCatalog.museAgent`). It
+  is not Muse Code — the `muse` CLI keeps its own provider and harness. The app
+  caches each conversation at `~/Library/Caches/ConversationCache/` as one JSON
+  array of messages (`storeRelativePath`); the directory is shared with the
+  consumer `Meta AI.app`, so discovery lists only `hatch-<id>.json` files, flat,
+  without following links, and never the UUID-named Meta AI chats beside them.
+  The session id is the file stem (`hatch-main`). Messages are ordered by
+  `sortSeq`; roles come from `isUser`; text is `content`, or the message's
+  markdown blocks when that is empty. Timestamps are seconds since the Apple
+  reference date and are converted as such. An `isUser` that is not a JSON
+  boolean marks an entry as foreign and it is skipped. The title is the first prompt,
+  since the cache has none. Read-only (`supportsDeletion == false`), no resume
+  command, and no model, token counts, or project directory: the agent runs in
+  a VM on Meta's servers and the cache may hold only part of the history.
+- The Rust lane knows the provider: `SessionProvider::MuseAgent` (raw value
+  `museAgent`, default harness "Muse"), read-only, no resume, and the index
+  reader's harness filter accepts "Muse" and `museAgent`.
+
 ## [0.10.0] - 2026-09-17
 
 Cognition's Devin and Mistral AI's Mistral Vibe join the session list. Devin

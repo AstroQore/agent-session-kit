@@ -18,6 +18,7 @@ final class HarnessNamingTests: XCTestCase {
                 "Cursor",
                 "Grok Bot",
                 "Muse Code",
+                "Muse",
                 "Devin",
                 "Mistral Vibe"
             ]
@@ -41,7 +42,7 @@ final class HarnessNamingTests: XCTestCase {
             [
                 "codex", "chatgptWork", "claudeCode", "claudeCowork",
                 "geminiCLI", "antigravity", "grokBuild", "cursor", "grokBot", "museCode",
-                "devin", "mistralVibe"
+                "museAgent", "devin", "mistralVibe"
             ]
         )
     }
@@ -52,7 +53,7 @@ final class HarnessNamingTests: XCTestCase {
         XCTAssertEqual(
             SessionProvider.allCases.map(\.defaultHarness),
             [.claudeCode, .claudeCowork, .codex, .grokBuild, .cursor, .geminiCLI,
-             .antigravity, .grokBot, .museCode, .devin, .mistralVibe]
+             .antigravity, .grokBot, .museCode, .devin, .mistralVibe, .museAgent]
         )
         XCTAssertEqual(
             Set(Harness.allCases).subtracting(SessionProvider.allCases.map(\.defaultHarness)),
@@ -73,12 +74,26 @@ final class HarnessNamingTests: XCTestCase {
         XCTAssertEqual(Harness.devin.displayName, "Devin")
         XCTAssertEqual(SessionProvider.mistralVibe.displayName, HarnessCatalog.mistralVibe)
         XCTAssertEqual(Harness.mistralVibe.displayName, "Mistral Vibe")
+        XCTAssertEqual(SessionProvider.museAgent.displayName, HarnessCatalog.museAgent)
+        XCTAssertEqual(Harness.museAgent.displayName, "Muse")
     }
 
     /// The provider raw values are storage keys too.
     func testNewProviderRawValuesAreStable() {
         XCTAssertEqual(SessionProvider.devin.rawValue, "devin")
         XCTAssertEqual(SessionProvider.mistralVibe.rawValue, "mistralVibe")
+        XCTAssertEqual(SessionProvider.museAgent.rawValue, "museAgent")
+        XCTAssertEqual(Harness.museAgent.rawValue, "museAgent")
+    }
+
+    /// Muse (the desktop agent app) and Muse Code (the `muse` CLI) share a
+    /// company and a word, and nothing on disk. Collapsing them would put a
+    /// CLI's name on a cloud conversation.
+    func testMuseCodeAndMuseAreDistinctHarnesses() {
+        XCTAssertNotEqual(Harness.museCode, Harness.museAgent)
+        XCTAssertNotEqual(SessionProvider.muse, SessionProvider.museAgent)
+        XCTAssertEqual(SessionProvider.muse.defaultHarness, .museCode)
+        XCTAssertEqual(SessionProvider.museAgent.defaultHarness, .museAgent)
     }
 
     /// Grok Build and Grok Bot share a company and nothing else: one is a

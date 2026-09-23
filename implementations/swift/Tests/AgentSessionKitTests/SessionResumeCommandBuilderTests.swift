@@ -68,6 +68,17 @@ final class SessionResumeCommandBuilderTests: XCTestCase {
 
     /// Every provider either builds a command or refuses for a stated
     /// reason — a new case must not fall through to a wrong CLI.
+    /// Muse's agent runs in a VM on Meta's servers; there is no command that
+    /// reopens one of its conversations, whatever the id looks like.
+    func testMuseAgentHasNoResume() {
+        assertThrows(.resumeUnavailable) {
+            try SessionResumeCommandBuilder.command(provider: .museAgent, sessionID: "hatch-main")
+        }
+        assertThrows(.invalidSessionID) {
+            try SessionResumeCommandBuilder.command(provider: .museAgent, sessionID: "hatch main; rm -rf /")
+        }
+    }
+
     func testEveryProviderIsAccountedFor() {
         let resumable: Set<SessionProvider> = [
             .claude, .codex, .grok, .gemini, .antigravity, .muse, .devin, .mistralVibe

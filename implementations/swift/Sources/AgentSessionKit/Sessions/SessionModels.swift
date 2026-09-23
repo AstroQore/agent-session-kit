@@ -8,8 +8,8 @@ import Foundation
 /// ChatGPT Work depending on its `originator`), which is why every summary
 /// also carries a `harness`.
 ///
-/// Seven providers are listed and readable but never deletable, because
-/// another running app — or, for Grok Bot, a server — owns the store; see
+/// Eight providers are listed and readable but never deletable, because
+/// another running app — or, for Grok Bot and Muse, a server — owns the store; see
 /// `supportsDeletion`.
 public enum SessionProvider: String, Codable, Sendable, CaseIterable, Hashable {
     case claude
@@ -23,6 +23,7 @@ public enum SessionProvider: String, Codable, Sendable, CaseIterable, Hashable {
     case muse
     case devin
     case mistralVibe
+    case museAgent
 
     public var displayName: String {
         switch self {
@@ -37,6 +38,7 @@ public enum SessionProvider: String, Codable, Sendable, CaseIterable, Hashable {
         case .muse: return HarnessCatalog.museCode
         case .devin: return HarnessCatalog.devin
         case .mistralVibe: return HarnessCatalog.mistralVibe
+        case .museAgent: return HarnessCatalog.museAgent
         }
     }
 
@@ -56,6 +58,7 @@ public enum SessionProvider: String, Codable, Sendable, CaseIterable, Hashable {
         case .muse: return .museCode
         case .devin: return .devin
         case .mistralVibe: return .mistralVibe
+        case .museAgent: return .museAgent
         }
     }
 
@@ -69,15 +72,18 @@ public enum SessionProvider: String, Codable, Sendable, CaseIterable, Hashable {
     /// Muse Code's session directories, which the CLI's own SQLite index
     /// references and a running `muse` holds locks and sockets inside,
     /// Devin's sessions, which are rows in one database the CLI holds open,
-    /// and Mistral Vibe's session directories, which the CLI indexes, leases,
-    /// and nests sub-agent sessions inside.
+    /// Mistral Vibe's session directories, which the CLI indexes, leases,
+    /// and nests sub-agent sessions inside, and Muse's conversation cache,
+    /// which the running app rewrites and whose conversations live on Meta's
+    /// servers.
     /// The adapters fail closed with
     /// `SessionDeleteError.providerIsReadOnly`; this is the same fact
     /// stated where a UI can ask it before offering the action.
     public var supportsDeletion: Bool {
         switch self {
         case .claude, .codex, .grok, .gemini: return true
-        case .claudeCowork, .cursor, .antigravity, .grokBot, .muse, .devin, .mistralVibe: return false
+        case .claudeCowork, .cursor, .antigravity, .grokBot, .muse, .devin, .mistralVibe, .museAgent:
+            return false
         }
     }
 }
@@ -330,6 +336,8 @@ public enum SessionDeleteError: Error, Hashable, Codable, Sendable {
                 return "Devin keeps every session in one live database; remove them with devin rm."
             case .mistralVibe:
                 return "Mistral Vibe indexes and leases its own sessions; manage them from the vibe CLI."
+            case .museAgent:
+                return "Muse sessions are the app's own cloud cache; manage them in Muse."
             case .claude, .codex, .grok, .gemini:
                 return "Deleting sessions is not supported for this provider."
             }

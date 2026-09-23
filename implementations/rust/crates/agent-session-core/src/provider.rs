@@ -27,10 +27,12 @@ pub enum SessionProvider {
     Devin,
     #[serde(rename = "mistralVibe")]
     MistralVibe,
+    #[serde(rename = "museAgent")]
+    MuseAgent,
 }
 
 impl SessionProvider {
-    pub const ALL: [SessionProvider; 11] = [
+    pub const ALL: [SessionProvider; 12] = [
         SessionProvider::Claude,
         SessionProvider::ClaudeCowork,
         SessionProvider::Codex,
@@ -42,6 +44,7 @@ impl SessionProvider {
         SessionProvider::Muse,
         SessionProvider::Devin,
         SessionProvider::MistralVibe,
+        SessionProvider::MuseAgent,
     ];
 
     /// Storage raw value — identical to Swift's `rawValue`.
@@ -58,6 +61,7 @@ impl SessionProvider {
             SessionProvider::Muse => "muse",
             SessionProvider::Devin => "devin",
             SessionProvider::MistralVibe => "mistralVibe",
+            SessionProvider::MuseAgent => "museAgent",
         }
     }
 
@@ -82,6 +86,7 @@ impl SessionProvider {
             SessionProvider::Muse => "Muse Code",
             SessionProvider::Devin => "Devin",
             SessionProvider::MistralVibe => "Mistral Vibe",
+            SessionProvider::MuseAgent => "Muse",
         }
     }
 
@@ -122,6 +127,22 @@ mod tests {
             SessionProvider::MistralVibe.default_harness(),
             "Mistral Vibe"
         );
+        assert_eq!(SessionProvider::MuseAgent.raw_value(), "museAgent");
+        assert_eq!(SessionProvider::MuseAgent.default_harness(), "Muse");
+        assert_eq!(
+            serde_json::from_str::<SessionProvider>("\"museAgent\"").unwrap(),
+            SessionProvider::MuseAgent
+        );
+        // Muse (the desktop agent app) and Muse Code (the `muse` CLI) are
+        // different stores and must never collapse onto one key.
+        assert_ne!(
+            SessionProvider::Muse.raw_value(),
+            SessionProvider::MuseAgent.raw_value()
+        );
+        assert_ne!(
+            SessionProvider::Muse.default_harness(),
+            SessionProvider::MuseAgent.default_harness()
+        );
     }
 
     #[test]
@@ -134,6 +155,7 @@ mod tests {
             SessionProvider::Muse,
             SessionProvider::Devin,
             SessionProvider::MistralVibe,
+            SessionProvider::MuseAgent,
         ] {
             assert!(!provider.supports_deletion(), "{provider:?}");
         }

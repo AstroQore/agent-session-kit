@@ -761,6 +761,7 @@ impl SessionIndexReader {
             "Muse Code" => "museCode",
             "Devin" => "devin",
             "Mistral Vibe" => "mistralVibe",
+            "Muse" => "museAgent",
             raw => raw,
         }
     }
@@ -777,7 +778,8 @@ impl SessionIndexReader {
          WHEN 'grokBot' THEN 'grokBot' \
          WHEN 'muse' THEN 'museCode' \
          WHEN 'devin' THEN 'devin' \
-         WHEN 'mistralVibe' THEN 'mistralVibe' END)"
+         WHEN 'mistralVibe' THEN 'mistralVibe' \
+         WHEN 'museAgent' THEN 'museAgent' END)"
     }
 
     fn dedup_nonempty_strings(
@@ -1035,6 +1037,43 @@ mod tests {
             ("devin", SessionProvider::Devin, "devin row"),
             ("Mistral Vibe", SessionProvider::MistralVibe, "vibe row"),
             ("mistralVibe", SessionProvider::MistralVibe, "vibe row"),
+        ] {
+            let rows = reader
+                .list(&SessionListFilter {
+                    harnesses: Some(vec![harness.to_string()]),
+                    limit: 10,
+                    ..Default::default()
+                })
+                .unwrap();
+            assert_eq!(rows.len(), 1, "{harness}");
+            assert_eq!(rows[0].provider, provider);
+            assert_eq!(rows[0].title.as_deref(), Some(title));
+        }
+    }
+
+    #[test]
+    fn muse_agent_rows_stay_apart_from_muse_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_index(dir.path());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "INSERT INTO sessions(id, provider, session_id, harness, title, created_at, last_active_at, source_path) \
+             VALUES(6, 'museAgent', 'hatch-main', NULL, 'muse app row', 1700006000, 1700006000, \
+                    '/Users/example/Library/Caches/ConversationCache/hatch-main.json'); \
+             INSERT INTO sessions(id, provider, session_id, harness, title, created_at, last_active_at, source_path) \
+             VALUES(7, 'muse', '01a0ac0d-5355-7c41-bc77-3b55f0e77ea1', 'museCode', 'muse cli row', \
+                    1700007000, 1700007000, \
+                    '/Users/example/.local/share/muse/sessions/2026/01/01/01a0ac0d-5355-7c41-bc77-3b55f0e77ea1/session.jsonl');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let reader = SessionIndexReader::open(&path).unwrap();
+        for (harness, provider, title) in [
+            ("Muse", SessionProvider::MuseAgent, "muse app row"),
+            ("museAgent", SessionProvider::MuseAgent, "muse app row"),
+            ("Muse Code", SessionProvider::Muse, "muse cli row"),
+            ("museCode", SessionProvider::Muse, "muse cli row"),
         ] {
             let rows = reader
                 .list(&SessionListFilter {

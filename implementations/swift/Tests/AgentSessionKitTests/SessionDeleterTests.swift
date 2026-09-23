@@ -178,7 +178,8 @@ final class SessionDeleterTests: XCTestCase {
             .grokBot: "Library/Application Support/Grok Bot/sand-client-persistence/\(sessionID).blob",
             .muse: ".local/share/muse/sessions/2026/01/01/\(sessionID)/session.jsonl",
             .devin: ".local/share/devin/cli/sessions.db/\(sessionID)",
-            .mistralVibe: ".vibe/logs/session/session_20260101_000000_\(sessionID.prefix(8))/messages.jsonl"
+            .mistralVibe: ".vibe/logs/session/session_20260101_000000_\(sessionID.prefix(8))/messages.jsonl",
+            .museAgent: "Library/Caches/ConversationCache/hatch-main.json"
         ]
         for (provider, path) in paths {
             XCTAssertFalse(provider.supportsDeletion, "\(provider) must not be deletable")
@@ -202,7 +203,7 @@ final class SessionDeleterTests: XCTestCase {
         }
         XCTAssertEqual(
             Set(SessionProvider.allCases.filter { !$0.supportsDeletion }),
-            [.antigravity, .cursor, .claudeCowork, .grokBot, .muse, .devin, .mistralVibe]
+            [.antigravity, .cursor, .claudeCowork, .grokBot, .muse, .devin, .mistralVibe, .museAgent]
         )
     }
 
