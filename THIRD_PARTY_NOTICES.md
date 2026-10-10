@@ -3,7 +3,26 @@
 `agent-session-kit` is licensed under the GNU Affero General Public License
 v3.0 only, and has **no third-party package dependencies**. It links only
 against the platform: Foundation, Darwin, Dispatch, `os.log`, `CryptoKit`, and
-the system SQLite (`SQLite3`).
+the system SQLite (`SQLite3`). One third-party component is compiled in from
+vendored source, listed below.
+
+## Zstandard (vendored)
+
+`implementations/swift/Sources/CZstd/lib/` is an unmodified copy of the
+decompression half of **Zstandard** — `lib/zstd.h`, `lib/zstd_errors.h`,
+`lib/common/` and `lib/decompress/` — from
+[facebook/zstd](https://github.com/facebook/zstd) release **v1.5.7**
+(commit `f8745da6ff1ad1e7bab384bd1f9d742439278e99`). No compressor, no legacy
+format support, and no assembly is built (`ZSTD_DISABLE_ASM`,
+`ZSTD_LEGACY_SUPPORT=0`). It exists so that a Codex rollout the CLI has
+compressed to `.jsonl.zst` can be read; macOS ships neither a zstd library
+nor its headers.
+
+Zstandard is dual-licensed under the BSD 3-Clause License and the GNU General
+Public License v2.0; this package uses it under the **BSD 3-Clause License**,
+whose text is at `implementations/swift/Sources/CZstd/LICENSE`:
+
+> Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
 
 ## Origin
 

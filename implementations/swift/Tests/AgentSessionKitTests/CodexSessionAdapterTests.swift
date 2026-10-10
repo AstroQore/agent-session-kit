@@ -270,6 +270,40 @@ final class CodexSessionAdapterTests: XCTestCase {
         XCTAssertEqual(adapter.roots(homeDirectory: home.path).count, 2)
     }
 
+    /// Codex's `local_thread_store_compression` renames a week-old rollout
+    /// to `.jsonl.zst`. It must stay listed, keep its id, and read the same.
+    func testCompressedRolloutsAreDiscoveredAndRead() throws {
+        let directory = home.appendingPathComponent(".codex/sessions/2026/02/03", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("rollout-2026-02-03T13-58-51-\(sessionID).jsonl.zst")
+        try ZstdTestFrame.cliCompressedRollout.write(to: url)
+
+        let found = adapter.discoverSessionFiles(homeDirectory: home.path).map(SessionTestPaths.canonical)
+        XCTAssertEqual(found, [SessionTestPaths.canonical(url)])
+
+        let summary = try adapter.extractMetadata(fileURL: url)
+        XCTAssertEqual(summary.sessionID, sessionID)
+        XCTAssertEqual(summary.projectDir, "/Users/example/proj")
+        XCTAssertEqual(summary.summary, "Add the session list")
+        XCTAssertEqual(summary.sourcePath, url.path)
+        XCTAssertEqual(summary.messageCount, 3)
+        XCTAssertEqual(summary.sizeBytes, Int64(ZstdTestFrame.cliCompressedRollout.count), "size is the on-disk size")
+
+        let document = try adapter.parseTranscript(fileURL: url, range: nil)
+        XCTAssertEqual(document.messages.map(\.text), ["Add the session list", "Working on it."])
+
+        let plan = try adapter.deletionPlan(for: summary, homeDirectory: home.path)
+        XCTAssertEqual(plan.pathsToRemove, [url.path])
+    }
+
+    func testCompressedRolloutWithMismatchedFilenameIsRefused() throws {
+        let directory = home.appendingPathComponent(".codex/sessions/2026/02/03", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("rollout-2026-02-03T13-58-51-019c2215-0f3c-7f72-89e3-92598c209590.jsonl.zst")
+        try ZstdTestFrame.cliCompressedRollout.write(to: url)
+        XCTAssertThrowsError(try adapter.extractMetadata(fileURL: url))
+    }
+
     func testDiscoveryToleratesMissingDirectories() {
         XCTAssertTrue(adapter.discoverSessionFiles(homeDirectory: home.path).isEmpty)
     }

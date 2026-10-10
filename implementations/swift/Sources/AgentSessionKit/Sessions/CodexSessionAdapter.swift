@@ -2,7 +2,9 @@ import Foundation
 
 /// Codex sessions: one JSONL rollout per thread under
 /// `~/.codex/sessions/<yyyy>/<MM>/<dd>/rollout-<stamp>-<uuid>.jsonl`,
-/// plus `~/.codex/archived_sessions`.
+/// plus `~/.codex/archived_sessions`. A rollout Codex has compressed
+/// (`.jsonl.zst`, see `CodexRolloutFile`) is listed and read the same way;
+/// its `sourcePath` is the compressed file.
 ///
 /// The rollout header (`session_meta`) carries the thread id and cwd,
 /// but not the thread's display title — Codex keeps that in its own
@@ -38,7 +40,7 @@ public struct CodexSessionAdapter: SessionProviderAdapter {
 
     public func discoverSessionFiles(homeDirectory: String) -> [URL] {
         roots(homeDirectory: homeDirectory).flatMap { root in
-            SessionParsing.collectFiles(under: root) { $0.pathExtension == "jsonl" }
+            SessionParsing.collectFiles(under: root, matching: CodexRolloutFile.isJSONL)
         }
     }
 
@@ -52,7 +54,7 @@ public struct CodexSessionAdapter: SessionProviderAdapter {
 
         let meta = head.first { $0["type"] as? String == "session_meta" }?["payload"] as? [String: Any]
         let metaID = SessionParsing.firstString(meta?["id"], meta?["thread_id"])
-        let filenameID = Self.trailingUUID(in: fileURL.deletingPathExtension().lastPathComponent)
+        let filenameID = Self.trailingUUID(in: CodexRolloutFile.stem(of: fileURL))
 
         // A rollout whose filename disagrees with its own header is not
         // a rollout we understand — refuse rather than offer a delete

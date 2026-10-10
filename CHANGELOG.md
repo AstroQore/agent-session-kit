@@ -6,6 +6,66 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-11
+
+Codex rollouts compressed by the CLI's experimental
+`local_thread_store_compression` feature (`rollout-*.jsonl.zst`) are listed,
+read, searched and deleted like plain ones. New `CZstd` target (vendored
+zstd decoder, BSD); new public reader types.
+
+### Added
+
+- **Compressed Codex rollouts.** With `[features] local_thread_store_compression
+  = true` in `~/.codex/config.toml`, every Codex start-up rewrites rollouts
+  idle for a week as `rollout-<stamp>-<uuid>.jsonl.zst` (the same JSONL,
+  zstd-framed) and removes the `.jsonl`. `CodexSessionAdapter` now discovers
+  both spellings; metadata, transcript paging, the search index and the
+  deletion plan all read through the decoder. The summary's `sourcePath` is
+  the compressed file and `sizeBytes` is its on-disk (compressed) size.
+- **`CZstd`** — the decompression half of Zstandard 1.5.7, vendored unmodified
+  as a C target (`lib/common` + `lib/decompress`, no compressor, no legacy
+  formats, no assembly). macOS ships no zstd library, so this is what makes
+  the above possible; see `THIRD_PARTY_NOTICES.md`.
+- **`ZstdStreamDecoder`** — streaming zstd decoder over a file: `read(upToCount:)`,
+  `skip(toOffset:)`, `offset`; throws `.truncated` for a frame the file ends
+  inside and `.corrupt(_:)` with zstd's own error name otherwise. Memory is
+  bounded by zstd's two recommended buffer sizes regardless of content size.
+- **`SessionLogByteReader`** — sequential byte access that picks plain
+  `FileHandle` or the zstd decoder from the `.zst` suffix: `read(upToCount:)`,
+  `seek(toOffset:)` (decompressed offsets; forward decodes and discards,
+  backward restarts), `isCompressed`, `contents(of:)`. `JSONLLineScanner` and
+  `JSONLHeadTail` read through it, so every adapter inherits compressed
+  support; hosts with their own offset-aware readers should too — a turn's
+  byte offset recorded against the `.jsonl` is still right after Codex
+  compresses it.
+- **`CodexRolloutFile`** — the naming rules in one place: `isRollout`,
+  `isJSONL`, `isCompressed`, `stem(of:)` (drops `.jsonl` or `.jsonl.zst`) and
+  `canonicalPath(_:)` (`.jsonl.zst` → `.jsonl`). Anything a host keys on the
+  rollout path — a scan cache, a usage ledger's per-file digests — should key
+  on the canonical path, or the rename reads as a brand-new session and
+  double-counts.
+
+### Changed
+
+- `JSONLHeadTail.tailLines` on a compressed log is one streaming pass through
+  a fixed ring of `count` lines, and `lineCountIfSmall` streams the count;
+  both stop and report nothing (`[]` / `nil`) once
+  `JSONLHeadTail.compressedReadBudget` (32 MiB) of decompressed bytes have
+  gone by, so metadata extraction stays bounded however large the
+  transcript. For such a rollout `lastActiveAt` falls back to the file's
+  modification date and the model to the head window.
+- `JSONLLineScanner.scanLines(in:while:)` — the same walk, stopping as
+  soon as the body returns `false`.
+
+### Not yet
+
+- The Rust lane (`agent-session-core`) still discovers and reads only plain
+  `.jsonl` rollouts; compressed ones are invisible to it until it grows a zstd
+  decoder of its own. Nothing in `contracts/` changed.
+- `AgentSessionLive`'s Codex tailer deliberately ignores `.jsonl.zst`: a
+  rollout Codex compresses is one nobody has written to for a week, so it is
+  never live.
+
 ## [0.11.0] - 2026-09-23
 
 Meta's Muse app (muse.ai's Mac client) joins the session list as a read-only
