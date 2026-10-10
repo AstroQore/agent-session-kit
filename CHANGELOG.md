@@ -47,9 +47,15 @@ zstd decoder, BSD); new public reader types.
 
 ### Changed
 
-- `JSONLHeadTail.tailLines` on a compressed log is one streaming pass that
-  keeps only the last `count` lines; `lineCountIfSmall` bounds by the on-disk
-  size, so a compressed log is counted while its archive is small.
+- `JSONLHeadTail.tailLines` on a compressed log is one streaming pass through
+  a fixed ring of `count` lines, and `lineCountIfSmall` streams the count;
+  both stop and report nothing (`[]` / `nil`) once
+  `JSONLHeadTail.compressedReadBudget` (32 MiB) of decompressed bytes have
+  gone by, so metadata extraction stays bounded however large the
+  transcript. For such a rollout `lastActiveAt` falls back to the file's
+  modification date and the model to the head window.
+- `JSONLLineScanner.scanLines(in:while:)` — the same walk, stopping as
+  soon as the body returns `false`.
 
 ### Not yet
 

@@ -23,6 +23,14 @@ public enum JSONLLineScanner {
     ///   rather than the number of lines they saw.
     @discardableResult
     public static func forEachLine(in file: URL, _ body: (Data) -> Void) -> Bool {
+        scanLines(in: file, while: { line in body(line); return true })
+    }
+
+    /// `forEachLine`, continuing while `body` returns `true`. Stopping
+    /// early still counts as a completed walk: `true` means the file opened
+    /// and every byte up to the stop was read without error.
+    @discardableResult
+    public static func scanLines(in file: URL, while body: (Data) -> Bool) -> Bool {
         guard let handle = SessionLogByteReader(url: file) else { return false }
         defer { handle.close() }
 
@@ -43,8 +51,8 @@ public enum JSONLLineScanner {
                 var i = lineStart
                 while i < end {
                     if buffer[i] == 0x0A {
-                        if i > lineStart {
-                            body(Data(buffer[lineStart..<i]))
+                        if i > lineStart, !body(Data(buffer[lineStart..<i])) {
+                            return true
                         }
                         lineStart = i + 1
                     }
@@ -58,7 +66,7 @@ public enum JSONLLineScanner {
             if lineStart < buffer.count {
                 let tail = Data(buffer[lineStart..<buffer.count])
                 if !tail.isEmpty {
-                    body(tail)
+                    _ = body(tail)
                 }
             }
             return true

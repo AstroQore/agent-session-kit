@@ -142,6 +142,46 @@ final class SessionLogByteReaderTests: XCTestCase {
         XCTAssertNil(JSONLHeadTail.lineCountIfSmall(url: url, maxBytes: 16), "the on-disk bound still applies")
     }
 
+    func testCompressedTailAndCountGiveUpPastTheDecodeBudget() throws {
+        let lines = (0..<2_000).map { #"{"i":\#($0),"pad":"\#(String(repeating: "q", count: 200))"}"# }
+        let url = file("budgeted.jsonl.zst")
+        try ZstdTestFrame.write(Data((lines.joined(separator: "\n") + "\n").utf8), to: url)
+
+        XCTAssertEqual(
+            JSONLHeadTail.streamedTailLines(url: url, count: 2, budget: 1 << 30).map { String(decoding: $0, as: UTF8.self) },
+            Array(lines.suffix(2))
+        )
+        XCTAssertEqual(JSONLHeadTail.streamedTailLines(url: url, count: 2, budget: 4_096), [],
+                       "a tail that needs more than the budget is empty, not partial")
+        XCTAssertEqual(JSONLHeadTail.streamedLineCount(url: url, budget: 1 << 30), 2_000)
+        XCTAssertNil(JSONLHeadTail.streamedLineCount(url: url, budget: 4_096))
+    }
+
+    func testStreamedTailRingHandlesCountsAroundTheLineTotal() throws {
+        let lines = (0..<7).map { #"{"i":\#($0)}"# }
+        let url = file("ring.jsonl.zst")
+        try ZstdTestFrame.write(Data((lines.joined(separator: "\n") + "\n").utf8), to: url)
+        for count in [1, 3, 7, 8, 50] {
+            XCTAssertEqual(
+                JSONLHeadTail.tailLines(url: url, count: count).map { String(decoding: $0, as: UTF8.self) },
+                Array(lines.suffix(count)),
+                "count \(count)"
+            )
+        }
+    }
+
+    func testLineScannerStopsWhenAskedAndStillReportsCompletion() throws {
+        let url = file("stop.jsonl")
+        try Data("a\nb\nc\n".utf8).write(to: url)
+        var seen: [String] = []
+        let completed = JSONLLineScanner.scanLines(in: url, while: { line in
+            seen.append(String(decoding: line, as: UTF8.self))
+            return seen.count < 2
+        })
+        XCTAssertTrue(completed)
+        XCTAssertEqual(seen, ["a", "b"])
+    }
+
     func testHeadLinesHonoursByteBudgetOnCompressedLogs() throws {
         let lines = (0..<50).map { #"{"i":\#($0),"pad":"\#(String(repeating: "p", count: 100))"}"# }
         let url = file("budget.jsonl.zst")

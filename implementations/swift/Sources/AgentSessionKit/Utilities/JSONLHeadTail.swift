@@ -15,10 +15,21 @@ import Foundation
 ///
 /// A zstd-compressed log (`.jsonl.zst`) has no seekable tail, so its
 /// last lines come from one streaming pass that keeps only the final
-/// `count` lines in memory; `fileSize` stays the on-disk (compressed) size.
+/// `count` lines in memory and gives up — returning nothing — once
+/// `compressedReadBudget` decompressed bytes have gone by, so metadata
+/// extraction stays bounded for a transcript of any size. `fileSize`
+/// stays the on-disk (compressed) size.
 public enum JSONLHeadTail {
     /// Files at or below this size are read whole.
     public static let wholeFileThreshold: Int64 = 16 * 1024
+
+    /// Most decompressed bytes a tail or line-count pass over a compressed
+    /// log will decode before giving up. A tail that needs more is reported
+    /// as empty and a count as unknown; callers already fall back (to the
+    /// file's modification date, to the "not counted" sentinel). 32 MiB
+    /// decodes in well under a second and covers all but the largest
+    /// rollouts; past that, bounded work matters more than the last line.
+    public static let compressedReadBudget: Int64 = 32 * 1024 * 1024
 
     private static let chunkSize = 16 * 1024
 
@@ -128,17 +139,28 @@ public enum JSONLHeadTail {
         return segments
     }
 
-    /// Last `count` non-empty lines of a compressed log: one pass, holding
-    /// only a ring of the most recent lines. Memory is bounded by those
-    /// lines plus one read chunk, not by the decompressed size.
-    private static func streamedTailLines(url: URL, count: Int) -> [Data] {
-        var ring: [Data] = []
-        ring.reserveCapacity(count + 1)
-        let completed = JSONLLineScanner.forEachLine(in: url) { line in
-            ring.append(line)
-            if ring.count > count { ring.removeFirst() }
-        }
-        return completed ? ring : []
+    /// Last `count` non-empty lines of a compressed log: one pass through
+    /// a fixed ring of `count` slots, so the walk stays O(lines) whatever
+    /// `count` is, and memory is those lines plus one read chunk. Empty when
+    /// the log does not end within `compressedReadBudget` decompressed
+    /// bytes or the stream cannot be read to its end.
+    static func streamedTailLines(url: URL, count: Int, budget: Int64 = compressedReadBudget) -> [Data] {
+        var ring = [Data](repeating: Data(), count: count)
+        var next = 0
+        var stored = 0
+        var decoded: Int64 = 0
+        var overBudget = false
+        let completed = JSONLLineScanner.scanLines(in: url, while: { line in
+            decoded += Int64(line.count) + 1
+            if decoded > budget { overBudget = true; return false }
+            ring[next] = line
+            next = (next + 1) % count
+            if stored < count { stored += 1 }
+            return true
+        })
+        guard completed, !overBudget else { return [] }
+        let start = stored < count ? 0 : next
+        return (0..<stored).map { ring[(start + $0) % count] }
     }
 
     /// Non-empty line count, but only for files small enough that a
@@ -146,11 +168,15 @@ public enum JSONLHeadTail {
     /// callers can record a "not counted" sentinel instead of paying
     /// for a full scan during metadata extraction. The bound is the
     /// on-disk size, so a compressed log is counted while its archive is
-    /// small, which is the same cost ceiling in bytes read.
+    /// small; its decoded output is counted as it streams and capped at
+    /// `compressedReadBudget`, since a small archive can expand a lot.
     public static func lineCountIfSmall(url: URL, maxBytes: Int64 = wholeFileThreshold) -> Int? {
         let size = fileSize(url)
         guard size >= 0, size <= maxBytes else { return nil }
-        guard let data = SessionLogByteReader.contents(of: url) else { return nil }
+        if SessionLogByteReader.isCompressedName(url.lastPathComponent) {
+            return streamedLineCount(url: url, budget: compressedReadBudget)
+        }
+        guard let data = try? Data(contentsOf: url) else { return nil }
         var count = 0
         var segmentLength = 0
         for byte in data {
@@ -163,6 +189,21 @@ public enum JSONLHeadTail {
         }
         if segmentLength > 0 { count += 1 }
         return count
+    }
+
+    /// Non-empty lines of a compressed log, streamed; `nil` past `budget`
+    /// decompressed bytes or when the stream cannot be read to its end.
+    static func streamedLineCount(url: URL, budget: Int64) -> Int? {
+        var count = 0
+        var decoded: Int64 = 0
+        var overBudget = false
+        let completed = JSONLLineScanner.scanLines(in: url, while: { line in
+            decoded += Int64(line.count) + 1
+            if decoded > budget { overBudget = true; return false }
+            count += 1
+            return true
+        })
+        return completed && !overBudget ? count : nil
     }
 
     public static func fileSize(_ url: URL) -> Int64 {
