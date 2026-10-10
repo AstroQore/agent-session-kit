@@ -6,6 +6,9 @@ import Foundation
 /// than splitting the file in memory. Session logs reach hundreds of
 /// megabytes, and the naive `String(contentsOf:).split(separator: "\n")`
 /// is both quadratic in allocation and holds the entire file resident.
+///
+/// Bytes come through `SessionLogByteReader`, so a zstd-compressed log
+/// (`.jsonl.zst`) walks exactly like a plain one.
 public enum JSONLLineScanner {
     /// Bytes read per `read(upToCount:)`. Also the compaction threshold:
     /// the scratch buffer only shifts once a full chunk has been consumed.
@@ -20,8 +23,8 @@ public enum JSONLLineScanner {
     ///   rather than the number of lines they saw.
     @discardableResult
     public static func forEachLine(in file: URL, _ body: (Data) -> Void) -> Bool {
-        guard let handle = try? FileHandle(forReadingFrom: file) else { return false }
-        defer { try? handle.close() }
+        guard let handle = SessionLogByteReader(url: file) else { return false }
+        defer { handle.close() }
 
         // Linear-time JSONL scan via [UInt8]: walks a single moving cursor
         // and only compacts when the consumed prefix exceeds one chunk. We

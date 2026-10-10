@@ -15,12 +15,31 @@ let package = Package(
     // consumer's git URL, exact pin, and `import AgentSessionKit` are
     // unchanged by the layout.
     targets: [
+        // Zstandard decoder, vendored. Codex compresses rollouts it has not
+        // touched for a week into `.jsonl.zst` once
+        // `local_thread_store_compression` is on, and macOS ships no zstd
+        // library or headers, so the decompression half of zstd 1.5.7
+        // (`lib/common` + `lib/decompress`, unmodified) is compiled in.
+        // No compressor, no legacy formats, no assembly: every build is
+        // the same portable C.
+        .target(
+            name: "CZstd",
+            path: "implementations/swift/Sources/CZstd",
+            exclude: ["LICENSE"],
+            cSettings: [
+                .define("ZSTD_DISABLE_ASM"),
+                .define("ZSTD_LEGACY_SUPPORT", to: "0"),
+                .define("ZSTD_LIB_DEPRECATED", to: "0"),
+                .define("XXH_NAMESPACE", to: "ZSTD_")
+            ]
+        ),
         // Discovery, parsing, indexing, and the MCP transport. Extracted
         // from Vibe Bar, where this code grew up inside the app target;
         // it is still on the Swift 5 language mode because the adapters
         // were written against it. Migrating is its own change.
         .target(
             name: "AgentSessionKit",
+            dependencies: ["CZstd"],
             path: "implementations/swift/Sources/AgentSessionKit",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),

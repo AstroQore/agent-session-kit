@@ -11,7 +11,9 @@ layout, its own idea of a "session id", and its own way of spelling a
 timestamp. This repository hides all of that behind one adapter protocol, a
 searchable index, and a local MCP transport.
 
-No third-party dependencies in either lane beyond the system SQLite.
+No third-party package dependencies in either lane beyond the system SQLite.
+The Swift lane compiles in zstd's decoder (vendored, BSD) so Codex's
+compressed `.jsonl.zst` rollouts read like plain ones.
 
 ```swift
 // Swift — macOS 26, Swift 6.2
@@ -82,13 +84,17 @@ session — and deliberately nothing about the **billing axis** (quotas,
 plans, prices, companies). A host that models both writes that mapping in
 its own module.
 
-There are **no third-party dependencies**: Foundation, Darwin, Dispatch,
-`os.log`, `CryptoKit`, and the system SQLite. That is a deliberate
+There are **no third-party package dependencies**: Foundation, Darwin,
+Dispatch, `os.log`, `CryptoKit`, and the system SQLite. That is a deliberate
 constraint rather than an accident — a host links this package statically
 into a signed application bundle, and every dependency here would become a
-dependency it has to audit, license, and ship. Nothing in here opens a
-network socket, spawns a helper, or invents a path under `~/`; every entry
-point takes the home directory it should read.
+dependency it has to audit, license, and ship. The one piece of outside code
+is vendored rather than fetched: the decompression half of
+[Zstandard](https://github.com/facebook/zstd) 1.5.7 (`CZstd`, BSD-licensed,
+unmodified) so that a Codex rollout compressed to `.jsonl.zst` can be read —
+macOS ships no zstd library. Nothing in here opens a network socket, spawns a
+helper, or invents a path under `~/`; every entry point takes the home
+directory it should read.
 
 ## Supported harnesses
 

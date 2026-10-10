@@ -12,6 +12,10 @@ import Foundation
 /// Everything works on raw bytes and splits on `0x0A`, which cannot
 /// appear inside a multi-byte UTF-8 sequence, so a window boundary can
 /// never cut a scalar in half.
+///
+/// A zstd-compressed log (`.jsonl.zst`) has no seekable tail, so its
+/// last lines come from one streaming pass that keeps only the final
+/// `count` lines in memory; `fileSize` stays the on-disk (compressed) size.
 public enum JSONLHeadTail {
     /// Files at or below this size are read whole.
     public static let wholeFileThreshold: Int64 = 16 * 1024
@@ -26,8 +30,8 @@ public enum JSONLHeadTail {
     /// transcript into memory to learn a title.
     public static func headLines(url: URL, count: Int, maxBytes: Int? = nil) -> [Data] {
         guard count > 0 else { return [] }
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
-        defer { try? handle.close() }
+        guard let handle = SessionLogByteReader(url: url) else { return [] }
+        defer { handle.close() }
 
         var out: [Data] = []
         var buffer: [UInt8] = []
@@ -86,6 +90,9 @@ public enum JSONLHeadTail {
         guard count > 0 else { return [] }
         let size = fileSize(url)
         guard size > 0 else { return [] }
+        if SessionLogByteReader.isCompressedName(url.lastPathComponent) {
+            return streamedTailLines(url: url, count: count)
+        }
 
         var segments: [Data]
         if size <= wholeFileThreshold {
@@ -121,14 +128,29 @@ public enum JSONLHeadTail {
         return segments
     }
 
+    /// Last `count` non-empty lines of a compressed log: one pass, holding
+    /// only a ring of the most recent lines. Memory is bounded by those
+    /// lines plus one read chunk, not by the decompressed size.
+    private static func streamedTailLines(url: URL, count: Int) -> [Data] {
+        var ring: [Data] = []
+        ring.reserveCapacity(count + 1)
+        let completed = JSONLLineScanner.forEachLine(in: url) { line in
+            ring.append(line)
+            if ring.count > count { ring.removeFirst() }
+        }
+        return completed ? ring : []
+    }
+
     /// Non-empty line count, but only for files small enough that a
     /// whole-file read is free. Returns `nil` for anything larger so
     /// callers can record a "not counted" sentinel instead of paying
-    /// for a full scan during metadata extraction.
+    /// for a full scan during metadata extraction. The bound is the
+    /// on-disk size, so a compressed log is counted while its archive is
+    /// small, which is the same cost ceiling in bytes read.
     public static func lineCountIfSmall(url: URL, maxBytes: Int64 = wholeFileThreshold) -> Int? {
         let size = fileSize(url)
         guard size >= 0, size <= maxBytes else { return nil }
-        guard let data = try? Data(contentsOf: url) else { return nil }
+        guard let data = SessionLogByteReader.contents(of: url) else { return nil }
         var count = 0
         var segmentLength = 0
         for byte in data {
