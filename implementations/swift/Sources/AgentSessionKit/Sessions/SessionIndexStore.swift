@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import SQLite3
 
@@ -274,14 +275,17 @@ public actor SessionIndexStore {
                 .integer(Int64(summary.messageCount))
             ]
         )
-        guard let row = try scalarInt(
-            """
-            SELECT id FROM sessions
-             WHERE provider = ? AND session_id = ? AND source_path = ?
-            """,
-            [.text(summary.provider.rawValue), .text(summary.sessionID), .text(summary.sourcePath)]
-        ) else { throw SessionIndexError.statement }
+        guard let row = try sessionRowID(summary, path: summary.sourcePath) else {
+            throw SessionIndexError.statement
+        }
         return row
+    }
+
+    private func sessionRowID(_ summary: SessionSummary, path: String) throws -> Int64? {
+        try scalarInt(
+            "SELECT id FROM sessions WHERE provider = ? AND session_id = ? AND source_path = ?",
+            [.text(summary.provider.rawValue), .text(summary.sessionID), .text(path)]
+        )
     }
 
     public struct MessageExcerpt: Hashable, Sendable {
@@ -306,6 +310,8 @@ public actor SessionIndexStore {
         /// `nil` means metadata-only indexing. An empty array deliberately
         /// clears a session whose readable transcript became empty.
         public let excerpts: [MessageExcerpt]?
+        var requiresFullRefresh = false
+        var clearsPartial = false
 
         public init(
             summary: SessionSummary,
@@ -335,7 +341,7 @@ public actor SessionIndexStore {
         try execute("BEGIN IMMEDIATE")
         do {
             for entry in entries {
-                let row = try upsertSession(entry.summary)
+                let row = try upsertIndexEntry(entry)
                 if let excerpts = entry.excerpts {
                     try replaceMessagesUncommitted(sessionRow: row, excerpts: excerpts)
                 }
@@ -347,12 +353,43 @@ public actor SessionIndexStore {
                     size: entry.size,
                     sessionRow: row
                 )
+                if entry.requiresFullRefresh {
+                    try run("INSERT OR IGNORE INTO session_index_meta(key, value) VALUES(?, '1')",
+                            [.text(Self.partialPrefix + entry.pathHash)])
+                } else if entry.clearsPartial {
+                    try removePartialMarker(pathHash: entry.pathHash)
+                }
             }
             try execute("COMMIT")
         } catch {
             try? execute("ROLLBACK")
             throw error
         }
+    }
+
+    private func upsertIndexEntry(_ entry: IndexBatchEntry) throws -> Int64 {
+        let summary = entry.summary
+        guard entry.requiresFullRefresh, entry.provider == .codex,
+              CodexRolloutFile.isCompressed(URL(fileURLWithPath: entry.path)) else {
+            return try upsertSession(summary)
+        }
+
+        // A bounded archive read cannot see the activity tail. Preserve
+        // authoritative cached metadata, and on a real plain → zstd rename
+        // move the existing session row instead of showing two histories.
+        if let row = try sessionRowID(summary, path: summary.sourcePath) {
+            try run("UPDATE sessions SET size_bytes = ? WHERE id = ?", [.integer(summary.sizeBytes), .integer(row)])
+            return row
+        }
+        let plain = CodexRolloutFile.canonicalPath(summary.sourcePath)
+        if Self.missingFile(at: plain), let row = try sessionRowID(summary, path: plain) {
+            try run("UPDATE sessions SET source_path = ?, size_bytes = ? WHERE id = ?",
+                    [.text(summary.sourcePath), .integer(summary.sizeBytes), .integer(row)])
+            try run("DELETE FROM session_files WHERE path = ?", [.text(plain)])
+            try removePartialMarker(pathHash: SessionIndexService.pathHash(plain))
+            return row
+        }
+        return try upsertSession(summary)
     }
 
     /// Replace every indexed excerpt for one session. The delete trigger
@@ -413,29 +450,61 @@ public actor SessionIndexStore {
         public let mtimeNanos: Int64
         public let size: Int64
         public let sessionRow: Int64?
+        let requiresFullRefresh: Bool
 
         public init(mtimeNanos: Int64, size: Int64, sessionRow: Int64?) {
+            self.init(mtimeNanos: mtimeNanos, size: size, sessionRow: sessionRow, requiresFullRefresh: false)
+        }
+
+        init(mtimeNanos: Int64, size: Int64, sessionRow: Int64?, requiresFullRefresh: Bool) {
             self.mtimeNanos = mtimeNanos
             self.size = size
             self.sessionRow = sessionRow
+            self.requiresFullRefresh = requiresFullRefresh
         }
     }
 
+    private static let partialPrefix = "partial_metadata:"
+
+    private func removePartialMarker(pathHash: String) throws {
+        try run("DELETE FROM session_index_meta WHERE key = ?", [.text(Self.partialPrefix + pathHash)])
+    }
+
     public func fileCursor(pathHash: String) throws -> FileCursor? {
+        try fileCursors(pathHashes: [pathHash])[pathHash]
+    }
+
+    /// One lookup per index chunk. The indexer caps chunks below SQLite's
+    /// parameter limit, so each statement has a small and bounded result.
+    func fileCursors(pathHashes: [String]) throws -> [String: FileCursor] {
+        guard !pathHashes.isEmpty else { return [:] }
+        let placeholders = Array(repeating: "?", count: pathHashes.count).joined(separator: ",")
         let statement = try prepare(
-            "SELECT mtime_ns, size, session_row FROM session_files WHERE path_hash = ?"
+            """
+            SELECT f.path_hash, f.mtime_ns, f.size, f.session_row, m.key IS NOT NULL
+              FROM session_files f
+              LEFT JOIN session_index_meta m ON m.key = '\(Self.partialPrefix)' || f.path_hash
+             WHERE f.path_hash IN (\(placeholders))
+            """
         )
         defer { sqlite3_finalize(statement) }
-        bindAll([.text(pathHash)], to: statement)
-        let result = sqlite3_step(statement)
-        if result == SQLITE_DONE { return nil }
-        guard result == SQLITE_ROW else { throw SessionIndexError.statement }
-        return FileCursor(
-            mtimeNanos: sqlite3_column_int64(statement, 0),
-            size: sqlite3_column_int64(statement, 1),
-            sessionRow: sqlite3_column_type(statement, 2) == SQLITE_NULL
-                ? nil : sqlite3_column_int64(statement, 2)
-        )
+        bindAll(pathHashes.map(Binding.text), to: statement)
+        var cursors: [String: FileCursor] = [:]
+        var result = sqlite3_step(statement)
+        while result == SQLITE_ROW {
+            if let hash = columnText(statement, 0) {
+                cursors[hash] = FileCursor(
+                    mtimeNanos: sqlite3_column_int64(statement, 1),
+                    size: sqlite3_column_int64(statement, 2),
+                    sessionRow: sqlite3_column_type(statement, 3) == SQLITE_NULL
+                        ? nil : sqlite3_column_int64(statement, 3),
+                    requiresFullRefresh: sqlite3_column_int(statement, 4) != 0
+                )
+            }
+            result = sqlite3_step(statement)
+        }
+        guard result == SQLITE_DONE else { throw SessionIndexError.statement }
+        return cursors
     }
 
     public func saveFileCursor(
@@ -474,6 +543,7 @@ public actor SessionIndexStore {
             for path in paths {
                 try run("DELETE FROM sessions WHERE source_path = ?", [.text(path)])
                 try run("DELETE FROM session_files WHERE path = ?", [.text(path)])
+                try removePartialMarker(pathHash: SessionIndexService.pathHash(path))
             }
             try execute("COMMIT")
         } catch {
@@ -482,40 +552,144 @@ public actor SessionIndexStore {
         }
     }
 
+    private struct StaleFile: Sendable {
+        let hash: String
+        let cursor: FileCursor
+        let path: String
+        let provider: SessionProvider?
+    }
+
     /// Drop every file whose hash is no longer on disk, together with the
     /// session it produced. Returns how many files were pruned.
     @discardableResult
     public func pruneMissing(existingPathHashes: Set<String>) throws -> Int {
-        var stale: [(hash: String, row: Int64?)] = []
-        let statement = try prepare("SELECT path_hash, session_row FROM session_files")
-        defer { sqlite3_finalize(statement) }
-        while sqlite3_step(statement) == SQLITE_ROW {
-            guard let hash = columnText(statement, 0) else { continue }
-            guard !existingPathHashes.contains(hash) else { continue }
-            stale.append((
-                hash,
-                sqlite3_column_type(statement, 1) == SQLITE_NULL
-                    ? nil : sqlite3_column_int64(statement, 1)
-            ))
-        }
-        guard !stale.isEmpty else { return 0 }
+        try prune(staleFiles(excluding: existingPathHashes))
+    }
 
+    /// Discovery APIs can return a partial list when a store is unreadable.
+    /// Independently confirm absence before deleting any undiscovered row.
+    func pruneConfirmedMissing(
+        existingPathHashes: Set<String>,
+        providers: Set<SessionProvider>
+    ) async throws -> Int {
+        let candidates = try staleFiles(excluding: existingPathHashes).filter {
+            $0.provider.map(providers.contains) == true
+        }
+        guard !candidates.isEmpty else { return 0 }
+        let verification = Task.detached(priority: Task.currentPriority) {
+            Self.confirmMissing(candidates)
+        }
+        let confirmed = await withTaskCancellationHandler {
+            await verification.value
+        } onCancel: {
+            verification.cancel()
+        }
+        try Task.checkCancellation()
+        let deletable = try confirmed.filter { file in
+            guard file.provider == .codex, file.path.hasSuffix(".jsonl") else { return true }
+            let alternate = file.path + ".zst"
+            let hash = SessionIndexService.pathHash(alternate)
+            guard existingPathHashes.contains(hash) || !Self.missingFile(at: alternate) else { return true }
+            // The original disappeared as Codex archived it. Keep the
+            // existing index until the replacement has a usable row.
+            return try fileCursor(pathHash: hash)?.sessionRow != nil
+        }
+        return try prune(deletable, checkingCursors: true)
+    }
+
+    private func staleFiles(excluding seen: Set<String>) throws -> [StaleFile] {
+        var stale: [StaleFile] = []
+        let statement = try prepare(
+            "SELECT path_hash, session_row, path, provider, mtime_ns, size FROM session_files"
+        )
+        defer { sqlite3_finalize(statement) }
+        var result = sqlite3_step(statement)
+        while result == SQLITE_ROW {
+            if let hash = columnText(statement, 0), !seen.contains(hash),
+               let path = columnText(statement, 2) {
+                stale.append(StaleFile(
+                    hash: hash,
+                    cursor: FileCursor(
+                        mtimeNanos: sqlite3_column_int64(statement, 4),
+                        size: sqlite3_column_int64(statement, 5),
+                        sessionRow: sqlite3_column_type(statement, 1) == SQLITE_NULL
+                            ? nil : sqlite3_column_int64(statement, 1)
+                    ),
+                    path: path,
+                    provider: columnText(statement, 3).flatMap(SessionProvider.init(rawValue:))
+                ))
+            }
+            result = sqlite3_step(statement)
+        }
+        guard result == SQLITE_DONE else { throw SessionIndexError.statement }
+        return stale
+    }
+
+    private static func confirmMissing(_ candidates: [StaleFile]) -> [StaleFile] {
+        var confirmed: [StaleFile] = []
+        var databaseRows: [URL: [(file: StaleFile, id: String)]] = [:]
+        for file in candidates {
+            guard !Task.isCancelled else { return [] }
+            if file.provider == .devin {
+                if let locator = DevinSessionAdapter.locate(URL(fileURLWithPath: file.path)) {
+                    databaseRows[locator.database, default: []].append((file, locator.sessionID))
+                }
+            } else if missingFile(at: file.path) {
+                confirmed.append(file)
+            }
+        }
+        for (database, rows) in databaseRows {
+            guard !Task.isCancelled else { return [] }
+            if missingFile(at: database.path) {
+                confirmed.append(contentsOf: rows.map(\.file))
+            } else if DevinSessionAdapter.isRegularFile(database),
+                      let missing = LiveSQLiteReader.read(at: database, snapshotFallback: false, { handle in
+                          try rows.compactMap { row in
+                              try Task.checkCancellation()
+                              let session = try DevinSessionAdapter.sessionRow(handle, sessionID: row.id)
+                              return session?.isHidden == false ? nil : row.file
+                          }
+                      }) {
+                confirmed.append(contentsOf: missing)
+            }
+        }
+        return confirmed
+    }
+
+    private static func missingFile(at path: String) -> Bool {
+        var info = stat()
+        return lstat(path, &info) != 0 && errno == ENOENT
+    }
+
+    private func prune(_ stale: [StaleFile], checkingCursors: Bool = false) throws -> Int {
+        guard !stale.isEmpty else { return 0 }
+        var count = 0
         try execute("BEGIN IMMEDIATE")
         do {
             for entry in stale {
-                if let row = entry.row {
+                // Confirmation waits off-actor. Keep entries rewritten by
+                // another store caller while that verification was in flight.
+                if checkingCursors {
+                    guard let current = try fileCursor(pathHash: entry.hash),
+                          current.mtimeNanos == entry.cursor.mtimeNanos,
+                          current.size == entry.cursor.size,
+                          current.sessionRow == entry.cursor.sessionRow else { continue }
+                }
+                if let row = entry.cursor.sessionRow {
                     // Cascades through session_messages (and its FTS
                     // trigger) and through session_files.
                     try run("DELETE FROM sessions WHERE id = ?", [.integer(row)])
                 }
                 try run("DELETE FROM session_files WHERE path_hash = ?", [.text(entry.hash)])
+                try removePartialMarker(pathHash: entry.hash)
+                count += 1
             }
             try execute("COMMIT")
         } catch {
             try? execute("ROLLBACK")
             throw error
         }
-        return stale.count
+        return count
     }
 
     /// Drop every indexed excerpt, keeping the session rows. This is what
@@ -529,7 +703,15 @@ public actor SessionIndexStore {
     /// Session rows survive — they are re-upserted in place, which keeps
     /// row ids (and any UI selection keyed on them) stable.
     public func resetFileCursors() throws {
-        try run("DELETE FROM session_files", [])
+        try execute("BEGIN IMMEDIATE")
+        do {
+            try run("DELETE FROM session_files", [])
+            try run("DELETE FROM session_index_meta WHERE key GLOB ?", [.text(Self.partialPrefix + "*")])
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
     }
 
     private static let bodyIndexingKey = "body_indexing"
@@ -546,6 +728,32 @@ public actor SessionIndexStore {
         if result == SQLITE_DONE { return nil }
         guard result == SQLITE_ROW else { throw SessionIndexError.statement }
         return columnText(statement, 0) == "1"
+    }
+
+    /// Apply a mode transition atomically. Re-enabling body indexing marks
+    /// cursors stale but preserves their row mapping so a vanished source can
+    /// still be reconciled. The steady state performs no writes.
+    @discardableResult
+    public func applyBodyIndexingMode(_ enabled: Bool) throws -> Bool {
+        guard try bodyIndexingMode() != enabled else { return false }
+        try Task.checkCancellation()
+        try execute("BEGIN IMMEDIATE")
+        do {
+            if enabled {
+                try run(
+                    "UPDATE session_files SET mtime_ns = ?, size = ?",
+                    [.integer(.min), .integer(.min)]
+                )
+            } else {
+                try dropBodyIndex()
+            }
+            try setBodyIndexingMode(enabled)
+            try execute("COMMIT")
+            return true
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
     }
 
     public func setBodyIndexingMode(_ enabled: Bool) throws {

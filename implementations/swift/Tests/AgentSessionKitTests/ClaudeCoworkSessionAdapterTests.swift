@@ -109,6 +109,39 @@ final class ClaudeCoworkSessionAdapterTests: XCTestCase {
         XCTAssertEqual(adapter.discoverSessionFiles(homeDirectory: home.path).count, 1)
     }
 
+    func testCanonicalWorkspaceSkipsProjectCopiesInOutputs() throws {
+        let direct = try writeSession()
+        let workspace = projectDirectory().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let copy = workspace.appendingPathComponent("outputs/copied/.claude/projects/work", isDirectory: true)
+        try FileManager.default.createDirectory(at: copy, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: direct, to: copy.appendingPathComponent("copy.jsonl"))
+
+        let found = adapter.discoverSessionFiles(homeDirectory: home.path)
+        XCTAssertEqual(found.map(SessionTestPaths.canonical), [SessionTestPaths.canonical(direct)])
+    }
+
+    func testFallbackDiscoversNestedProjectsWithoutFollowingWorkspaceLinks() throws {
+        let workspace = projectDirectory().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let fallback = workspace.appendingPathComponent("legacy/.claude/projects/work", isDirectory: true)
+        try FileManager.default.createDirectory(at: fallback, withIntermediateDirectories: true)
+        let nested = fallback.appendingPathComponent("legacy.jsonl")
+        try "{}\n".write(to: nested, atomically: true, encoding: .utf8)
+
+        let outside = home.appendingPathComponent("outside", isDirectory: true)
+        let outsideProjects = outside.appendingPathComponent("projects", isDirectory: true)
+        try FileManager.default.createDirectory(at: outsideProjects, withIntermediateDirectories: true)
+        try "{}\n".write(to: outsideProjects.appendingPathComponent("outside.jsonl"),
+                          atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(
+            at: workspace.appendingPathComponent(".claude"), withDestinationURL: outside
+        )
+
+        let found = adapter.discoverSessionFiles(homeDirectory: home.path)
+        XCTAssertEqual(found.map(SessionTestPaths.canonical), [SessionTestPaths.canonical(nested)])
+    }
+
     /// The Cowork sweep and the cost scanner's must stay the same set, or a
     /// transcript could be billed and yet be missing from the session list.
     func testTheSweepMatchesTheCostScannersOwn() throws {

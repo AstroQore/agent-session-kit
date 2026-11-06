@@ -47,13 +47,31 @@ public struct CodexSessionAdapter: SessionProviderAdapter {
     // MARK: - Metadata
 
     public func extractMetadata(fileURL: URL) throws -> SessionSummary {
-        let head = JSONLHeadTail.headLines(url: fileURL, count: 10).compactMap(SessionParsing.json)
+        try metadata(fileURL: fileURL, headByteLimit: nil)
+    }
+
+    /// Metadata for a host that budgets plain JSONL head reads.
+    public func extractMetadata(fileURL: URL, headByteLimit: Int) throws -> SessionSummary {
+        try metadata(fileURL: fileURL, headByteLimit: headByteLimit)
+    }
+
+    private func metadata(fileURL: URL, headByteLimit: Int?) throws -> SessionSummary {
+        let fileSize = SessionParsing.fileSize(fileURL)
+        let compressedHeadOnly = headByteLimit != nil && CodexRolloutFile.isCompressed(fileURL)
+        let rawHead = JSONLHeadTail.headLines(url: fileURL, count: 10, maxBytes: headByteLimit)
+        if let headByteLimit, !compressedHeadOnly, rawHead.count < 10, fileSize >= Int64(headByteLimit) {
+            // Incomplete head metadata must not replace richer rows or make
+            // a later full refresh treat the file as already indexed.
+            throw SessionIndexReadDeferred()
+        }
+        let head = rawHead.compactMap(SessionParsing.json)
+        let meta = head.first { $0["type"] as? String == "session_meta" }?["payload"] as? [String: Any]
+        let metaID = SessionParsing.firstString(meta?["id"], meta?["thread_id"])
+        if compressedHeadOnly, metaID == nil { throw SessionIndexReadDeferred() }
         guard !head.isEmpty else {
             throw SessionParseError.unreadable(fileURL.lastPathComponent)
         }
 
-        let meta = head.first { $0["type"] as? String == "session_meta" }?["payload"] as? [String: Any]
-        let metaID = SessionParsing.firstString(meta?["id"], meta?["thread_id"])
         let filenameID = Self.trailingUUID(in: CodexRolloutFile.stem(of: fileURL))
 
         // A rollout whose filename disagrees with its own header is not
@@ -69,13 +87,15 @@ public struct CodexSessionAdapter: SessionProviderAdapter {
             throw SessionParseError.invalidFormat("\(fileURL.lastPathComponent): no session id")
         }
 
-        let tail = JSONLHeadTail.tailLines(url: fileURL, count: 30).compactMap(SessionParsing.json)
+        let tail = compressedHeadOnly ? [] :
+            JSONLHeadTail.tailLines(url: fileURL, count: 30).compactMap(SessionParsing.json)
         let createdAt = SessionParsing.firstDate(
             head.first?["timestamp"],
             meta?["timestamp"]
         ) ?? SessionParsing.creationDate(fileURL)
-        let lastActiveAt = tail.compactMap { SessionParsing.date($0["timestamp"]) }.last
-            ?? SessionParsing.modificationDate(fileURL)
+        let lastActiveAt = (compressedHeadOnly ? head : tail).compactMap {
+            SessionParsing.date($0["timestamp"])
+        }.last ?? (compressedHeadOnly ? nil : SessionParsing.modificationDate(fileURL))
 
         let prompt = firstUserText(head)
         let hydrated = hydrator.thread(for: sessionID)
@@ -100,8 +120,9 @@ public struct CodexSessionAdapter: SessionProviderAdapter {
             createdAt: createdAt,
             lastActiveAt: lastActiveAt,
             sourcePath: fileURL.path,
-            sizeBytes: SessionParsing.fileSize(fileURL),
-            messageCount: JSONLHeadTail.lineCountIfSmall(url: fileURL) ?? SessionSummary.unknownMessageCount
+            sizeBytes: fileSize,
+            messageCount: compressedHeadOnly ? SessionSummary.unknownMessageCount
+                : JSONLHeadTail.lineCountIfSmall(url: fileURL) ?? SessionSummary.unknownMessageCount
         )
     }
 

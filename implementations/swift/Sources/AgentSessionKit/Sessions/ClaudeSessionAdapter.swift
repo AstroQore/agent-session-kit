@@ -38,15 +38,24 @@ public struct ClaudeSessionAdapter: SessionProviderAdapter {
         try Self.summary(fileURL: fileURL, provider: .claude, harness: .claudeCode)
     }
 
+    /// Metadata for a host that budgets plain JSONL head reads.
+    public func extractMetadata(fileURL: URL, headByteLimit: Int) throws -> SessionSummary {
+        try Self.summary(
+            fileURL: fileURL, provider: .claude, harness: .claudeCode, headByteLimit: headByteLimit
+        )
+    }
+
     /// Shared by Claude Code and Claude Cowork: the two write the same
     /// JSONL, and only the root they live under — and therefore the harness
     /// they bill against — differs.
     static func summary(
         fileURL: URL,
         provider: SessionProvider,
-        harness: Harness
+        harness: Harness,
+        headByteLimit: Int? = nil
     ) throws -> SessionSummary {
-        let head = JSONLHeadTail.headLines(url: fileURL, count: 10).compactMap(SessionParsing.json)
+        let head = JSONLHeadTail.headLines(url: fileURL, count: 10, maxBytes: headByteLimit)
+            .compactMap(SessionParsing.json)
         let tail = JSONLHeadTail.tailLines(url: fileURL, count: 30).compactMap(SessionParsing.json)
         guard !head.isEmpty || !tail.isEmpty else {
             throw SessionParseError.unreadable(fileURL.lastPathComponent)

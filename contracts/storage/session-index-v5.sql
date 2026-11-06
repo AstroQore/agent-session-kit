@@ -6,8 +6,14 @@
 -- 5 rather than rebuilding it.
 --
 -- The index is derived data. A host may delete the file and pay a re-scan, so
--- a version bump is a re-index, never a migration. Changing anything here is
+-- a version bump is a re-index, never a migration. Changing the DDL here is
 -- therefore a coordinated change across both lanes plus a kit minor version.
+--
+-- session_index_meta values are optional Swift indexer control state. Readers
+-- may ignore all keys. The Swift writer stores `partial_metadata:<path_hash>`
+-- when a bounded pass leaves metadata to be completed by a full refresh. Rust
+-- reads the index without refreshing it and does not use these keys. Their
+-- presence adds no schema requirement or re-index step.
 
 PRAGMA user_version = 5;
 

@@ -47,6 +47,13 @@ public protocol SessionProviderAdapter: Sendable {
     /// large files and never throws on individual malformed lines.
     func extractMetadata(fileURL: URL) throws -> SessionSummary
 
+    /// A host adapter can describe its bounded metadata and transcript
+    /// reads, for example when it indexes only a fixed head of a JSONL log.
+    /// Returning nil uses the source-size estimate and normal metadata read.
+    func boundedIndexReadPlan(
+        fileURL: URL, sourceBytes: Int64, indexBodies: Bool
+    ) -> SessionIndexReadPlan?
+
     /// Full transcript, optionally sliced by message index.
     func parseTranscript(fileURL: URL, range: Range<Int>?) throws -> TranscriptDocument
 
@@ -67,6 +74,12 @@ public protocol SessionProviderAdapter: Sendable {
 }
 
 public extension SessionProviderAdapter {
+    func boundedIndexReadPlan(
+        fileURL: URL, sourceBytes: Int64, indexBodies: Bool
+    ) -> SessionIndexReadPlan? {
+        nil
+    }
+
     func parseTranscript(fileURL: URL) throws -> TranscriptDocument {
         try parseTranscript(fileURL: fileURL, range: nil)
     }

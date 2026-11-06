@@ -35,12 +35,24 @@ public struct ClaudeCoworkSessionAdapter: SessionProviderAdapter {
     // MARK: - Metadata
 
     public func extractMetadata(fileURL: URL) throws -> SessionSummary {
+        try metadata(fileURL: fileURL, headByteLimit: nil)
+    }
+
+    /// Metadata for a host that budgets plain JSONL head reads.
+    public func extractMetadata(fileURL: URL, headByteLimit: Int) throws -> SessionSummary {
+        try metadata(fileURL: fileURL, headByteLimit: headByteLimit)
+    }
+
+    private func metadata(fileURL: URL, headByteLimit: Int?) throws -> SessionSummary {
         let summary = try ClaudeSessionAdapter.summary(
             fileURL: fileURL,
             provider: .claudeCowork,
-            harness: .claudeCowork
+            harness: .claudeCowork,
+            headByteLimit: headByteLimit
         )
-        guard let project = ClaudeCoworkPaths.inferredProjectDirectory(fileURL: fileURL) else {
+        guard let project = ClaudeCoworkPaths.inferredProjectDirectory(
+            fileURL: fileURL, headByteLimit: headByteLimit
+        ) else {
             return summary
         }
         return summary.withTitle(summary.title, projectDir: project)

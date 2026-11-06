@@ -547,10 +547,37 @@ final class DevinSessionAdapterTests: XCTestCase {
         try Fixture.exec(writer, "UPDATE sessions SET title = 'Renamed later' WHERE id = '\(olderID)'")
         sqlite3_close_v2(writer)
 
-        await service.refreshIndex()
+        let candidates = summaries.map {
+            SessionIndexCandidate(provider: .devin, url: URL(fileURLWithPath: $0.sourcePath))
+        }
+        let refreshed = await service.refreshIndexCandidates(
+            candidates, budget: SessionIndexRefreshBudget(maxFiles: 4, maxBytes: 1024 * 1024, maxFileBytes: 1024 * 1024)
+        )
+        XCTAssertEqual(refreshed.written, 1)
         summaries = try await store.allSummaries()
         XCTAssertEqual(summaries.first { $0.sessionID == olderID }?.title, "Renamed later")
         XCTAssertEqual(summaries.first { $0.sessionID == sessionID }?.title, "Notes line count")
+    }
+
+    func testFullRefreshPrunesAConfirmedHiddenRow() async throws {
+        let database = try writeStore()
+        let store = try SessionIndexStore(url: home.appendingPathComponent("index/session_index.sqlite3"))
+        let service = SessionIndexService(
+            homeDirectory: home.path,
+            store: store,
+            registry: SessionProviderRegistry(adapters: [adapter]),
+            bodyIndexing: { true }
+        )
+        await service.refreshIndex()
+
+        let writer = try Fixture.open(database)
+        defer { sqlite3_close_v2(writer) }
+        try Fixture.exec(writer, "UPDATE sessions SET hidden = 1 WHERE id = '\(olderID)'")
+
+        let result = await service.refreshIndexFully()
+        XCTAssertEqual(result.pruned, 1)
+        let summaries = try await store.allSummaries()
+        XCTAssertEqual(summaries.map(\.sessionID), [sessionID])
     }
 
     // MARK: - Deletion, registry, resume

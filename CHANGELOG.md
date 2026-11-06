@@ -6,6 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-06
+
+Hosts can refresh cached sessions in bounded, resumable batches while cached
+queries stay responsive. The session-index storage contract is unchanged.
+
+### Added
+
+- Resumable Swift session index refresh batches with independent source-check,
+  parse, estimated source-byte and elapsed-time budgets. Hosts can also check
+  trusted candidate paths from the cache without enumerating the session tree,
+  and declare bounded JSONL reads for large active sessions.
+
+### Fixed
+
+- Bounded Codex archive reads keep existing session metadata. The Swift indexer
+  records partial metadata in the existing control table so a full refresh can
+  complete it without a schema change or reseeding existing indexes.
+- Cached candidate paths are checked against the adapter roots before reading.
+- Session index discovery and parsing yield to queries. Unchanged cursors skip
+  all metadata and FTS writes, and full refreshes reconcile confirmed missing
+  sources only after discovery finishes.
+- Cowork discovery scopes a canonical workspace to its own transcript tree,
+  avoiding copies of projects and output artifacts beside it.
+
 ## [0.12.0] - 2026-10-11
 
 Codex rollouts compressed by the CLI's experimental
