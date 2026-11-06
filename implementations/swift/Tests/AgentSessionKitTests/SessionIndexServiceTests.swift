@@ -435,6 +435,38 @@ final class SessionIndexServiceTests: XCTestCase {
         XCTAssertEqual(count, 1)
     }
 
+    func testResumedDiscoveryRejectsAReplacedParentDirectory() async throws {
+        let first = try write("first", to: "owned/project/a.log")
+        let second = try write("original", to: "owned/project/b.log")
+        let outside = try write("outside payload", to: "outside/b.log")
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: 10)], ofItemAtPath: first.path
+        )
+        let probe = RefreshProbe(files: [first, second])
+        probe.root = home.appendingPathComponent("owned")
+        let (service, store) = try makeProbeService(probe)
+        let budget = SessionIndexRefreshBudget(
+            maxFiles: 1, maxBytes: 1024, maxFileBytes: 512, maxChecked: 1
+        )
+        let head = await service.refreshIndexBatch(budget: budget)
+        XCTAssertEqual(head.written, 1)
+        XCTAssertTrue(head.hasMore)
+
+        let parent = second.deletingLastPathComponent()
+        try FileManager.default.moveItem(at: parent, to: home.appendingPathComponent("owned/moved"))
+        try FileManager.default.createSymbolicLink(at: parent, withDestinationURL: outside.deletingLastPathComponent())
+        let tail = await service.refreshIndexBatch(budget: budget)
+        XCTAssertTrue(tail.completedDiscovery)
+        XCTAssertEqual(tail.written, 0)
+        XCTAssertEqual(tail.parsed, 0)
+        XCTAssertEqual(probe.discoveries, 1)
+        XCTAssertEqual(probe.parses, 1)
+        let hits = try await service.search("outside payload")
+        XCTAssertTrue(hits.isEmpty)
+        let count = try await store.sessionCount()
+        XCTAssertEqual(count, 1)
+    }
+
     func testAdapterReadPlanAdmitsAnOversizeSource() async throws {
         let source = try write(String(repeating: "s", count: 4096), to: "long.log")
         let probe = RefreshProbe(files: [source])

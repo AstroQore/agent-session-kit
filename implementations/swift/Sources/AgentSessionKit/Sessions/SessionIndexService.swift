@@ -113,17 +113,16 @@ public actor SessionIndexService {
         let adapter: any SessionProviderAdapter
         let url: URL
         let hash: String
-        let candidateRoots: [[String]]?
+        let rootPaths: [[String]]
 
-        init(adapter: any SessionProviderAdapter, url: URL, candidateRoots: [[String]]? = nil) {
+        init(adapter: any SessionProviderAdapter, url: URL, rootPaths: [[String]]) {
             self.adapter = adapter
             self.url = url
             self.hash = SessionIndexService.pathHash(url.path)
-            self.candidateRoots = candidateRoots
+            self.rootPaths = rootPaths
         }
 
         func canRead() -> Bool {
-            guard let candidateRoots else { return true }
             guard url.isFileURL, !url.pathComponents.contains("..") else { return false }
             let physical: URL
             if adapter.provider == .devin {
@@ -133,7 +132,7 @@ public actor SessionIndexService {
                 physical = url
             }
             let components = SessionIndexService.pathComponents(physical)
-            guard candidateRoots.contains(where: {
+            guard rootPaths.contains(where: {
                 components.count > $0.count && components.starts(with: $0)
             }) else { return false }
 
@@ -291,7 +290,7 @@ public actor SessionIndexService {
                     let paths = roots[candidate.provider] ?? adapter.roots(homeDirectory: home)
                         .map(Self.pathComponents)
                     roots[candidate.provider] = paths
-                    return Source(adapter: adapter, url: candidate.url, candidateRoots: paths)
+                    return Source(adapter: adapter, url: candidate.url, rootPaths: paths)
                 }
             }
             var next = 0
@@ -436,6 +435,7 @@ public actor SessionIndexService {
         var sources: [(source: Source, mtime: Int64)] = []
         for adapter in registry.adapters {
             guard !Task.isCancelled else { break }
+            let roots = adapter.roots(homeDirectory: home).map(Self.pathComponents)
             for url in adapter.discoverSessionFiles(homeDirectory: home) {
                 guard !Task.isCancelled else { break }
                 // Virtual locators retain their adapter's existing order.
@@ -447,7 +447,7 @@ public actor SessionIndexService {
                 } else {
                     mtime = .min
                 }
-                sources.append((Source(adapter: adapter, url: url), mtime))
+                sources.append((Source(adapter: adapter, url: url, rootPaths: roots), mtime))
             }
         }
         if newestFirst { sources.sort { $0.mtime > $1.mtime } }
