@@ -1,3 +1,4 @@
+import SQLite3
 import XCTest
 @testable import AgentSessionKit
 
@@ -113,6 +114,40 @@ final class CodexSessionAdapterTests: XCTestCase {
         XCTAssertEqual(summary.lastActiveAt,
                        ISO8601DateFormatter.kitTest.date(from: "2026-02-03T05:59:09.000Z"))
         XCTAssertEqual(summary.messageCount, rolloutLines.count)
+    }
+
+    func testBoundedMetadataDefersInsteadOfOverwritingACompleteHeader() async throws {
+        let instructions = String(repeating: "x", count: 300 * 1024)
+        let header = autoReviewMetaLine(parentSessionID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+            .replacingOccurrences(of: "\"model_provider\":\"openai\"",
+                                  with: "\"base_instructions\":\"\(instructions)\",\"model_provider\":\"openai\"")
+        let lines = [header, turnContextLine(model: "fixture-model"), userMessageLine("Find the active session")]
+        let url = try writeRollout(lines: lines)
+
+        XCTAssertThrowsError(try adapter.extractMetadata(fileURL: url, headByteLimit: 256 * 1024)) {
+            XCTAssertTrue($0 is SessionIndexReadDeferred)
+        }
+        let (service, store) = try makeIndex()
+        await service.refreshIndex()
+        let initial = try await store.allSummaries()
+        let original = try XCTUnwrap(initial.first)
+        XCTAssertEqual(original.projectDir, "/Users/example/proj")
+        XCTAssertNotNil(original.providerVariant)
+
+        _ = try writeRollout(lines: lines + [userMessageLine("Append after a large header", timestamp: "2026-02-03T06:00:00.000Z")])
+        let locator = URL(fileURLWithPath: original.sourcePath)
+        let result = await service.refreshIndexCandidates([.init(provider: .codex, url: locator)], budget: Self.budget)
+        XCTAssertEqual(result.deferred, 1)
+        XCTAssertEqual(result.written, 0)
+        XCTAssertEqual(result.parsed, 0)
+        let unchanged = try await store.allSummaries()
+        XCTAssertEqual(unchanged, initial)
+
+        let full = await service.refreshIndexFully()
+        XCTAssertEqual(full.written, 1)
+        let updated = try await store.allSummaries()
+        XCTAssertEqual(updated.first?.lastActiveAt, ISO8601DateFormatter.kitTest.date(from: "2026-02-03T06:00:00.000Z"))
+        XCTAssertEqual(updated.first?.providerVariant, original.providerVariant)
     }
 
     // MARK: - Harness
@@ -296,6 +331,147 @@ final class CodexSessionAdapterTests: XCTestCase {
         XCTAssertEqual(plan.pathsToRemove, [url.path])
     }
 
+    func testIndexMigratesAnArchiveAndFullRefreshCompletesPartialMetadata() async throws {
+        let parent = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        let lines = [autoReviewMetaLine(parentSessionID: parent)] + rolloutLines.dropFirst()
+        let plain = try writeRollout(lines: lines)
+        let (service, store) = try makeIndex()
+        await service.refreshIndex()
+        let summaries = try await store.allSummaries()
+        let prior = try XCTUnwrap(summaries.first)
+        XCTAssertEqual(prior.providerVariant, CodexSessionAdapter.autoReviewVariantPrefix + parent)
+        let priorCursor = try await store.fileCursor(pathHash: SessionIndexService.pathHash(prior.sourcePath))
+
+        let archive = plain.appendingPathExtension("zst")
+        try ZstdTestFrame.write(try Data(contentsOf: plain), to: archive)
+        let bothPaths = await service.refreshIndexBatch(budget: Self.budget)
+        XCTAssertEqual(bothPaths.written, 0)
+        XCTAssertEqual(bothPaths.deferred, 1)
+        let duringConversion = try await store.allSummaries()
+        XCTAssertEqual(duringConversion, summaries)
+
+        try Data("interrupted archive write".utf8).write(to: archive)
+        try FileManager.default.removeItem(at: plain)
+        let incomplete = await service.refreshIndexBatch(budget: Self.budget)
+        XCTAssertEqual(incomplete.written, 0)
+        XCTAssertEqual(incomplete.pruned, 0)
+        let retained = try await store.allSummaries()
+        XCTAssertEqual(retained, summaries)
+
+        try ZstdTestFrame.write(Data((lines.joined(separator: "\n") + "\n").utf8), to: archive)
+        let archiveTime = Date(timeIntervalSince1970: 1_800_000_000)
+        try FileManager.default.setAttributes([.modificationDate: archiveTime], ofItemAtPath: archive.path)
+
+        let converted = await service.refreshIndexBatch(budget: Self.budget)
+        XCTAssertTrue(converted.completedDiscovery)
+        XCTAssertEqual(converted.written, 1)
+        let convertedRows = try await store.allSummaries()
+        XCTAssertEqual(convertedRows.count, 1)
+        let migrated = try XCTUnwrap(convertedRows.first)
+        XCTAssertEqual(migrated.sessionID, prior.sessionID)
+        XCTAssertEqual(migrated.providerVariant, prior.providerVariant)
+        XCTAssertEqual(migrated.harness, prior.harness)
+        XCTAssertEqual(migrated.title, prior.title)
+        XCTAssertEqual(migrated.projectDir, prior.projectDir)
+        XCTAssertEqual(migrated.lastActiveAt, prior.lastActiveAt)
+        XCTAssertEqual(SessionTestPaths.canonical(URL(fileURLWithPath: migrated.sourcePath)), SessionTestPaths.canonical(archive))
+        let migratedCursor = try await store.fileCursor(pathHash: SessionIndexService.pathHash(migrated.sourcePath))
+        XCTAssertEqual(migratedCursor?.sessionRow, priorCursor?.sessionRow)
+        XCTAssertTrue(migratedCursor?.requiresFullRefresh == true)
+        let hits = try await service.search("Add the session list")
+        XCTAssertEqual(hits.first?.summary.sourcePath, migrated.sourcePath)
+
+        let candidate = SessionIndexCandidate(provider: .codex, url: URL(fileURLWithPath: migrated.sourcePath))
+        let idle = await service.refreshIndexCandidates([candidate], budget: Self.budget)
+        XCTAssertEqual(idle.written, 0)
+        XCTAssertEqual(idle.parsed, 0)
+
+        let full = await service.refreshIndexFully()
+        XCTAssertEqual(full.written, 1)
+        let completeCursor = try await store.fileCursor(pathHash: SessionIndexService.pathHash(migrated.sourcePath))
+        XCTAssertFalse(completeCursor?.requiresFullRefresh == true)
+        let secondFull = await service.refreshIndexFully()
+        XCTAssertEqual(secondFull.written, 0)
+    }
+
+    func testNewCompressedSourceUsesEventTimeAndIndexesAutomatically() async throws {
+        let plain = try writeRollout(lines: rolloutLines)
+        let archive = plain.appendingPathExtension("zst")
+        try ZstdTestFrame.write(try Data(contentsOf: plain), to: archive)
+        try FileManager.default.removeItem(at: plain)
+        let archiveTime = Date(timeIntervalSince1970: 1_800_000_000)
+        try FileManager.default.setAttributes([.modificationDate: archiveTime], ofItemAtPath: archive.path)
+        let (service, store) = try makeIndex()
+        let indexed = await service.refreshIndexBatch(budget: Self.budget)
+        XCTAssertEqual(indexed.written, 1)
+        let rows = try await store.allSummaries()
+        XCTAssertEqual(rows.map(\.sessionID), [sessionID])
+        XCTAssertEqual(rows.first?.lastActiveAt,
+                       ISO8601DateFormatter.kitTest.date(from: "2026-02-03T05:59:09.000Z"))
+    }
+
+    func testDeletingOrResettingIndexEntriesClearsPartialMarkers() async throws {
+        let plain = try writeRollout(lines: rolloutLines)
+        let archive = plain.appendingPathExtension("zst")
+        try ZstdTestFrame.write(try Data(contentsOf: plain), to: archive)
+        try FileManager.default.removeItem(at: plain)
+        let (service, store) = try makeIndex()
+
+        _ = await service.refreshIndexBatch(budget: Self.budget)
+        XCTAssertEqual(try partialMarkerCount(), 1)
+        try await store.resetFileCursors()
+        XCTAssertEqual(try partialMarkerCount(), 0)
+
+        _ = await service.refreshIndexBatch(budget: Self.budget)
+        let rows = try await store.allSummaries()
+        XCTAssertEqual(try partialMarkerCount(), 1)
+        try await store.removeSessions(sourcePathIn: rows.map(\.sourcePath))
+        XCTAssertEqual(try partialMarkerCount(), 0)
+
+        _ = await service.refreshIndexBatch(budget: Self.budget)
+        XCTAssertEqual(try partialMarkerCount(), 1)
+        try await store.eraseAll()
+        XCTAssertEqual(try partialMarkerCount(), 0)
+
+        _ = await service.refreshIndexBatch(budget: Self.budget)
+        XCTAssertEqual(try partialMarkerCount(), 1)
+        try FileManager.default.removeItem(at: archive)
+        let pruned = await service.refreshIndexBatch(budget: Self.budget)
+        XCTAssertEqual(pruned.pruned, 1)
+        XCTAssertEqual(try partialMarkerCount(), 0)
+    }
+
+    private func partialMarkerCount() throws -> Int {
+        var database: OpaquePointer?
+        let path = home.appendingPathComponent("test-index.sqlite").path
+        guard sqlite3_open_v2(path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        defer { sqlite3_close_v2(database) }
+        var statement: OpaquePointer?
+        let sql = "SELECT COUNT(*) FROM session_index_meta WHERE key GLOB 'partial_metadata:*'"
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { throw CocoaError(.fileReadUnknown) }
+        return Int(sqlite3_column_int(statement, 0))
+    }
+
+    private static let budget = SessionIndexRefreshBudget(
+        maxFiles: 2, maxBytes: 16 * 1024 * 1024, maxFileBytes: 9 * 1024 * 1024
+    )
+
+    private func makeIndex() throws -> (SessionIndexService, SessionIndexStore) {
+        let store = try SessionIndexStore(url: home.appendingPathComponent("test-index.sqlite"))
+        let service = SessionIndexService(
+            homeDirectory: home.path, store: store,
+            registry: SessionProviderRegistry(adapters: [FixtureIndexAdapter(inner: adapter)]),
+            bodyIndexing: { true }
+        )
+        return (service, store)
+    }
+
     func testCompressedRolloutWithMismatchedFilenameIsRefused() throws {
         let directory = home.appendingPathComponent(".codex/sessions/2026/02/03", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -375,5 +551,30 @@ enum JSONFixture {
         text.removeFirst()
         text.removeLast()
         return text
+    }
+}
+
+/// The test archives are small. Production adapters also limit the
+/// decoded transcript; this fixture exercises metadata and cursor routing.
+private struct FixtureIndexAdapter: SessionProviderAdapter {
+    let inner: CodexSessionAdapter
+    var provider: SessionProvider { inner.provider }
+
+    func roots(homeDirectory: String) -> [URL] { inner.roots(homeDirectory: homeDirectory) }
+    func discoverSessionFiles(homeDirectory: String) -> [URL] { inner.discoverSessionFiles(homeDirectory: homeDirectory) }
+    func extractMetadata(fileURL: URL) throws -> SessionSummary { try inner.extractMetadata(fileURL: fileURL) }
+
+    func boundedIndexReadPlan(fileURL: URL, sourceBytes: Int64, indexBodies: Bool) -> SessionIndexReadPlan? {
+        SessionIndexReadPlan(estimatedBytes: 512 * 1024, requiresFullRefresh: CodexRolloutFile.isCompressed(fileURL)) {
+            try inner.extractMetadata(fileURL: fileURL, headByteLimit: 256 * 1024)
+        }
+    }
+
+    func parseTranscript(fileURL: URL, range: Range<Int>?) throws -> TranscriptDocument {
+        try inner.parseTranscript(fileURL: fileURL, range: range)
+    }
+
+    func deletionPlan(for summary: SessionSummary, homeDirectory: String) throws -> SessionDeletionPlan {
+        try inner.deletionPlan(for: summary, homeDirectory: homeDirectory)
     }
 }

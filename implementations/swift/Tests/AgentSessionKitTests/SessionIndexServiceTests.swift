@@ -295,7 +295,11 @@ final class SessionIndexServiceTests: XCTestCase {
         XCTAssertGreaterThan(indexed, 0)
 
         enabled.value = false
-        await service.refreshIndex()
+        let modeChange = await service.refreshIndexCandidates([], budget: Self.budget)
+        XCTAssertTrue(modeChange.modeChanged)
+        XCTAssertEqual(modeChange.written, 0)
+        let unchanged = await service.refreshIndexCandidates([], budget: Self.budget)
+        XCTAssertFalse(unchanged.modeChanged)
 
         let dropped = try await store.messageCount()
         let sessions = try await store.sessionCount()
@@ -336,6 +340,288 @@ final class SessionIndexServiceTests: XCTestCase {
         let summaries = try await store.allSummaries()
         XCTAssertEqual(summaries.map(\.provider), [.claude])
         XCTAssertEqual(summaries.first?.sessionID, claudeID)
+    }
+
+    func testNoOpCandidateCheckLeavesSQLiteAndParsersUntouched() async throws {
+        let first = try write("original first", to: "a.log")
+        let second = try write("original second", to: "b.log")
+        let probe = RefreshProbe(files: [first, second])
+        let (service, _) = try makeProbeService(probe)
+        await service.refreshIndex()
+
+        var reader: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(databaseURL.path, &reader, SQLITE_OPEN_READONLY, nil), SQLITE_OK)
+        defer { sqlite3_close_v2(reader) }
+        let version = try databaseVersion(reader)
+
+        let candidates = [first, second].map { SessionIndexCandidate(provider: .claude, url: $0) }
+        let noOp = await service.refreshIndexCandidates(candidates, budget: Self.budget)
+        XCTAssertEqual(noOp.checked, 2)
+        XCTAssertEqual(noOp.changed, 0)
+        XCTAssertEqual(noOp.parsed, 0)
+        XCTAssertEqual(noOp.written, 0)
+        XCTAssertEqual(noOp.bytes, 0)
+        XCTAssertFalse(noOp.hasMore)
+        let idle = await service.refreshIndexBatch(budget: Self.budget)
+        XCTAssertTrue(idle.completedDiscovery)
+        XCTAssertEqual(idle.written, 0)
+        XCTAssertEqual(probe.parses, 2)
+        XCTAssertEqual(try databaseVersion(reader), version)
+
+        _ = try write("updated second body", to: "b.log")
+        let updated = await service.refreshIndexCandidates(candidates, budget: Self.budget)
+        XCTAssertEqual(updated.checked, 2)
+        XCTAssertEqual(updated.changed, 1)
+        XCTAssertEqual(updated.parsed, 1)
+        XCTAssertEqual(updated.written, 1)
+        XCTAssertEqual(updated.bytes, 19)
+        XCTAssertEqual(probe.parses, 3)
+        let hits = try await service.search("updated second")
+        XCTAssertEqual(hits.map(\.summary.sourcePath), [second.path])
+    }
+
+    func testCandidateOffsetResumesUnderByteBudgetAndOversizeIsDeferred() async throws {
+        let first = try write("first!", to: "a.log")
+        let second = try write("second", to: "b.log")
+        let large = try write("oversized transcript", to: "c.log")
+        let probe = RefreshProbe(files: [first, second, large])
+        let (service, _) = try makeProbeService(probe)
+        let budget = SessionIndexRefreshBudget(maxFiles: 2, maxBytes: 10, maxFileBytes: 8, maxChecked: 2)
+        let candidates = [first, second, large].map { SessionIndexCandidate(provider: .claude, url: $0) }
+
+        let head = await service.refreshIndexCandidates(candidates, budget: budget)
+        XCTAssertTrue(head.hasMore)
+        XCTAssertEqual(head.nextCandidateOffset, 1)
+        XCTAssertEqual(head.bytes, 6)
+        XCTAssertEqual(head.written, 1)
+
+        let tail = await service.refreshIndexCandidates(candidates, budget: budget, offset: head.nextCandidateOffset)
+        XCTAssertFalse(tail.hasMore)
+        XCTAssertFalse(tail.completedDiscovery)
+        XCTAssertEqual(tail.nextCandidateOffset, 3)
+        XCTAssertEqual(tail.deferred, 1)
+        XCTAssertEqual(tail.parsed, 1)
+        XCTAssertEqual(tail.bytes, 6)
+        XCTAssertEqual(probe.discoveries, 0)
+
+        let full = await service.refreshIndexFully()
+        XCTAssertTrue(full.completedDiscovery)
+        XCTAssertEqual(full.written, 1)
+        XCTAssertEqual(probe.parses, 3)
+    }
+
+    func testCandidateRecheckRejectsAReplacedParentDirectoryAndAnOutsidePath() async throws {
+        let tracked = try write("original", to: "owned/project/active.log")
+        let outside = try write("outside payload", to: "outside/active.log")
+        let probe = RefreshProbe(files: [tracked])
+        probe.root = home.appendingPathComponent("owned")
+        let (service, store) = try makeProbeService(probe)
+        await service.refreshIndex()
+
+        let parent = tracked.deletingLastPathComponent()
+        try FileManager.default.moveItem(at: parent, to: home.appendingPathComponent("owned/moved"))
+        try FileManager.default.createSymbolicLink(at: parent, withDestinationURL: outside.deletingLastPathComponent())
+        let result = await service.refreshIndexCandidates(
+            [tracked, outside].map { SessionIndexCandidate(provider: .claude, url: $0) },
+            budget: Self.budget
+        )
+        XCTAssertEqual(result.checked, 2)
+        XCTAssertEqual(result.written, 0)
+        XCTAssertEqual(result.parsed, 0)
+        XCTAssertEqual(probe.parses, 1)
+        let hits = try await service.search("outside payload")
+        XCTAssertTrue(hits.isEmpty)
+        let count = try await store.sessionCount()
+        XCTAssertEqual(count, 1)
+    }
+
+    func testResumedDiscoveryRejectsAReplacedParentDirectory() async throws {
+        let first = try write("first", to: "owned/project/a.log")
+        let second = try write("original", to: "owned/project/b.log")
+        let outside = try write("outside payload", to: "outside/b.log")
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: 10)], ofItemAtPath: first.path
+        )
+        let probe = RefreshProbe(files: [first, second])
+        probe.root = home.appendingPathComponent("owned")
+        let (service, store) = try makeProbeService(probe)
+        let budget = SessionIndexRefreshBudget(
+            maxFiles: 1, maxBytes: 1024, maxFileBytes: 512, maxChecked: 1
+        )
+        let head = await service.refreshIndexBatch(budget: budget)
+        XCTAssertEqual(head.written, 1)
+        XCTAssertTrue(head.hasMore)
+
+        let parent = second.deletingLastPathComponent()
+        try FileManager.default.moveItem(at: parent, to: home.appendingPathComponent("owned/moved"))
+        try FileManager.default.createSymbolicLink(at: parent, withDestinationURL: outside.deletingLastPathComponent())
+        let tail = await service.refreshIndexBatch(budget: budget)
+        XCTAssertTrue(tail.completedDiscovery)
+        XCTAssertEqual(tail.written, 0)
+        XCTAssertEqual(tail.parsed, 0)
+        XCTAssertEqual(probe.discoveries, 1)
+        XCTAssertEqual(probe.parses, 1)
+        let hits = try await service.search("outside payload")
+        XCTAssertTrue(hits.isEmpty)
+        let count = try await store.sessionCount()
+        XCTAssertEqual(count, 1)
+    }
+
+    func testAdapterReadPlanAdmitsAnOversizeSource() async throws {
+        let source = try write(String(repeating: "s", count: 4096), to: "long.log")
+        let probe = RefreshProbe(files: [source])
+        probe.indexReadBytes = 7
+        let (service, _) = try makeProbeService(probe)
+
+        let indexed = await service.refreshIndexBatch(budget: Self.budget)
+        XCTAssertEqual(indexed.bytes, 7)
+        XCTAssertEqual(indexed.parsed, 1)
+        XCTAssertEqual(indexed.written, 1)
+        XCTAssertEqual(indexed.deferred, 0)
+        let page = try await service.summaryPage()
+        XCTAssertEqual(page.summaries.first?.title, "Bounded metadata")
+    }
+
+    func testDiscoveryResumesAndPruneRequiresConfirmedAbsence() async throws {
+        let omitted = try write("omitted but present", to: "a.log")
+        let deleted = try write("physically deleted", to: "b.log")
+        let probe = RefreshProbe(files: [omitted, deleted])
+        let (service, store) = try makeProbeService(probe)
+        await service.refreshIndex()
+        try FileManager.default.removeItem(at: deleted)
+        let third = try write("third", to: "c.log")
+        let fourth = try write("fourth", to: "d.log")
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 10)], ofItemAtPath: third.path)
+        probe.files = [fourth, third]
+
+        let budget = SessionIndexRefreshBudget(maxFiles: 1, maxBytes: 100, maxFileBytes: 100, maxChecked: 1)
+        let candidate = SessionIndexCandidate(provider: .claude, url: third)
+        let targeted = await service.refreshIndexCandidates([candidate], budget: budget)
+        XCTAssertEqual(targeted.pruned, 0)
+
+        let head = await service.refreshIndexBatch(budget: budget)
+        XCTAssertTrue(head.hasMore)
+        XCTAssertFalse(head.completedDiscovery)
+        XCTAssertEqual(head.pruned, 0)
+        let midCount = try await store.sessionCount()
+        XCTAssertEqual(midCount, 3)
+
+        let tail = await service.refreshIndexBatch(budget: budget)
+        XCTAssertFalse(tail.hasMore)
+        XCTAssertTrue(tail.completedDiscovery)
+        XCTAssertEqual(tail.written, 1)
+        XCTAssertEqual(tail.pruned, 1)
+        XCTAssertEqual(probe.discoveries, 2)
+        let remaining = try await service.allSummaries()
+        XCTAssertEqual(Set(remaining.map(\.sourcePath)), [omitted.path, third.path, fourth.path])
+    }
+
+    func testCancellationKeepsOldRowsAndResumesWithoutDiscovery() async throws {
+        let old = try write("old session", to: "old.log")
+        let new = try write("new session", to: "new.log")
+        let probe = RefreshProbe(files: [old])
+        let (service, store) = try makeProbeService(probe)
+        await service.refreshIndex()
+        try FileManager.default.removeItem(at: old)
+        probe.files = [new]
+
+        let started = expectation(description: "transcript parse started")
+        let gate = DispatchSemaphore(value: 0)
+        probe.onParse = { _ in
+            started.fulfill()
+            _ = gate.wait(timeout: .now() + 5)
+        }
+        let task = Task { await service.refreshIndexBatch(budget: Self.budget) }
+        await fulfillment(of: [started], timeout: 2)
+        task.cancel()
+        gate.signal()
+        let cancelled = await task.value
+        XCTAssertTrue(cancelled.cancelled)
+        XCTAssertTrue(cancelled.hasMore)
+        XCTAssertFalse(cancelled.completedDiscovery)
+        XCTAssertEqual(cancelled.written, 0)
+        XCTAssertEqual(cancelled.pruned, 0)
+        let before = try await store.allSummaries()
+        XCTAssertEqual(before.map(\.sourcePath), [old.path])
+
+        probe.onParse = nil
+        let resumed = await service.refreshIndexBatch(budget: Self.budget)
+        XCTAssertTrue(resumed.completedDiscovery)
+        XCTAssertEqual(resumed.written, 1)
+        XCTAssertEqual(resumed.pruned, 1)
+        XCTAssertEqual(probe.discoveries, 2)
+    }
+
+    func testConcurrentReadAndRefreshDoNotWaitForSlowDiscovery() async throws {
+        let source = try write("cached row", to: "cached.log")
+        let probe = RefreshProbe(files: [source])
+        let (service, _) = try makeProbeService(probe)
+        await service.refreshIndex()
+
+        let discoveryStarted = expectation(description: "discovery started")
+        let readFinished = expectation(description: "cached page read")
+        let gate = DispatchSemaphore(value: 0)
+        probe.onDiscover = {
+            discoveryStarted.fulfill()
+            _ = gate.wait(timeout: .now() + 5)
+        }
+
+        let task = Task { await service.refreshIndexBatch(budget: Self.budget) }
+        await fulfillment(of: [discoveryStarted], timeout: 2)
+        let read = Task {
+            let rows = try await service.summaryPage()
+            readFinished.fulfill()
+            return rows.totalCount
+        }
+        await fulfillment(of: [readFinished], timeout: 2)
+        let competing = await service.refreshIndexBatch(budget: Self.budget)
+        XCTAssertTrue(competing.busy)
+        gate.signal()
+        _ = await task.value
+        let count = try await read.value
+        XCTAssertEqual(count, 1)
+        XCTAssertEqual(probe.discoveries, 2)
+    }
+
+    func testSourceChangedDuringParsingIsRetried() async throws {
+        let source = try write("before", to: "live.log")
+        let probe = RefreshProbe(files: [source])
+        let (service, _) = try makeProbeService(probe)
+        probe.onParse = { url in
+            try? "after mutation".write(to: url, atomically: true, encoding: .utf8)
+        }
+
+        let mixed = await service.refreshIndexBatch(budget: Self.budget)
+        XCTAssertEqual(mixed.parsed, 1)
+        XCTAssertEqual(mixed.written, 0)
+        probe.onParse = nil
+        let stable = await service.refreshIndexBatch(budget: Self.budget)
+        XCTAssertEqual(stable.written, 1)
+        let hits = try await service.search("after mutation")
+        XCTAssertEqual(hits.map(\.summary.sourcePath), [source.path])
+    }
+
+    private static let budget = SessionIndexRefreshBudget(maxFiles: 8, maxBytes: 1024, maxFileBytes: 512)
+
+    private func makeProbeService(_ probe: RefreshProbe) throws -> (SessionIndexService, SessionIndexStore) {
+        let store = try SessionIndexStore(url: databaseURL)
+        let service = SessionIndexService(
+            homeDirectory: home.path,
+            store: store,
+            registry: SessionProviderRegistry(adapters: [ProbeAdapter(probe: probe)]),
+            bodyIndexing: { true }
+        )
+        return (service, store)
+    }
+
+    private func databaseVersion(_ reader: OpaquePointer?) throws -> Int {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(reader, "PRAGMA data_version", -1, &statement, nil) == SQLITE_OK else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { throw CocoaError(.fileReadUnknown) }
+        return Int(sqlite3_column_int(statement, 0))
     }
 
     // MARK: - Excerpt policy
@@ -424,5 +710,72 @@ private final class SwitchBox: @unchecked Sendable {
             storage = newValue
             lock.unlock()
         }
+    }
+}
+
+private struct ProbeAdapter: SessionProviderAdapter {
+    let provider: SessionProvider = .claude
+    let probe: RefreshProbe
+
+    func roots(homeDirectory: String) -> [URL] { [probe.root ?? URL(fileURLWithPath: homeDirectory)] }
+
+    func discoverSessionFiles(homeDirectory: String) -> [URL] {
+        probe.discover()
+    }
+
+    func extractMetadata(fileURL: URL) throws -> SessionSummary {
+        SessionSummary(provider: provider, sessionID: fileURL.lastPathComponent, sourcePath: fileURL.path)
+    }
+
+    func boundedIndexReadPlan(
+        fileURL: URL, sourceBytes: Int64, indexBodies: Bool
+    ) -> SessionIndexReadPlan? {
+        probe.indexReadBytes.map { bytes in
+            SessionIndexReadPlan(estimatedBytes: bytes) {
+                SessionSummary(
+                    provider: provider, sessionID: fileURL.lastPathComponent,
+                    title: "Bounded metadata", sourcePath: fileURL.path
+                )
+            }
+        }
+    }
+
+    func parseTranscript(fileURL: URL, range: Range<Int>?) throws -> TranscriptDocument {
+        probe.parse(fileURL)
+        let text = try String(contentsOf: fileURL, encoding: .utf8)
+        return TranscriptDocument(
+            messages: [SessionMessage(seq: 0, role: .user, text: text, timestamp: nil)],
+            totalMessageCount: 1, truncated: false
+        )
+    }
+
+    func deletionPlan(for summary: SessionSummary, homeDirectory: String) throws -> SessionDeletionPlan {
+        throw SessionParseError.invalidFormat("Probe fixture")
+    }
+}
+
+private final class RefreshProbe: @unchecked Sendable {
+    // Tests configure hooks between refreshes, or before launching one.
+    var files: [URL]
+    var root: URL?
+    var onDiscover: (@Sendable () -> Void)?
+    var onParse: (@Sendable (URL) -> Void)?
+    var indexReadBytes: Int64?
+    private(set) var discoveries = 0
+    private(set) var parses = 0
+
+    init(files: [URL]) {
+        self.files = files
+    }
+
+    func discover() -> [URL] {
+        discoveries += 1
+        onDiscover?()
+        return files
+    }
+
+    func parse(_ url: URL) {
+        parses += 1
+        onParse?(url)
     }
 }

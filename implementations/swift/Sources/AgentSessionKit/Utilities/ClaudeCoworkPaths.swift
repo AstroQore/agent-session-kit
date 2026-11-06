@@ -40,15 +40,32 @@ public enum ClaudeCoworkPaths {
     /// app stores in that workspace. Symlinks are refused because they could
     /// resolve anywhere.
     public static func collectJSONL(under root: URL) -> [URL] {
-        guard FileManager.default.fileExists(atPath: root.path) else { return [] }
+        guard isRealDirectory(root) else { return [] }
+        return collectJSONL(under: root, findWorkspaces: root.lastPathComponent == directoryName)
+    }
+
+    private static func collectJSONL(under root: URL, findWorkspaces: Bool) -> [URL] {
         guard let enumerator = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
             options: []
         ) else { return [] }
         var out: [URL] = []
-        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
-            guard url.path.contains("/.claude/projects/") else { continue }
+        for case let url as URL in enumerator {
+            if findWorkspaces, enumerator.level == 3, url.lastPathComponent.hasPrefix("local_"),
+               let projects = workspaceProjects(in: url) {
+                let transcripts = collectJSONL(under: projects, findWorkspaces: false)
+                if !transcripts.isEmpty {
+                    // The canonical workspace's transcripts live in its
+                    // direct project tree. Avoid walking outputs, copies of
+                    // user projects and other app artifacts beside it.
+                    out.append(contentsOf: transcripts)
+                    enumerator.skipDescendants()
+                    continue
+                }
+            }
+            // Unrecognized layouts still use the recursive discovery rule.
+            guard url.pathExtension == "jsonl", url.path.contains("/.claude/projects/") else { continue }
             let values = try? url.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey])
             if values?.isSymbolicLink == true { continue }
             if values?.isRegularFile == false { continue }
@@ -57,14 +74,31 @@ public enum ClaudeCoworkPaths {
         return out
     }
 
+    private static func workspaceProjects(in workspace: URL) -> URL? {
+        let claude = workspace.appendingPathComponent(".claude", isDirectory: true)
+        let projects = claude.appendingPathComponent("projects", isDirectory: true)
+        guard [workspace, claude, projects].allSatisfy(isRealDirectory) else { return nil }
+        return projects
+    }
+
+    private static func isRealDirectory(_ url: URL) -> Bool {
+        let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        return values?.isDirectory == true && values?.isSymbolicLink == false
+    }
+
     /// Cowork deliberately runs Claude Code inside an isolated `outputs`
     /// directory, so the JSONL `cwd` is not the folder the user asked it to
     /// work on. Structured tool inputs retain the original absolute file
     /// paths, however. A bounded head window is enough to recover their
     /// common directory without scanning a large completed transcript.
     public static func inferredProjectDirectory(fileURL: URL) -> String? {
+        inferredProjectDirectory(fileURL: fileURL, headByteLimit: nil)
+    }
+
+    static func inferredProjectDirectory(fileURL: URL, headByteLimit: Int?) -> String? {
         let workspace = workspaceRoot(containing: fileURL)
-        let lines = JSONLHeadTail.headLines(url: fileURL, count: 40).compactMap(SessionParsing.json)
+        let lines = JSONLHeadTail.headLines(url: fileURL, count: 40, maxBytes: headByteLimit)
+            .compactMap(SessionParsing.json)
         var paths: [URL] = []
         for line in lines {
             collectStructuredPaths(in: line, into: &paths)

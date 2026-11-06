@@ -107,7 +107,7 @@ public enum JSONLHeadTail {
 
         var segments: [Data]
         if size <= wholeFileThreshold {
-            guard let whole = try? Data(contentsOf: url) else { return [] }
+            guard let whole = readPrefix(url, size: Int(size)) else { return [] }
             segments = splitLines(whole)
         } else {
             guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
@@ -118,7 +118,7 @@ public enum JSONLHeadTail {
             var read: Data?
             do {
                 try handle.seek(toOffset: probe)
-                read = try handle.readToEnd()
+                read = try handle.read(upToCount: Int(wholeFileThreshold) + 1)
             } catch {
                 return []
             }
@@ -176,7 +176,8 @@ public enum JSONLHeadTail {
         if SessionLogByteReader.isCompressedName(url.lastPathComponent) {
             return streamedLineCount(url: url, budget: compressedReadBudget)
         }
-        guard let data = try? Data(contentsOf: url) else { return nil }
+        if size == 0 { return 0 }
+        guard let data = readPrefix(url, size: Int(size)) else { return nil }
         var count = 0
         var segmentLength = 0
         for byte in data {
@@ -189,6 +190,12 @@ public enum JSONLHeadTail {
         }
         if segmentLength > 0 { count += 1 }
         return count
+    }
+
+    private static func readPrefix(_ url: URL, size: Int) -> Data? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        return try? handle.read(upToCount: size)
     }
 
     /// Non-empty lines of a compressed log, streamed; `nil` past `budget`
